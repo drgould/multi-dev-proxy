@@ -60,10 +60,43 @@ func runStart(cmd *cobra.Command, args []string) error {
 	inj := inject.New()
 	prx.SetModifyResponse(inj.ModifyResponse)
 
+	addr := fmt.Sprintf("%s:%d", host, port)
+	srv := &http.Server{Addr: addr, Handler: nil}
+
 	mux := http.NewServeMux()
 	mux.HandleFunc("GET /__mdp/health", api.HealthHandler(reg))
 	mux.HandleFunc("GET /__mdp/servers", api.ServersHandler(reg))
-	mux.HandleFunc("POST /__mdp/register", api.RegisterHandler(reg))
+	tlsUpgrade := func(certPath, keyPath string) {
+		if useTLS {
+			return
+		}
+		slog.Info("received TLS certs from upstream, upgrading to HTTPS", "cert", certPath, "key", keyPath)
+		useTLS = true
+		prx = proxy.NewProxy(reg, port, true)
+		inj2 := inject.New()
+		prx.SetModifyResponse(inj2.ModifyResponse)
+		mux.Handle("/", prx)
+
+		go func() {
+			ctx, cancel := context.WithTimeout(context.Background(), 2*time.Second)
+			defer cancel()
+			srv.Shutdown(ctx)
+
+			newSrv := &http.Server{Addr: addr, Handler: mux}
+			cert, err := tls.LoadX509KeyPair(certPath, keyPath)
+			if err != nil {
+				slog.Error("failed to load forwarded TLS certs", "err", err)
+				return
+			}
+			newSrv.TLSConfig = &tls.Config{Certificates: []tls.Certificate{cert}}
+			slog.Info("proxy restarted with HTTPS", "addr", fmt.Sprintf("https://%s", addr))
+			srv = newSrv
+			if err := newSrv.ListenAndServeTLS("", ""); err != nil && err != http.ErrServerClosed {
+				slog.Error("HTTPS server error", "err", err)
+			}
+		}()
+	}
+	mux.HandleFunc("POST /__mdp/register", api.RegisterHandler(reg, tlsUpgrade))
 	mux.HandleFunc("DELETE /__mdp/register/{name}", api.DeregisterHandler(reg))
 	mux.HandleFunc("POST /__mdp/switch/{name}", api.SwitchHandler(reg))
 	mux.HandleFunc("GET /__mdp/switch", ui.SwitchPageHandler(reg))
@@ -74,8 +107,7 @@ func runStart(cmd *cobra.Command, args []string) error {
 	defer prunerCancel()
 	registry.StartPruner(prunerCtx, reg, 10*time.Second, process.IsProcessAlive)
 
-	addr := fmt.Sprintf("%s:%d", host, port)
-	srv := &http.Server{Addr: addr, Handler: mux}
+	srv.Handler = mux
 
 	proto := "http"
 	if useTLS {

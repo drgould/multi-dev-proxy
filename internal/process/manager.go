@@ -18,6 +18,9 @@ type RunOpts struct {
 	ProxyURL     string
 	ServerName   string
 	AssignedPort int
+	Scheme       string // "http" or "https" — auto-detected or from --tls-cert
+	TLSCertPath  string // forwarded to proxy for dynamic TLS upgrade
+	TLSKeyPath   string // forwarded to proxy for dynamic TLS upgrade
 	ProxyTimeout time.Duration
 }
 
@@ -47,7 +50,7 @@ func (m *Manager) Run(ctx context.Context, args []string, opts RunOpts) (int, er
 	slog.Info("started process", "pid", pid, "port", opts.AssignedPort, "name", opts.ServerName)
 
 	if opts.ProxyURL != "" && opts.ServerName != "" {
-		if err := registerWithProxy(opts.ProxyURL, opts.ServerName, opts.AssignedPort, pid, opts.ProxyTimeout); err != nil {
+		if err := registerWithProxy(opts.ProxyURL, opts, pid, opts.ProxyTimeout); err != nil {
 			slog.Warn("failed to register with proxy", "err", err)
 		} else {
 			slog.Info("registered with proxy", "name", opts.ServerName, "port", opts.AssignedPort)
@@ -86,8 +89,18 @@ func (m *Manager) Run(ctx context.Context, args []string, opts RunOpts) (int, er
 	return -1, exitErr
 }
 
-func registerWithProxy(proxyURL, name string, port, pid int, timeout time.Duration) error {
-	body, _ := json.Marshal(map[string]any{"name": name, "port": port, "pid": pid})
+func registerWithProxy(proxyURL string, opts RunOpts, pid int, timeout time.Duration) error {
+	payload := map[string]any{"name": opts.ServerName, "port": opts.AssignedPort, "pid": pid}
+	if opts.Scheme != "" {
+		payload["scheme"] = opts.Scheme
+	}
+	if opts.TLSCertPath != "" {
+		payload["tlsCertPath"] = opts.TLSCertPath
+	}
+	if opts.TLSKeyPath != "" {
+		payload["tlsKeyPath"] = opts.TLSKeyPath
+	}
+	body, _ := json.Marshal(payload)
 	ctx, cancel := context.WithTimeout(context.Background(), timeout)
 	defer cancel()
 	req, _ := http.NewRequestWithContext(ctx, http.MethodPost, proxyURL+"/__mdp/register", bytes.NewReader(body))

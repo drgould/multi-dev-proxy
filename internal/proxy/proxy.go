@@ -1,6 +1,7 @@
 package proxy
 
 import (
+	"crypto/tls"
 	"fmt"
 	"log/slog"
 	"net/http"
@@ -29,9 +30,13 @@ func NewProxy(reg *registry.Registry, listenPort int, listenTLS bool) *Proxy {
 		listenPort: listenPort,
 		listenTLS:  listenTLS,
 	}
+	// Skip TLS verification for upstream connections (localhost self-signed certs)
 	p.rp = &httputil.ReverseProxy{
 		Rewrite:       p.rewrite,
 		FlushInterval: -1, // required for SSE / streaming
+		Transport: &http.Transport{
+			TLSClientConfig: &tls.Config{InsecureSkipVerify: true},
+		},
 		ModifyResponse: func(resp *http.Response) error {
 			if resp.Request != nil {
 				p.rewriteLocationByHost(resp, resp.Request.URL.Host)
@@ -69,9 +74,13 @@ func (p *Proxy) rewrite(r *httputil.ProxyRequest) {
 		return
 	}
 
+	scheme := result.Entry.Scheme
+	if scheme == "" {
+		scheme = "http"
+	}
 	// Always connect via 127.0.0.1 (not localhost — may resolve to IPv6)
 	target := &url.URL{
-		Scheme: "http",
+		Scheme: scheme,
 		Host:   fmt.Sprintf("127.0.0.1:%d", result.Entry.Port),
 	}
 	r.SetURL(target)

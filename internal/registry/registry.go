@@ -12,6 +12,9 @@ type ServerEntry struct {
 	Repo         string
 	Port         int
 	PID          int
+	Scheme       string // "http" or "https"; defaults to "http"
+	TLSCertPath  string // optional: cert file path forwarded by mdp run
+	TLSKeyPath   string // optional: key file path forwarded by mdp run
 	RegisteredAt time.Time
 }
 

@@ -21,11 +21,18 @@ type serverEntryJSON struct {
 
 // registerBody is the expected JSON body for POST /__mdp/register.
 type registerBody struct {
-	Name string `json:"name"`
-	Port int    `json:"port"`
-	PID  int    `json:"pid"`
-	Repo string `json:"repo"`
+	Name        string `json:"name"`
+	Port        int    `json:"port"`
+	PID         int    `json:"pid"`
+	Repo        string `json:"repo"`
+	Scheme      string `json:"scheme"`
+	TLSCertPath string `json:"tlsCertPath"`
+	TLSKeyPath  string `json:"tlsKeyPath"`
 }
+
+// TLSUpgradeFunc is called when a server registers with TLS cert paths.
+// The proxy can use this to dynamically upgrade to HTTPS.
+type TLSUpgradeFunc func(certPath, keyPath string)
 
 func writeJSON(w http.ResponseWriter, status int, v any) {
 	w.Header().Set("Content-Type", "application/json")
@@ -69,7 +76,7 @@ func ServersHandler(reg *registry.Registry) http.HandlerFunc {
 }
 
 // RegisterHandler handles POST /__mdp/register
-func RegisterHandler(reg *registry.Registry) http.HandlerFunc {
+func RegisterHandler(reg *registry.Registry, onTLSUpgrade ...TLSUpgradeFunc) http.HandlerFunc {
 	return func(w http.ResponseWriter, r *http.Request) {
 		if r.Method != http.MethodPost {
 			writeJSON(w, http.StatusMethodNotAllowed, map[string]string{"error": "method not allowed"})
@@ -92,15 +99,25 @@ func RegisterHandler(reg *registry.Registry) http.HandlerFunc {
 				repo = body.Name
 			}
 		}
+		scheme := body.Scheme
+		if scheme == "" {
+			scheme = "http"
+		}
 		entry := &registry.ServerEntry{
-			Name: body.Name,
-			Repo: repo,
-			Port: body.Port,
-			PID:  body.PID,
+			Name:        body.Name,
+			Repo:        repo,
+			Port:        body.Port,
+			PID:         body.PID,
+			Scheme:      scheme,
+			TLSCertPath: body.TLSCertPath,
+			TLSKeyPath:  body.TLSKeyPath,
 		}
 		if err := reg.Register(entry); err != nil {
 			writeJSON(w, http.StatusBadRequest, map[string]string{"error": err.Error()})
 			return
+		}
+		if body.TLSCertPath != "" && body.TLSKeyPath != "" && len(onTLSUpgrade) > 0 && onTLSUpgrade[0] != nil {
+			onTLSUpgrade[0](body.TLSCertPath, body.TLSKeyPath)
 		}
 		writeJSON(w, http.StatusOK, map[string]bool{"ok": true})
 	}

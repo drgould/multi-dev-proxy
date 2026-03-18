@@ -8,6 +8,8 @@ import (
 	"os"
 	"os/exec"
 	"os/signal"
+	"path/filepath"
+	"strings"
 	"syscall"
 	"time"
 
@@ -31,6 +33,9 @@ func init() {
 	runCmd.Flags().String("repo", "", "Repository name override")
 	runCmd.Flags().String("name", "", "Server name override (default: repo/branch)")
 	runCmd.Flags().String("port-range", "10000-60000", "Range of ports for proxied services")
+	runCmd.Flags().String("tls-cert", "", "TLS certificate file (forwarded to proxy for HTTPS)")
+	runCmd.Flags().String("tls-key", "", "TLS key file (forwarded to proxy for HTTPS)")
+	runCmd.Flags().Bool("auto-tls", false, "Auto-detect TLS certs from mkcert")
 }
 
 func runRun(cmd *cobra.Command, args []string) error {
@@ -42,6 +47,19 @@ func runRun(cmd *cobra.Command, args []string) error {
 	repoOverride, _ := cmd.Flags().GetString("repo")
 	nameOverride, _ := cmd.Flags().GetString("name")
 	portRangeStr, _ := cmd.Flags().GetString("port-range")
+	tlsCert, _ := cmd.Flags().GetString("tls-cert")
+	tlsKey, _ := cmd.Flags().GetString("tls-key")
+	autoTLS, _ := cmd.Flags().GetBool("auto-tls")
+
+	if autoTLS && tlsCert == "" {
+		tlsCert, tlsKey = detectMkcertCerts()
+		if tlsCert != "" {
+			slog.Info("auto-detected mkcert certs", "cert", tlsCert, "key", tlsKey)
+		}
+	}
+	if (tlsCert != "") != (tlsKey != "") {
+		return fmt.Errorf("both --tls-cert and --tls-key are required")
+	}
 
 	if envPort := os.Getenv("MDP_PROXY_PORT"); envPort != "" && !cmd.Flags().Changed("proxy-port") {
 		fmt.Sscanf(envPort, "%d", &proxyPort)
@@ -78,12 +96,20 @@ func runRun(cmd *cobra.Command, args []string) error {
 		return fmt.Errorf("find free port: %w", err)
 	}
 
+	scheme := "http"
+	if tlsCert != "" {
+		scheme = "https"
+	}
+
 	mgr := process.New()
 	ctx := context.Background()
 	opts := process.RunOpts{
 		ProxyURL:     proxyURL,
 		ServerName:   serverName,
 		AssignedPort: assignedPort,
+		Scheme:       scheme,
+		TLSCertPath:  tlsCert,
+		TLSKeyPath:   tlsKey,
 		ProxyTimeout: 3 * time.Second,
 	}
 
@@ -105,6 +131,29 @@ func isProxyRunning(proxyURL string) bool {
 	}
 	resp.Body.Close()
 	return resp.StatusCode == http.StatusOK
+}
+
+func detectMkcertCerts() (string, string) {
+	out, err := exec.Command("mkcert", "-CAROOT").Output()
+	if err != nil {
+		return "", ""
+	}
+	caRoot := strings.TrimSpace(string(out))
+	if caRoot == "" {
+		return "", ""
+	}
+	certPath := filepath.Join(caRoot, "localhost.pem")
+	keyPath := filepath.Join(caRoot, "localhost-key.pem")
+	if _, err := os.Stat(certPath); err != nil {
+		certPath = filepath.Join(caRoot, "rootCA.pem")
+		if _, err := os.Stat(certPath); err != nil {
+			return "", ""
+		}
+	}
+	if _, err := os.Stat(keyPath); err != nil {
+		return "", ""
+	}
+	return certPath, keyPath
 }
 
 func runSolo(args []string) error {
