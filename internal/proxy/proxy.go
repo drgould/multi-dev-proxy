@@ -32,6 +32,12 @@ func NewProxy(reg *registry.Registry, listenPort int, listenTLS bool) *Proxy {
 	p.rp = &httputil.ReverseProxy{
 		Rewrite:       p.rewrite,
 		FlushInterval: -1, // required for SSE / streaming
+		ModifyResponse: func(resp *http.Response) error {
+			if resp.Request != nil {
+				p.rewriteLocationByHost(resp, resp.Request.URL.Host)
+			}
+			return nil
+		},
 		ErrorHandler: func(w http.ResponseWriter, r *http.Request, err error) {
 			slog.Error("proxy error", "url", r.URL.String(), "err", err)
 			http.Error(w, fmt.Sprintf("upstream unreachable: %v", err), http.StatusBadGateway)
@@ -41,8 +47,17 @@ func NewProxy(reg *registry.Registry, listenPort int, listenTLS bool) *Proxy {
 }
 
 // SetModifyResponse wires an external ModifyResponse hook (e.g. HTML injection).
+// It chains after the built-in Location header rewriting.
 func (p *Proxy) SetModifyResponse(fn func(*http.Response) error) {
-	p.rp.ModifyResponse = fn
+	p.rp.ModifyResponse = func(resp *http.Response) error {
+		if resp.Request != nil {
+			p.rewriteLocationByHost(resp, resp.Request.URL.Host)
+		}
+		if fn != nil {
+			return fn(resp)
+		}
+		return nil
+	}
 }
 
 // rewrite is the Rewrite function for httputil.ReverseProxy.
@@ -85,33 +100,22 @@ func (p *Proxy) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	// Wrap ModifyResponse to also rewrite Location headers
-	upstreamPort := result.Entry.Port
-	origModify := p.rp.ModifyResponse
-	p.rp.ModifyResponse = func(resp *http.Response) error {
-		p.rewriteLocation(resp, upstreamPort)
-		if origModify != nil {
-			return origModify(resp)
-		}
-		return nil
-	}
 	p.rp.ServeHTTP(w, r)
-	p.rp.ModifyResponse = origModify
 }
 
-// rewriteLocation rewrites upstream Location headers to point to the proxy.
-func (p *Proxy) rewriteLocation(resp *http.Response, upstreamPort int) {
+// rewriteLocationByHost rewrites upstream Location headers to point to the proxy.
+// host is the upstream host:port (e.g. "127.0.0.1:4001").
+func (p *Proxy) rewriteLocationByHost(resp *http.Response, host string) {
 	loc := resp.Header.Get("Location")
 	if loc == "" {
 		return
 	}
-	upstream := fmt.Sprintf("127.0.0.1:%d", upstreamPort)
 	proto := "http"
 	if p.listenTLS {
 		proto = "https"
 	}
 	proxyAddr := fmt.Sprintf("localhost:%d", p.listenPort)
-	loc = strings.ReplaceAll(loc, "http://"+upstream, proto+"://"+proxyAddr)
-	loc = strings.ReplaceAll(loc, "https://"+upstream, proto+"://"+proxyAddr)
+	loc = strings.ReplaceAll(loc, "http://"+host, proto+"://"+proxyAddr)
+	loc = strings.ReplaceAll(loc, "https://"+host, proto+"://"+proxyAddr)
 	resp.Header.Set("Location", loc)
 }
