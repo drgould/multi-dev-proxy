@@ -1,0 +1,64 @@
+version: 2
+
+project_name: mdp
+
+before:
+  hooks:
+    - go mod tidy
+
+builds:
+  - id: mdp
+    main: ./cmd/mdp
+    binary: mdp
+    env:
+      - CGO_ENABLED=0
+    goos:
+      - linux
+      - darwin
+      - windows
+    goarch:
+      - amd64
+      - arm64
+    ldflags:
+      - -s -w
+      - -X main.version={{.Version}}
+      - -X main.commit={{.Commit}}
+
+archives:
+  - id: mdp
+    builds:
+      - mdp
+    name_template: "mdp_{{ .Os }}_{{ .Arch }}"
+    format_overrides:
+      - goos: windows
+        formats:
+          - zip
+    files:
+      - README.md
+      - LICENSE
+
+checksum:
+  name_template: "checksums.txt"
+  algorithm: sha256
+
+changelog:
+  sort: asc
+  filters:
+    exclude:
+      - "^docs:"
+      - "^test:"
+      - "^chore:"
+      - "^ci:"
+      - Merge pull request
+      - Merge branch
+
+homebrew_casks:
+  - name: mdp
+    repository:
+      owner: derekgould
+      name: homebrew-mdp
+      token: "{{ .Env.HOMEBREW_TAP_TOKEN }}"
+    homepage: "https://github.com/derekgould/multi-dev-proxy"
+    description: "Multi-dev proxy — run multiple dev servers behind one port"
+    license: "MIT"
+    skip_upload: auto

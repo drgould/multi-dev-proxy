@@ -1,0 +1,19 @@
+{
+  "name": "mdp",
+  "version": "0.1.0",
+  "description": "Multi-dev proxy — run multiple dev servers behind one port",
+  "bin": {
+    "mdp": "./bin/mdp"
+  },
+  "scripts": {
+    "postinstall": "node postinstall.js"
+  },
+  "os": ["darwin", "linux", "win32"],
+  "cpu": ["x64", "arm64"],
+  "repository": {
+    "type": "git",
+    "url": "https://github.com/derekgould/multi-dev-proxy"
+  },
+  "license": "MIT",
+  "keywords": ["dev", "proxy", "development", "multi-branch"]
+}
