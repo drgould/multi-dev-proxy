@@ -4,7 +4,9 @@ Run multiple dev servers on different branches behind a single port.
 
 ## The problem
 
-Switching branches to test a feature means killing your dev server, checking out, waiting for it to restart, and then switching back. If you're reviewing a PR while working on something else, you're constantly context-switching your entire environment. `mdp` lets you run each branch as its own server simultaneously and switch between them instantly in the browser.
+OAuth providers like Google require you to allowlist exact redirect URLs (`http://localhost:3000/callback`). When every branch runs on a different random port, auth breaks — you'd need to register every port with your provider. `mdp` solves this by putting all your dev servers behind a single stable port. One allowlisted URL works for every branch.
+
+Beyond auth, switching branches to test a feature normally means killing your dev server, checking out, waiting for it to restart, and then switching back. `mdp` lets you run each branch as its own server simultaneously and switch between them instantly in the browser — no restart, no port juggling. It works across multiple repos too, so you can proxy your frontend and API branches through the same port.
 
 ## How it works
 
@@ -43,21 +45,15 @@ curl -fsSL https://raw.githubusercontent.com/derekgould/multi-dev-proxy/main/ins
 brew install derekgould/mdp/mdp
 ```
 
+**Scoop (Windows):**
+```powershell
+scoop bucket add mdp https://github.com/derekgould/scoop-mdp
+scoop install mdp
+```
+
 **npm:**
 ```sh
 npm install -g mdp
-```
-
-**go install:**
-```sh
-go install github.com/derekgould/multi-dev-proxy/cmd/mdp@latest
-```
-
-**Build from source:**
-```sh
-git clone https://github.com/derekgould/multi-dev-proxy
-cd multi-dev-proxy
-go build -o mdp ./cmd/mdp
 ```
 
 ## Usage
@@ -220,4 +216,4 @@ git push origin v0.x.0
 
 ## License
 
-MIT. See [LICENSE](LICENSE).
+GPL-3.0. See [LICENSE](LICENSE).
