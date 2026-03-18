@@ -84,9 +84,17 @@ func RegisterHandler(reg *registry.Registry) http.HandlerFunc {
 			writeJSON(w, http.StatusBadRequest, map[string]string{"error": "name, port, and pid are required"})
 			return
 		}
+		repo := body.Repo
+		if repo == "" {
+			if idx := strings.LastIndex(body.Name, "/"); idx >= 0 {
+				repo = body.Name[:idx]
+			} else {
+				repo = body.Name
+			}
+		}
 		entry := &registry.ServerEntry{
 			Name: body.Name,
-			Repo: body.Repo,
+			Repo: repo,
 			Port: body.Port,
 			PID:  body.PID,
 		}
