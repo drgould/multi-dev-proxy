@@ -48,7 +48,12 @@ func DetectPort(reader io.Reader, timeout time.Duration) (int, error) {
 	case <-time.After(timeout):
 		return 0, fmt.Errorf("%w after %s", ErrPortNotDetected, timeout)
 	case <-done:
-		return 0, ErrPortNotDetected
+		select {
+		case port := <-result:
+			return port, nil
+		default:
+			return 0, ErrPortNotDetected
+		}
 	}
 }
 
