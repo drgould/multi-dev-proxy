@@ -7,11 +7,10 @@ import (
 	"testing"
 
 	"github.com/derekgould/multi-dev-proxy/internal/registry"
-	"github.com/derekgould/multi-dev-proxy/internal/routing"
 )
 
 func TestRenderSwitchPageEmpty(t *testing.T) {
-	html := RenderSwitchPage(nil, "")
+	html := RenderSwitchPage(nil)
 	if !strings.Contains(html, "No dev servers registered") {
 		t.Fatal("empty page should contain 'No dev servers registered'")
 	}
@@ -24,12 +23,12 @@ func TestRenderSwitchPageSingleServer(t *testing.T) {
 	servers := []*registry.ServerEntry{
 		{Name: "myrepo/main", Repo: "myrepo", Port: 3000, PID: 1234},
 	}
-	html := RenderSwitchPage(servers, "myrepo/main")
+	html := RenderSwitchPage(servers)
 	if !strings.Contains(html, "main") {
 		t.Fatal("should contain branch name 'main'")
 	}
-	if !strings.Contains(html, "Active") {
-		t.Fatal("active server should show 'Active' badge")
+	if !strings.Contains(html, "Switch") {
+		t.Fatal("should show Switch button")
 	}
 	if !strings.Contains(html, ":3000") {
 		t.Fatal("should contain port")
@@ -44,7 +43,7 @@ func TestRenderSwitchPageGrouped(t *testing.T) {
 		{Name: "alpha/feat-1", Repo: "alpha", Port: 3001, PID: 100},
 		{Name: "beta/feat-2", Repo: "beta", Port: 3002, PID: 200},
 	}
-	html := RenderSwitchPage(servers, "")
+	html := RenderSwitchPage(servers)
 	if !strings.Contains(html, "alpha") {
 		t.Fatal("should contain repo name 'alpha'")
 	}
@@ -62,26 +61,34 @@ func TestRenderSwitchPageGrouped(t *testing.T) {
 	}
 }
 
-func TestRenderSwitchPageActiveHighlighted(t *testing.T) {
+func TestRenderSwitchPageAllHaveSwitchButton(t *testing.T) {
 	servers := []*registry.ServerEntry{
 		{Name: "repo/branch-a", Repo: "repo", Port: 3001, PID: 100},
 		{Name: "repo/branch-b", Repo: "repo", Port: 3002, PID: 200},
 	}
-	html := RenderSwitchPage(servers, "repo/branch-a")
+	html := RenderSwitchPage(servers)
 
-	if !strings.Contains(html, `class="active"`) {
-		t.Fatal("active row should have class='active'")
+	count := strings.Count(html, `btn">Switch`)
+	if count != 2 {
+		t.Fatalf("expected 2 Switch buttons, got %d", count)
 	}
-	if !strings.Contains(html, `badge-active">Active`) {
-		t.Fatal("active server should show Active badge")
+}
+
+func TestRenderSwitchPageEntriesSorted(t *testing.T) {
+	servers := []*registry.ServerEntry{
+		{Name: "repo/zebra", Repo: "repo", Port: 3001, PID: 100},
+		{Name: "repo/alpha", Repo: "repo", Port: 3002, PID: 200},
 	}
-	if !strings.Contains(html, `btn">Switch`) {
-		t.Fatal("inactive server should show Switch button")
+	html := RenderSwitchPage(servers)
+	aIdx := strings.Index(html, "alpha")
+	zIdx := strings.Index(html, "zebra")
+	if aIdx > zIdx {
+		t.Fatal("entries should be sorted alphabetically (alpha before zebra)")
 	}
 }
 
 func TestRenderSwitchPageValidHTML(t *testing.T) {
-	html := RenderSwitchPage(nil, "")
+	html := RenderSwitchPage(nil)
 	if !strings.HasPrefix(html, "<!DOCTYPE html>") {
 		t.Fatal("should start with <!DOCTYPE html>")
 	}
@@ -91,7 +98,7 @@ func TestRenderSwitchPageValidHTML(t *testing.T) {
 }
 
 func TestAutoRefreshPresent(t *testing.T) {
-	html := RenderSwitchPage(nil, "")
+	html := RenderSwitchPage(nil)
 	if !strings.Contains(html, "setTimeout") {
 		t.Fatal("should contain setTimeout for auto-refresh")
 	}
@@ -111,7 +118,6 @@ func TestSwitchPageHandler(t *testing.T) {
 
 	handler := SwitchPageHandler(reg)
 	req := httptest.NewRequest(http.MethodGet, "/__mdp/switch", nil)
-	req.Header.Set("Cookie", routing.CookieName+"=app%2Fmain")
 	rec := httptest.NewRecorder()
 
 	handler.ServeHTTP(rec, req)
@@ -127,7 +133,7 @@ func TestSwitchPageHandler(t *testing.T) {
 	if !strings.Contains(body, "main") {
 		t.Fatal("response should contain server branch name")
 	}
-	if !strings.Contains(body, "Active") {
-		t.Fatal("response should show Active badge for cookie-matched server")
+	if !strings.Contains(body, "Switch") {
+		t.Fatal("response should show Switch button")
 	}
 }

@@ -8,12 +8,11 @@ import (
 	"strings"
 
 	"github.com/derekgould/multi-dev-proxy/internal/registry"
-	"github.com/derekgould/multi-dev-proxy/internal/routing"
 )
 
 // RenderSwitchPage renders the server switcher HTML page.
 // activeServer is the name of the currently active server (from cookie), or "".
-func RenderSwitchPage(servers []*registry.ServerEntry, activeServer string) string {
+func RenderSwitchPage(servers []*registry.ServerEntry) string {
 	if len(servers) == 0 {
 		return renderEmpty()
 	}
@@ -23,7 +22,6 @@ func RenderSwitchPage(servers []*registry.ServerEntry, activeServer string) stri
 		groups[e.Repo] = append(groups[e.Repo], e)
 	}
 
-	// Sort repo names for deterministic output
 	repos := make([]string, 0, len(groups))
 	for r := range groups {
 		repos = append(repos, r)
@@ -32,36 +30,25 @@ func RenderSwitchPage(servers []*registry.ServerEntry, activeServer string) stri
 
 	var sb strings.Builder
 	for _, repo := range repos {
-		sb.WriteString(renderRepoGroup(repo, groups[repo], activeServer))
+		sb.WriteString(renderRepoGroup(repo, groups[repo]))
 	}
 
 	return renderPage(sb.String(), false)
 }
 
-func renderRepoGroup(repo string, entries []*registry.ServerEntry, activeServer string) string {
+func renderRepoGroup(repo string, entries []*registry.ServerEntry) string {
+	sort.Slice(entries, func(i, j int) bool { return entries[i].Name < entries[j].Name })
 	var sb strings.Builder
 	sb.WriteString(fmt.Sprintf(`<div class="repo-group"><h2 class="repo-name">%s</h2><table>`, html.EscapeString(repo)))
 	sb.WriteString(`<thead><tr><th>Branch</th><th>Port</th><th>PID</th><th></th></tr></thead><tbody>`)
 	for _, e := range entries {
-		isActive := e.Name == activeServer
-		dot := `<span class="dot dot-inactive"></span>`
-		if isActive {
-			dot = `<span class="dot dot-active"></span>`
-		}
-		badge := fmt.Sprintf(`<form method="POST" action="/__mdp/switch/%s"><button type="submit" class="btn">Switch</button></form>`, html.EscapeString(e.Name))
-		if isActive {
-			badge = `<span class="badge badge-active">Active</span>`
-		}
-		rowClass := ""
-		if isActive {
-			rowClass = ` class="active"`
-		}
 		branch := e.Name
 		if idx := strings.LastIndex(e.Name, "/"); idx >= 0 {
 			branch = e.Name[idx+1:]
 		}
-		sb.WriteString(fmt.Sprintf(`<tr%s><td>%s%s</td><td class="mono">:%d</td><td class="mono">%d</td><td>%s</td></tr>`,
-			rowClass, dot, html.EscapeString(branch), e.Port, e.PID, badge))
+		btn := fmt.Sprintf(`<form method="POST" action="/__mdp/switch/%s"><button type="submit" class="btn">Switch</button></form>`, html.EscapeString(e.Name))
+		sb.WriteString(fmt.Sprintf(`<tr><td>%s</td><td class="mono">:%d</td><td class="mono">%d</td><td>%s</td></tr>`,
+			html.EscapeString(branch), e.Port, e.PID, btn))
 	}
 	sb.WriteString(`</tbody></table></div>`)
 	return sb.String()
@@ -81,35 +68,95 @@ func renderPage(content string, isEmpty bool) string {
   <title>Dev Server Switcher — mdp</title>
   <style>
     * { box-sizing: border-box; margin: 0; padding: 0; }
-    body { font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, sans-serif; background: #0a0a0a; color: #e5e5e5; min-height: 100vh; padding: 2rem; }
+    body {
+      --bg: #0a0a0a; --text: #e5e5e5; --heading: #fff; --muted: #737373;
+      --border: #262626; --border-light: #1a1a1a;
+      --btn-bg: #262626; --btn-text: #e5e5e5; --btn-border: #404040; --btn-hover: #333;
+      --mono: #a3a3a3; --empty-bg: #1a1a1a; --refresh: #525252;
+      font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, sans-serif;
+      background: var(--bg); color: var(--text); min-height: 100vh; padding: 2rem;
+    }
+    @media (prefers-color-scheme: light) {
+      body:not(.dark) {
+        --bg: #fafafa; --text: #1a1a1a; --heading: #111; --muted: #6b7280;
+        --border: #e5e7eb; --border-light: #f3f4f6;
+        --btn-bg: #f3f4f6; --btn-text: #1a1a1a; --btn-border: #d1d5db; --btn-hover: #e5e7eb;
+        --mono: #6b7280; --empty-bg: #f3f4f6; --refresh: #9ca3af;
+      }
+    }
+    body.light {
+      --bg: #fafafa; --text: #1a1a1a; --heading: #111; --muted: #6b7280;
+      --border: #e5e7eb; --border-light: #f3f4f6;
+      --btn-bg: #f3f4f6; --btn-text: #1a1a1a; --btn-border: #d1d5db; --btn-hover: #e5e7eb;
+      --mono: #6b7280; --empty-bg: #f3f4f6; --refresh: #9ca3af;
+    }
     .container { width: 100%; max-width: 700px; margin: 0 auto; }
-    h1 { font-size: 1.25rem; font-weight: 600; margin-bottom: 1.5rem; color: #fff; }
+    .header { display: flex; align-items: center; justify-content: space-between; margin-bottom: 1.5rem; }
+    h1 { font-size: 1.25rem; font-weight: 600; color: var(--heading); }
     .repo-group { margin-bottom: 2rem; }
-    .repo-name { font-size: 0.9rem; font-weight: 500; color: #737373; text-transform: uppercase; letter-spacing: 0.05em; margin-bottom: 0.5rem; }
-    .empty { text-align: center; padding: 3rem 1rem; color: #737373; font-size: 0.9rem; }
-    .empty code { background: #1a1a1a; padding: 0.15rem 0.4rem; border-radius: 4px; font-size: 0.85rem; }
+    .repo-name { font-size: 0.9rem; font-weight: 500; color: var(--muted); text-transform: uppercase; letter-spacing: 0.05em; margin-bottom: 0.5rem; }
+    .empty { text-align: center; padding: 3rem 1rem; color: var(--muted); font-size: 0.9rem; }
+    .empty code { background: var(--empty-bg); padding: 0.15rem 0.4rem; border-radius: 4px; font-size: 0.85rem; }
     table { width: 100%; border-collapse: collapse; }
-    th { text-align: left; font-size: 0.75rem; font-weight: 500; color: #737373; text-transform: uppercase; letter-spacing: 0.05em; padding: 0.5rem 0.75rem; border-bottom: 1px solid #262626; }
-    td { padding: 0.65rem 0.75rem; border-bottom: 1px solid #1a1a1a; }
-    tr.active td { background: #0a1a0a; }
-    .mono { font-family: "SF Mono", Menlo, monospace; font-size: 0.85rem; color: #a3a3a3; }
-    .dot { display: inline-block; width: 8px; height: 8px; border-radius: 50%; margin-right: 0.5rem; vertical-align: middle; }
-    .dot-active { background: #22c55e; box-shadow: 0 0 6px #22c55e80; }
-    .dot-inactive { background: #404040; }
-    .badge { display: inline-block; padding: 0.15rem 0.5rem; border-radius: 9999px; font-size: 0.75rem; font-weight: 500; }
-    .badge-active { background: #14532d; color: #4ade80; }
-    .btn { background: #262626; color: #e5e5e5; border: 1px solid #404040; padding: 0.25rem 0.75rem; border-radius: 6px; font-size: 0.8rem; cursor: pointer; }
-    .btn:hover { background: #333; }
-    .refresh { display: block; margin-top: 1rem; text-align: center; font-size: 0.75rem; color: #525252; }
+    th { text-align: left; font-size: 0.75rem; font-weight: 500; color: var(--muted); text-transform: uppercase; letter-spacing: 0.05em; padding: 0.5rem 0.75rem; border-bottom: 1px solid var(--border); }
+    td { padding: 0.65rem 0.75rem; border-bottom: 1px solid var(--border-light); }
+    .mono { font-family: "SF Mono", Menlo, monospace; font-size: 0.85rem; color: var(--mono); }
+    .btn { background: var(--btn-bg); color: var(--btn-text); border: 1px solid var(--btn-border); padding: 0.25rem 0.75rem; border-radius: 6px; font-size: 0.8rem; cursor: pointer; }
+    .btn:hover { background: var(--btn-hover); }
+    .refresh { display: block; margin-top: 1rem; text-align: center; font-size: 0.75rem; color: var(--refresh); }
+    .theme-toggle { display: flex; gap: 0; }
+    .theme-btn {
+      padding: 0.2rem 0.6rem; font-size: 0.75rem; cursor: pointer;
+      background: var(--btn-bg); color: var(--btn-text); border: 1px solid var(--btn-border);
+    }
+    .theme-btn:first-child { border-radius: 4px 0 0 4px; }
+    .theme-btn:last-child { border-radius: 0 4px 4px 0; }
+    .theme-btn:not(:first-child) { border-left: none; }
+    .theme-btn.active { background: #3b82f6; color: #fff; border-color: #3b82f6; }
   </style>
 </head>
 <body>
   <div class="container">
-    <h1>Dev Server Switcher</h1>
+    <div class="header">
+      <h1>Dev Server Switcher</h1>
+      <div class="theme-toggle">
+        <button id="theme-auto" class="theme-btn">Auto</button>
+        <button id="theme-light" class="theme-btn">Light</button>
+        <button id="theme-dark" class="theme-btn">Dark</button>
+      </div>
+    </div>
     ` + content + `
     <span class="refresh">Auto-refreshes every 3s</span>
   </div>
-  <script>setTimeout(() => location.reload(), 3000)</script>
+  <script>
+  (function() {
+    function getThemeCookie() {
+      var m = document.cookie.match(/(?:^|; )__mdp_theme=([^;]*)/);
+      return m ? m[1] : '';
+    }
+    function setThemeCookie(v) {
+      if (v) {
+        document.cookie = '__mdp_theme=' + v + '; path=/; SameSite=Lax; max-age=31536000';
+      } else {
+        document.cookie = '__mdp_theme=; path=/; SameSite=Lax; max-age=0';
+      }
+    }
+    function applyTheme() {
+      var pref = getThemeCookie();
+      document.body.classList.remove('light', 'dark');
+      if (pref) document.body.classList.add(pref);
+      ['auto','light','dark'].forEach(function(t) {
+        var btn = document.getElementById('theme-' + t);
+        if (btn) btn.classList.toggle('active', pref === '' ? t === 'auto' : t === pref);
+      });
+    }
+    document.getElementById('theme-auto').onclick = function() { setThemeCookie(''); applyTheme(); };
+    document.getElementById('theme-light').onclick = function() { setThemeCookie('light'); applyTheme(); };
+    document.getElementById('theme-dark').onclick = function() { setThemeCookie('dark'); applyTheme(); };
+    applyTheme();
+    setTimeout(function() { location.reload(); }, 3000);
+  })();
+  </script>
 </body>
 </html>`
 }
@@ -117,12 +164,10 @@ func renderPage(content string, isEmpty bool) string {
 // SwitchPageHandler returns an HTTP handler for GET /__mdp/switch.
 func SwitchPageHandler(reg *registry.Registry) http.HandlerFunc {
 	return func(w http.ResponseWriter, r *http.Request) {
-		cookies := routing.ParseCookies(r.Header.Get("Cookie"))
-		active := cookies[routing.CookieName]
 		entries := reg.List()
-		html := RenderSwitchPage(entries, active)
+		page := RenderSwitchPage(entries)
 		w.Header().Set("Content-Type", "text/html; charset=utf-8")
 		w.WriteHeader(http.StatusOK)
-		fmt.Fprint(w, html)
+		fmt.Fprint(w, page)
 	}
 }
