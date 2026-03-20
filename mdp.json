@@ -1,0 +1,22 @@
+{
+    "version": "0.1.0",
+    "architecture": {
+        "64bit": {
+            "url": "https://github.com/drgould/multi-dev-proxy/releases/download/v0.1.0/mdp_windows_amd64.zip",
+            "bin": [
+                "mdp.exe"
+            ],
+            "hash": "b7fce8f32cff327e81f72ab9c3de54e6e33733e4c8a38b0de0ec83a2a2dbe1eb"
+        },
+        "arm64": {
+            "url": "https://github.com/drgould/multi-dev-proxy/releases/download/v0.1.0/mdp_windows_arm64.zip",
+            "bin": [
+                "mdp.exe"
+            ],
+            "hash": "6274564ccc9ac2e986195cefa80638939e68ed434cfd2abab45b28f1fda0dcd4"
+        }
+    },
+    "homepage": "https://github.com/drgould/multi-dev-proxy",
+    "license": "GPL-3.0",
+    "description": "Multi-dev proxy — run multiple dev servers behind one port"
+}
