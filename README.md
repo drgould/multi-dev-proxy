@@ -43,17 +43,17 @@ curl -fsSL https://raw.githubusercontent.com/drgould/multi-dev-proxy/main/instal
 
 **Homebrew:**
 
-Homebrew’s default tap URL assumes a `homebrew-*` repo name, so pass the full GitHub URL once:
+`brew tap user/shortname` clones `github.com/user/homebrew-shortname`:
 
 ```sh
-brew tap drgould/multi-dev-proxy https://github.com/drgould/multi-dev-proxy
+brew tap drgould/mdp
 brew install --cask mdp
 ```
 
 **Scoop (Windows):**
 
 ```powershell
-scoop bucket add mdp https://github.com/drgould/multi-dev-proxy
+scoop bucket add mdp https://github.com/drgould/scoop-mdp
 scoop install mdp
 ```
 
@@ -255,7 +255,14 @@ git tag v0.x.0
 git push origin v0.x.0
 ```
 
-GoReleaser publishes release binaries, then commits `Casks/mdp.rb` and `bucket/mdp.json` to this same repository using the workflow `GITHUB_TOKEN` (no extra secrets). If that push fails (for example **branch protection** blocking direct pushes to `main`), the job fails even though the GitHub release may already exist.
+GoReleaser publishes release binaries to this repo, then pushes the Homebrew cask to [`drgould/homebrew-mdp`](https://github.com/drgould/homebrew-mdp) and the Scoop manifest to [`drgould/scoop-mdp`](https://github.com/drgould/scoop-mdp). Configure these Action secrets (fine-grained or classic PAT with **contents** write on each tap/bucket repo):
+
+| Secret | Purpose |
+|--------|---------|
+| `HOMEBREW_TAP_TOKEN` | Push access to `drgould/homebrew-mdp`. If unset or empty, the tap step is skipped (`skip_upload: auto`). |
+| `SCOOP_BUCKET_TOKEN` | Push access to `drgould/scoop-mdp`. If unset or empty, the Scoop step is skipped. |
+
+If either push fails, the workflow fails even though the GitHub release for this repo may already exist.
 
 ## License
 
