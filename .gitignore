@@ -31,5 +31,26 @@ go.work.sum
 # .idea/
 # .vscode/
 
+# Testbed binaries and certs
+testbed/mdp
+testbed/go-websocket/go-websocket
+testbed/.certs/
+
+# Testbed Node.js
+testbed/vite-ts/node_modules/
+testbed/nextjs/node_modules/
+testbed/nextjs/.next/
+testbed/vue/node_modules/
+testbed/svelte/node_modules/
+testbed/svelte/.svelte-kit/
+
+# Root node_modules (playwright)
+node_modules/
+test-results/
+playwright-report/
+
+# GoReleaser dist
+dist/
+
 # Coding Agents
 .sisyphus/
