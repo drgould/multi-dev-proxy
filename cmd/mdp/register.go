@@ -2,11 +2,13 @@ package main
 
 import (
 	"bytes"
+	"crypto/tls"
 	"encoding/json"
 	"fmt"
 	"io"
 	"net/http"
 	"os"
+	"time"
 
 	"github.com/spf13/cobra"
 )
@@ -34,7 +36,7 @@ func runRegister(cmd *cobra.Command, args []string) error {
 		fmt.Sscanf(envPort, "%d", &proxyPort)
 	}
 
-	proxyURL := fmt.Sprintf("http://localhost:%d", proxyPort)
+	proxyURL := discoverProxyURL(proxyPort)
 
 	if listFlag {
 		return listServers(proxyURL)
@@ -52,7 +54,9 @@ func runRegister(cmd *cobra.Command, args []string) error {
 	pid, _ := cmd.Flags().GetInt("pid")
 
 	body, _ := json.Marshal(map[string]any{"name": name, "port": port, "pid": pid})
-	resp, err := http.Post(proxyURL+"/__mdp/register", "application/json", bytes.NewReader(body))
+	req, _ := http.NewRequest(http.MethodPost, proxyURL+"/__mdp/register", bytes.NewReader(body))
+	req.Header.Set("Content-Type", "application/json")
+	resp, err := tlsSkipClient().Do(req)
 	if err != nil {
 		return fmt.Errorf("proxy not reachable at %s: %w", proxyURL, err)
 	}
@@ -65,8 +69,16 @@ func runRegister(cmd *cobra.Command, args []string) error {
 	return nil
 }
 
+func tlsSkipClient() *http.Client {
+	return &http.Client{
+		Transport: &http.Transport{
+			TLSClientConfig: &tls.Config{InsecureSkipVerify: true},
+		},
+	}
+}
+
 func listServers(proxyURL string) error {
-	resp, err := http.Get(proxyURL + "/__mdp/servers")
+	resp, err := tlsSkipClient().Get(proxyURL + "/__mdp/servers")
 	if err != nil {
 		return fmt.Errorf("proxy not reachable at %s: %w", proxyURL, err)
 	}
@@ -88,4 +100,25 @@ func listServers(proxyURL string) error {
 		}
 	}
 	return nil
+}
+
+func discoverProxyURL(port int) string {
+	client := &http.Client{
+		Timeout: 500 * time.Millisecond,
+		Transport: &http.Transport{
+			TLSClientConfig: &tls.Config{InsecureSkipVerify: true},
+		},
+	}
+	for _, scheme := range []string{"https", "http"} {
+		u := fmt.Sprintf("%s://localhost:%d", scheme, port)
+		resp, err := client.Get(u + "/__mdp/health")
+		if err != nil {
+			continue
+		}
+		resp.Body.Close()
+		if resp.StatusCode == http.StatusOK {
+			return u
+		}
+	}
+	return fmt.Sprintf("https://localhost:%d", port)
 }

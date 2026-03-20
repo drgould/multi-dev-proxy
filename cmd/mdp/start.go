@@ -4,6 +4,8 @@ import (
 	"context"
 	"crypto/tls"
 	"fmt"
+	"io"
+	"log"
 	"log/slog"
 	"net/http"
 	"os"
@@ -14,6 +16,7 @@ import (
 	"github.com/spf13/cobra"
 
 	"github.com/derekgould/multi-dev-proxy/internal/api"
+	"github.com/derekgould/multi-dev-proxy/internal/certs"
 	"github.com/derekgould/multi-dev-proxy/internal/inject"
 	"github.com/derekgould/multi-dev-proxy/internal/process"
 	"github.com/derekgould/multi-dev-proxy/internal/proxy"
@@ -33,6 +36,7 @@ func init() {
 	startCmd.Flags().String("host", "0.0.0.0", "Host to listen on")
 	startCmd.Flags().String("tls-cert", "", "Path to TLS certificate file")
 	startCmd.Flags().String("tls-key", "", "Path to TLS key file")
+	startCmd.Flags().Bool("no-tls", false, "Disable HTTPS and run plain HTTP")
 	startCmd.Flags().String("port-range", "10000-60000", "Range of ports for proxied services")
 }
 
@@ -41,10 +45,21 @@ func runStart(cmd *cobra.Command, args []string) error {
 	host, _ := cmd.Flags().GetString("host")
 	tlsCert, _ := cmd.Flags().GetString("tls-cert")
 	tlsKey, _ := cmd.Flags().GetString("tls-key")
+	noTLS, _ := cmd.Flags().GetBool("no-tls")
 
-	useTLS := tlsCert != "" || tlsKey != ""
-	if useTLS && (tlsCert == "" || tlsKey == "") {
-		return fmt.Errorf("both --tls-cert and --tls-key are required for HTTPS")
+	if (tlsCert != "") != (tlsKey != "") {
+		return fmt.Errorf("both --tls-cert and --tls-key are required")
+	}
+
+	useTLS := !noTLS
+	if useTLS && tlsCert == "" {
+		certDir := certs.DefaultDir()
+		var err error
+		tlsCert, tlsKey, err = certs.EnsureCert(certDir)
+		if err != nil {
+			return fmt.Errorf("auto-generate TLS cert: %w", err)
+		}
+		slog.Info("using auto-generated TLS cert", "dir", certDir)
 	}
 	if useTLS {
 		if _, err := os.Stat(tlsCert); err != nil {
@@ -61,44 +76,17 @@ func runStart(cmd *cobra.Command, args []string) error {
 	prx.SetModifyResponse(inj.ModifyResponse)
 
 	addr := fmt.Sprintf("%s:%d", host, port)
-	srv := &http.Server{Addr: addr, Handler: nil}
+	srv := &http.Server{
+		Addr:     addr,
+		ErrorLog: log.New(io.Discard, "", 0),
+	}
 
 	mux := http.NewServeMux()
 	mux.HandleFunc("GET /__mdp/health", api.HealthHandler(reg))
 	mux.HandleFunc("GET /__mdp/servers", api.ServersHandler(reg))
-	tlsUpgrade := func(certPath, keyPath string) {
-		if useTLS {
-			return
-		}
-		slog.Info("received TLS certs from upstream, upgrading to HTTPS", "cert", certPath, "key", keyPath)
-		useTLS = true
-		prx = proxy.NewProxy(reg, port, true)
-		inj2 := inject.New()
-		prx.SetModifyResponse(inj2.ModifyResponse)
-		mux.Handle("/", prx)
-
-		go func() {
-			ctx, cancel := context.WithTimeout(context.Background(), 2*time.Second)
-			defer cancel()
-			srv.Shutdown(ctx)
-
-			newSrv := &http.Server{Addr: addr, Handler: mux}
-			cert, err := tls.LoadX509KeyPair(certPath, keyPath)
-			if err != nil {
-				slog.Error("failed to load forwarded TLS certs", "err", err)
-				return
-			}
-			newSrv.TLSConfig = &tls.Config{Certificates: []tls.Certificate{cert}}
-			slog.Info("proxy restarted with HTTPS", "addr", fmt.Sprintf("https://%s", addr))
-			srv = newSrv
-			if err := newSrv.ListenAndServeTLS("", ""); err != nil && err != http.ErrServerClosed {
-				slog.Error("HTTPS server error", "err", err)
-			}
-		}()
-	}
-	mux.HandleFunc("POST /__mdp/register", api.RegisterHandler(reg, tlsUpgrade))
-	mux.HandleFunc("DELETE /__mdp/register/{name}", api.DeregisterHandler(reg))
-	mux.HandleFunc("POST /__mdp/switch/{name}", api.SwitchHandler(reg))
+	mux.HandleFunc("POST /__mdp/register", api.RegisterHandler(reg))
+	mux.HandleFunc("DELETE /__mdp/register/{name...}", api.DeregisterHandler(reg))
+	mux.HandleFunc("POST /__mdp/switch/{name...}", api.SwitchHandler(reg))
 	mux.HandleFunc("GET /__mdp/switch", ui.SwitchPageHandler(reg))
 	mux.HandleFunc("GET /__mdp/widget.js", ui.WidgetHandler())
 	mux.Handle("/", prx)

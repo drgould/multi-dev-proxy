@@ -3,8 +3,10 @@ package process
 import (
 	"bytes"
 	"context"
+	"crypto/tls"
 	"encoding/json"
 	"fmt"
+	"io"
 	"log/slog"
 	"net/http"
 	"os"
@@ -12,6 +14,8 @@ import (
 	"os/signal"
 	"syscall"
 	"time"
+
+	"github.com/derekgould/multi-dev-proxy/internal/detect"
 )
 
 type RunOpts struct {
@@ -38,10 +42,14 @@ func (m *Manager) Run(ctx context.Context, args []string, opts RunOpts) (int, er
 
 	cmd := exec.CommandContext(ctx, args[0], args[1:]...)
 	cmd.Stdin = os.Stdin
-	cmd.Stdout = os.Stdout
 	cmd.Stderr = os.Stderr
 	cmd.Env = append(os.Environ(), fmt.Sprintf("PORT=%d", opts.AssignedPort))
 	SetProcessGroup(cmd)
+
+	stdout, err := cmd.StdoutPipe()
+	if err != nil {
+		return -1, fmt.Errorf("stdout pipe: %w", err)
+	}
 
 	if err := cmd.Start(); err != nil {
 		return -1, fmt.Errorf("start %q: %w", args[0], err)
@@ -50,11 +58,29 @@ func (m *Manager) Run(ctx context.Context, args []string, opts RunOpts) (int, er
 	slog.Info("started process", "pid", pid, "port", opts.AssignedPort, "name", opts.ServerName)
 
 	if opts.ProxyURL != "" && opts.ServerName != "" {
-		if err := registerWithProxy(opts.ProxyURL, opts, pid, opts.ProxyTimeout); err != nil {
-			slog.Warn("failed to register with proxy", "err", err)
-		} else {
-			slog.Info("registered with proxy", "name", opts.ServerName, "port", opts.AssignedPort)
-		}
+		go func() {
+			detected, err := detect.TeeAndDetect(stdout, os.Stdout, 30*time.Second)
+			regPort := opts.AssignedPort
+			if err == nil && detected.Port > 0 {
+				if detected.Port != opts.AssignedPort {
+					slog.Info("detected server port from stdout", "detected", detected.Port, "assigned", opts.AssignedPort)
+				}
+				regPort = detected.Port
+				if detected.Scheme != "" {
+					opts.Scheme = detected.Scheme
+				}
+			} else {
+				slog.Debug("port detection from stdout timed out, using assigned port", "port", opts.AssignedPort)
+			}
+			opts.AssignedPort = regPort
+			if err := registerWithProxy(opts.ProxyURL, opts, pid, opts.ProxyTimeout); err != nil {
+				slog.Warn("failed to register with proxy", "err", err)
+			} else {
+				slog.Info("registered with proxy", "name", opts.ServerName, "port", regPort)
+			}
+		}()
+	} else {
+		go func() { io.Copy(os.Stdout, stdout) }()
 	}
 
 	sigCh := make(chan os.Signal, 1)
@@ -105,7 +131,7 @@ func registerWithProxy(proxyURL string, opts RunOpts, pid int, timeout time.Dura
 	defer cancel()
 	req, _ := http.NewRequestWithContext(ctx, http.MethodPost, proxyURL+"/__mdp/register", bytes.NewReader(body))
 	req.Header.Set("Content-Type", "application/json")
-	resp, err := http.DefaultClient.Do(req)
+	resp, err := tlsClient().Do(req)
 	if err != nil {
 		return fmt.Errorf("register: %w", err)
 	}
@@ -123,13 +149,21 @@ func deregisterFromProxy(proxyURL, name string, timeout time.Duration) {
 	ctx, cancel := context.WithTimeout(context.Background(), timeout)
 	defer cancel()
 	req, _ := http.NewRequestWithContext(ctx, http.MethodDelete, proxyURL+"/__mdp/register/"+urlEncodeServerName(name), nil)
-	resp, err := http.DefaultClient.Do(req)
+	resp, err := tlsClient().Do(req)
 	if err != nil {
 		slog.Debug("deregister failed", "err", err)
 		return
 	}
 	resp.Body.Close()
 	slog.Info("deregistered from proxy", "name", name)
+}
+
+func tlsClient() *http.Client {
+	return &http.Client{
+		Transport: &http.Transport{
+			TLSClientConfig: &tls.Config{InsecureSkipVerify: true},
+		},
+	}
 }
 
 func urlEncodeServerName(name string) string {

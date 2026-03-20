@@ -2,6 +2,7 @@ package main
 
 import (
 	"context"
+	"crypto/tls"
 	"fmt"
 	"log/slog"
 	"net/http"
@@ -70,15 +71,14 @@ func runRun(cmd *cobra.Command, args []string) error {
 		return fmt.Errorf("invalid --port-range: %w", err)
 	}
 
-	proxyURL := fmt.Sprintf("http://localhost:%d", proxyPort)
-	proxyRunning := isProxyRunning(proxyURL)
+	proxyURL, proxyRunning := detectProxy(proxyPort)
 
 	if !proxyRunning {
 		slog.Info("no proxy detected, starting in solo mode", "proxy-port", proxyPort)
 		return runSolo(args)
 	}
 
-	slog.Info("proxy detected, starting in proxy mode", "proxy-port", proxyPort)
+	slog.Info("proxy detected, starting in proxy mode", "url", proxyURL)
 
 	cwd, _ := os.Getwd()
 	serverName := nameOverride
@@ -123,14 +123,25 @@ func runRun(cmd *cobra.Command, args []string) error {
 	return nil
 }
 
-func isProxyRunning(proxyURL string) bool {
-	client := &http.Client{Timeout: 500 * time.Millisecond}
-	resp, err := client.Get(proxyURL + "/__mdp/health")
-	if err != nil {
-		return false
+func detectProxy(port int) (string, bool) {
+	client := &http.Client{
+		Timeout: 500 * time.Millisecond,
+		Transport: &http.Transport{
+			TLSClientConfig: &tls.Config{InsecureSkipVerify: true},
+		},
 	}
-	resp.Body.Close()
-	return resp.StatusCode == http.StatusOK
+	for _, scheme := range []string{"https", "http"} {
+		url := fmt.Sprintf("%s://localhost:%d", scheme, port)
+		resp, err := client.Get(url + "/__mdp/health")
+		if err != nil {
+			continue
+		}
+		resp.Body.Close()
+		if resp.StatusCode == http.StatusOK {
+			return url, true
+		}
+	}
+	return "", false
 }
 
 func detectMkcertCerts() (string, string) {
