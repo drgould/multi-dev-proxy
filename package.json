@@ -1,0 +1,25 @@
+{
+  "name": "multi-dev-proxy",
+  "version": "1.0.0",
+  "description": "Run multiple dev servers on different branches behind a single port.",
+  "main": "index.js",
+  "scripts": {
+    "test:e2e": "playwright test",
+    "test:e2e:ui": "playwright test --ui"
+  },
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/drgould/multi-dev-proxy.git"
+  },
+  "keywords": [],
+  "author": "",
+  "license": "ISC",
+  "type": "commonjs",
+  "bugs": {
+    "url": "https://github.com/drgould/multi-dev-proxy/issues"
+  },
+  "homepage": "https://github.com/drgould/multi-dev-proxy#readme",
+  "devDependencies": {
+    "@playwright/test": "^1.58.2"
+  }
+}
