@@ -1,4 +1,4 @@
-# mdp
+# Multi-dev Proxy (AKA mdp)
 
 Run multiple dev servers on different branches behind a single port.
 
@@ -36,22 +36,29 @@ mdp run npm run dev
 ## Installation
 
 **curl (macOS/Linux):**
+
 ```sh
-curl -fsSL https://raw.githubusercontent.com/derekgould/multi-dev-proxy/main/install.sh | sh
+curl -fsSL https://raw.githubusercontent.com/drgould/multi-dev-proxy/main/install.sh | sh
 ```
 
 **Homebrew:**
+
+Homebrew’s default tap URL assumes a `homebrew-*` repo name, so pass the full GitHub URL once:
+
 ```sh
-brew install derekgould/mdp/mdp
+brew tap drgould/multi-dev-proxy https://github.com/drgould/multi-dev-proxy
+brew install --cask mdp
 ```
 
 **Scoop (Windows):**
+
 ```powershell
-scoop bucket add mdp https://github.com/derekgould/scoop-mdp
+scoop bucket add mdp https://github.com/drgould/multi-dev-proxy
 scoop install mdp
 ```
 
 **npm:**
+
 ```sh
 npm install -g mdp
 ```
@@ -148,51 +155,61 @@ mdp start --tls-cert localhost.pem --tls-key localhost-key.pem
 
 **Environment variables:**
 
-| Variable | Description |
-|----------|-------------|
+
+| Variable         | Description                                                                         |
+| ---------------- | ----------------------------------------------------------------------------------- |
 | `MDP_PROXY_PORT` | Default proxy port for `mdp run` and `mdp register` (overrides the default of 3000) |
 
-**`mdp start` flags:**
 
-| Flag | Default | Description |
-|------|---------|-------------|
-| `-p, --port` | `3000` | Port to listen on |
-| `--host` | `0.0.0.0` | Host to listen on |
-| `--tls-cert` | | Path to TLS certificate file |
-| `--tls-key` | | Path to TLS key file |
+`**mdp start` flags:**
+
+
+| Flag           | Default       | Description                     |
+| -------------- | ------------- | ------------------------------- |
+| `-p, --port`   | `3000`        | Port to listen on               |
+| `--host`       | `0.0.0.0`     | Host to listen on               |
+| `--tls-cert`   |               | Path to TLS certificate file    |
+| `--tls-key`    |               | Path to TLS key file            |
 | `--port-range` | `10000-60000` | Port range for spawned services |
 
-**`mdp run` flags:**
 
-| Flag | Default | Description |
-|------|---------|-------------|
-| `-P, --proxy-port` | `3000` | Proxy port to connect to |
-| `--repo` | | Repository name override |
-| `--name` | | Full server name override (skips auto-detection) |
-| `--port-range` | `10000-60000` | Port range for spawned services |
+`**mdp run` flags:**
 
-**`mdp register` flags:**
 
-| Flag | Default | Description |
-|------|---------|-------------|
-| `-p, --port` | | Port the service is running on (required) |
-| `--pid` | `0` | Process ID for liveness tracking |
-| `-P, --proxy-port` | `3000` | Proxy port to connect to |
-| `-l, --list` | | List registered services |
+| Flag               | Default       | Description                                      |
+| ------------------ | ------------- | ------------------------------------------------ |
+| `-P, --proxy-port` | `3000`        | Proxy port to connect to                         |
+| `--repo`           |               | Repository name override                         |
+| `--name`           |               | Full server name override (skips auto-detection) |
+| `--port-range`     | `10000-60000` | Port range for spawned services                  |
+
+
+`**mdp register` flags:**
+
+
+| Flag               | Default | Description                               |
+| ------------------ | ------- | ----------------------------------------- |
+| `-p, --port`       |         | Port the service is running on (required) |
+| `--pid`            | `0`     | Process ID for liveness tracking          |
+| `-P, --proxy-port` | `3000`  | Proxy port to connect to                  |
+| `-l, --list`       |         | List registered services                  |
+
 
 ## API reference
 
 All endpoints are served under `/__mdp/` by the proxy.
 
-| Method | Path | Description |
-|--------|------|-------------|
-| `GET` | `/__mdp/health` | Health check. Returns `{"ok":true,"servers":N}` |
-| `GET` | `/__mdp/servers` | List all servers grouped by repo |
-| `POST` | `/__mdp/register` | Register a server. Body: `{"name":"repo/branch","port":N,"pid":N}` |
-| `DELETE` | `/__mdp/register/{name}` | Deregister a server by name |
-| `POST` | `/__mdp/switch/{name}` | Switch active server. Sets cookie and redirects (302) |
-| `GET` | `/__mdp/switch` | Server switcher UI page |
-| `GET` | `/__mdp/widget.js` | Floating switcher widget script |
+
+| Method   | Path                     | Description                                                        |
+| -------- | ------------------------ | ------------------------------------------------------------------ |
+| `GET`    | `/__mdp/health`          | Health check. Returns `{"ok":true,"servers":N}`                    |
+| `GET`    | `/__mdp/servers`         | List all servers grouped by repo                                   |
+| `POST`   | `/__mdp/register`        | Register a server. Body: `{"name":"repo/branch","port":N,"pid":N}` |
+| `DELETE` | `/__mdp/register/{name}` | Deregister a server by name                                        |
+| `POST`   | `/__mdp/switch/{name}`   | Switch active server. Sets cookie and redirects (302)              |
+| `GET`    | `/__mdp/switch`          | Server switcher UI page                                            |
+| `GET`    | `/__mdp/widget.js`       | Floating switcher widget script                                    |
+
 
 **Cookie:** `__mdp_upstream` — URL-encoded server name (`repo%2Fbranch`). Set by the widget or the switch endpoint.
 
@@ -202,14 +219,16 @@ All endpoints are served under `/__mdp/` by the proxy.
 
 The `testbed/` directory contains demo servers across different frameworks to verify the proxy works end-to-end:
 
-| Server | Framework | Features |
-|--------|-----------|----------|
-| go-websocket | Go | WebSocket echo, counter |
-| vite-ts | Vite + TypeScript | Todo list, HMR |
-| nextjs | Next.js | SSR, API routes |
-| vue | Vue 3 + TypeScript | Reactivity, color picker |
-| svelte | SvelteKit + TypeScript | Reactivity, live filter |
-| docker | nginx + Go API + Postgres | GraphQL API, reverse proxy (requires Docker) |
+
+| Server       | Framework                 | Features                                     |
+| ------------ | ------------------------- | -------------------------------------------- |
+| go-websocket | Go                        | WebSocket echo, counter                      |
+| vite-ts      | Vite + TypeScript         | Todo list, HMR                               |
+| nextjs       | Next.js                   | SSR, API routes                              |
+| vue          | Vue 3 + TypeScript        | Reactivity, color picker                     |
+| svelte       | SvelteKit + TypeScript    | Reactivity, live filter                      |
+| docker       | nginx + Go API + Postgres | GraphQL API, reverse proxy (requires Docker) |
+
 
 Run them all behind the proxy:
 
@@ -223,7 +242,7 @@ Open `http://localhost:3000` and use the widget to switch between them.
 ## Contributing
 
 ```sh
-git clone https://github.com/derekgould/multi-dev-proxy
+git clone https://github.com/drgould/multi-dev-proxy
 cd multi-dev-proxy
 go build ./...
 go test ./...
@@ -235,6 +254,8 @@ Releases are built with [GoReleaser](https://goreleaser.com). To cut a release, 
 git tag v0.x.0
 git push origin v0.x.0
 ```
+
+GoReleaser publishes release binaries, then commits `Casks/mdp.rb` and `bucket/mdp.json` to this same repository using the workflow `GITHUB_TOKEN` (no extra secrets). If that push fails (for example **branch protection** blocking direct pushes to `main`), the job fails even though the GitHub release may already exist.
 
 ## License
 

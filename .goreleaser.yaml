@@ -55,10 +55,10 @@ changelog:
 homebrew_casks:
   - name: mdp
     repository:
-      owner: derekgould
-      name: homebrew-mdp
-      token: "{{ .Env.HOMEBREW_TAP_TOKEN }}"
-    homepage: "https://github.com/derekgould/multi-dev-proxy"
+      owner: drgould
+      name: multi-dev-proxy
+      token: "{{ .Env.GITHUB_TOKEN }}"
+    homepage: "https://github.com/drgould/multi-dev-proxy"
     description: "Multi-dev proxy — run multiple dev servers behind one port"
     license: "GPL-3.0"
     skip_upload: auto
@@ -66,10 +66,10 @@ homebrew_casks:
 scoops:
   - name: mdp
     repository:
-      owner: derekgould
-      name: scoop-mdp
-      token: "{{ .Env.SCOOP_BUCKET_TOKEN }}"
-    homepage: "https://github.com/derekgould/multi-dev-proxy"
+      owner: drgould
+      name: multi-dev-proxy
+      token: "{{ .Env.GITHUB_TOKEN }}"
+    homepage: "https://github.com/drgould/multi-dev-proxy"
     description: "Multi-dev proxy — run multiple dev servers behind one port"
     license: GPL-3.0
     skip_upload: auto

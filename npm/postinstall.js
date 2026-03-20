@@ -7,7 +7,7 @@ const path = require('path');
 const { execSync } = require('child_process');
 const os = require('os');
 
-const REPO = 'derekgould/multi-dev-proxy';
+const REPO = 'drgould/multi-dev-proxy';
 const pkg = require('./package.json');
 const VERSION = 'v' + pkg.version;
 

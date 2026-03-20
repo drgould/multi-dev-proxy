@@ -1,7 +1,7 @@
 #!/bin/sh
 set -e
 
-REPO="derekgould/multi-dev-proxy"
+REPO="drgould/multi-dev-proxy"
 BINARY="mdp"
 
 die() { echo "Error: $1" >&2; exit 1; }

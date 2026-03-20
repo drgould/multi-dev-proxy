@@ -12,7 +12,7 @@
   "cpu": ["x64", "arm64"],
   "repository": {
     "type": "git",
-    "url": "https://github.com/derekgould/multi-dev-proxy"
+    "url": "https://github.com/drgould/multi-dev-proxy"
   },
   "license": "GPL-3.0",
   "keywords": ["dev", "proxy", "development", "multi-branch"]
