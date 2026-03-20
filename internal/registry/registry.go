@@ -37,9 +37,6 @@ func (r *Registry) Register(entry *ServerEntry) error {
 	if entry.Port <= 0 {
 		return errors.New("port must be positive")
 	}
-	if entry.PID <= 0 {
-		return errors.New("pid must be positive")
-	}
 	if entry.RegisteredAt.IsZero() {
 		entry.RegisteredAt = time.Now()
 	}

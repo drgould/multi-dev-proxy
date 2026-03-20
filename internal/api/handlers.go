@@ -87,8 +87,8 @@ func RegisterHandler(reg *registry.Registry, onTLSUpgrade ...TLSUpgradeFunc) htt
 			writeJSON(w, http.StatusBadRequest, map[string]string{"error": "invalid JSON body"})
 			return
 		}
-		if body.Name == "" || body.Port <= 0 || body.PID <= 0 {
-			writeJSON(w, http.StatusBadRequest, map[string]string{"error": "name, port, and pid are required"})
+		if body.Name == "" || body.Port <= 0 {
+			writeJSON(w, http.StatusBadRequest, map[string]string{"error": "name and port are required"})
 			return
 		}
 		repo := body.Repo
@@ -130,13 +130,11 @@ func DeregisterHandler(reg *registry.Registry) http.HandlerFunc {
 			writeJSON(w, http.StatusMethodNotAllowed, map[string]string{"error": "method not allowed"})
 			return
 		}
-		// Extract name from path: /__mdp/register/{name}
-		name := strings.TrimPrefix(r.URL.Path, "/__mdp/register/")
+		name := r.PathValue("name")
 		if name == "" {
 			writeJSON(w, http.StatusBadRequest, map[string]string{"error": "name is required"})
 			return
 		}
-		// URL-decode the name (repo/branch contains slash, may be encoded)
 		decodedName, err := urlDecode(name)
 		if err != nil {
 			decodedName = name
@@ -153,7 +151,7 @@ func SwitchHandler(reg *registry.Registry) http.HandlerFunc {
 			writeJSON(w, http.StatusMethodNotAllowed, map[string]string{"error": "method not allowed"})
 			return
 		}
-		name := strings.TrimPrefix(r.URL.Path, "/__mdp/switch/")
+		name := r.PathValue("name")
 		if name == "" {
 			writeJSON(w, http.StatusBadRequest, map[string]string{"error": "name is required"})
 			return

@@ -4,6 +4,7 @@ import (
 	"encoding/json"
 	"net/http"
 	"net/http/httptest"
+	"net/url"
 	"strings"
 	"testing"
 
@@ -174,14 +175,14 @@ func TestRegisterHandler(t *testing.T) {
 			method:     http.MethodPost,
 			body:       `{"name":"","port":3000,"pid":100}`,
 			wantStatus: http.StatusBadRequest,
-			wantError:  "name, port, and pid are required",
+			wantError:  "name and port are required",
 		},
 		{
 			name:       "port zero",
 			method:     http.MethodPost,
 			body:       `{"name":"app/main","port":0,"pid":100}`,
 			wantStatus: http.StatusBadRequest,
-			wantError:  "name, port, and pid are required",
+			wantError:  "name and port are required",
 		},
 		{
 			name:       "invalid JSON",
@@ -276,6 +277,10 @@ func TestDeregisterHandler(t *testing.T) {
 			handler := DeregisterHandler(reg)
 
 			req := httptest.NewRequest(tt.method, tt.path, nil)
+			namePart := strings.TrimPrefix(tt.path, "/__mdp/register/")
+			if decoded, err := url.PathUnescape(namePart); err == nil {
+				req.SetPathValue("name", decoded)
+			}
 			rec := httptest.NewRecorder()
 			handler.ServeHTTP(rec, req)
 
@@ -346,6 +351,10 @@ func TestSwitchHandler(t *testing.T) {
 			handler := SwitchHandler(reg)
 
 			req := httptest.NewRequest(tt.method, tt.path, nil)
+			namePart := strings.TrimPrefix(tt.path, "/__mdp/switch/")
+			if decoded, err := url.PathUnescape(namePart); err == nil {
+				req.SetPathValue("name", decoded)
+			}
 			rec := httptest.NewRecorder()
 			handler.ServeHTTP(rec, req)
 

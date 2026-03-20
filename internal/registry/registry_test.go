@@ -57,26 +57,14 @@ func TestRegister(t *testing.T) {
 			errMsg:  "port must be positive",
 		},
 		{
-			name: "zero PID",
+			name: "zero PID allowed",
 			entry: &ServerEntry{
 				Name: "repo/main",
 				Repo: "repo",
 				Port: 3000,
 				PID:  0,
 			},
-			wantErr: true,
-			errMsg:  "pid must be positive",
-		},
-		{
-			name: "negative PID",
-			entry: &ServerEntry{
-				Name: "repo/main",
-				Repo: "repo",
-				Port: 3000,
-				PID:  -1,
-			},
-			wantErr: true,
-			errMsg:  "pid must be positive",
+			wantErr: false,
 		},
 	}
 
@@ -186,10 +174,10 @@ func TestGet(t *testing.T) {
 			want:    &ServerEntry{Name: "repo/main", Repo: "repo", Port: 3000, PID: 1234},
 		},
 		{
-			name:     "missing entry",
-			setup:    func(r *Registry) {},
-			getName:  "repo/main",
-			want:     nil,
+			name:    "missing entry",
+			setup:   func(r *Registry) {},
+			getName: "repo/main",
+			want:    nil,
 		},
 	}
 
