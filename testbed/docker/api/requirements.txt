@@ -1,0 +1,5 @@
+fastapi
+uvicorn[standard]
+strawberry-graphql[fastapi]
+psycopg2-binary
+pydantic<2.12
