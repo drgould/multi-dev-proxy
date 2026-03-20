@@ -55,8 +55,7 @@ changelog:
 # Re-running the same tag (e.g. after moving the tag) leaves assets on the
 # GitHub release; replace them instead of failing with 422 already_exists.
 release:
-  github:
-    replace_existing_artifacts: true
+  replace_existing_artifacts: true
 
 homebrew_casks:
   - name: mdp
