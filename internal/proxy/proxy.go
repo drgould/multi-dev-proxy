@@ -4,6 +4,7 @@ import (
 	"crypto/tls"
 	"fmt"
 	"log/slog"
+	"net"
 	"net/http"
 	"net/http/httputil"
 	"net/url"
@@ -78,10 +79,9 @@ func (p *Proxy) rewrite(r *httputil.ProxyRequest) {
 	if scheme == "" {
 		scheme = "http"
 	}
-	// Always connect via 127.0.0.1 (not localhost — may resolve to IPv6)
 	target := &url.URL{
 		Scheme: scheme,
-		Host:   fmt.Sprintf("127.0.0.1:%d", result.Entry.Port),
+		Host:   fmt.Sprintf("localhost:%d", result.Entry.Port),
 	}
 	r.SetURL(target)
 
@@ -126,5 +126,13 @@ func (p *Proxy) rewriteLocationByHost(resp *http.Response, host string) {
 	proxyAddr := fmt.Sprintf("localhost:%d", p.listenPort)
 	loc = strings.ReplaceAll(loc, "http://"+host, proto+"://"+proxyAddr)
 	loc = strings.ReplaceAll(loc, "https://"+host, proto+"://"+proxyAddr)
+	// Also rewrite 127.0.0.1 and [::1] variants of the same port
+	_, portStr, _ := net.SplitHostPort(host)
+	if portStr != "" {
+		for _, alt := range []string{"127.0.0.1:" + portStr, "[::1]:" + portStr} {
+			loc = strings.ReplaceAll(loc, "http://"+alt, proto+"://"+proxyAddr)
+			loc = strings.ReplaceAll(loc, "https://"+alt, proto+"://"+proxyAddr)
+		}
+	}
 	resp.Header.Set("Location", loc)
 }
