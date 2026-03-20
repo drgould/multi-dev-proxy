@@ -1,16 +1,16 @@
 # Multi-dev Proxy (AKA mdp)
 
-Run multiple dev servers on different branches behind a single port.
+Run multiple dev servers from different branches and even repos behind a single port.
 
 ## The problem
 
-OAuth providers like Google require you to allowlist exact redirect URLs (`http://localhost:3000/callback`). When every branch runs on a different random port, auth breaks — you'd need to register every port with your provider. `mdp` solves this by putting all your dev servers behind a single stable port. One allowlisted URL works for every branch.
+OAuth providers like Google require you to allowlist exact redirect URLs (`http://localhost:3000/callback`). When every branch runs on a different random port, auth breaks so you'd need to register every port with your provider. `mdp` solves this by putting all your dev servers behind a single stable port. One allowlisted URL works for every branch.
 
-Beyond auth, switching branches to test a feature normally means killing your dev server, checking out, waiting for it to restart, and then switching back. `mdp` lets you run each branch as its own server simultaneously and switch between them instantly in the browser — no restart, no port juggling. It works across multiple repos too, so you can proxy your frontend and API branches through the same port.
+Beyond auth, using worktrees to have multiple dev servers running at once means you have to keep track of which branch is running on which port and switch between them. `mdp` lets you run as many servers across as many branches and repos simultaneously while allowing you to switch between them instantly in the browser. No restarting, no port juggling.
 
 ## How it works
 
-`mdp start` runs a reverse proxy on port 3000. Each branch gets its own dev server on a random port (10000-60000). The proxy reads a cookie (`__mdp_upstream`) to decide which upstream to forward requests to. A small widget is injected into every HTML response via a `<script>` tag, giving you a floating switcher in the corner of the page. No changes to your app needed.
+`mdp start` runs a reverse proxy on port 3000. Each branch gets its own dev server on a random port (10000-60000). The proxy reads a cookie (`__mdp_upstream`) to decide which upstream to forward requests to. A small widget is injected into every HTML response via a `<script>` tag, giving you a floating switcher at the top of the page. The collapsed pill shows **repo · branch** (for example `my-app · feature/auth`); open it to pick another server—entries are grouped by repo with branch names listed under each. No changes to your app needed.
 
 ```
 browser → :3000 (mdp proxy) → :42301 (main branch)

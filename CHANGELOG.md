@@ -1,5 +1,13 @@
 # Changelog
 
+## v0.1.1
+
+### Changed
+
+- **Widget pill** shows **repo · branch** (branch names with slashes preserved), not branch alone
+- **Widget script** lives in `internal/ui/widget.js` and is embedded at build time with `go:embed`
+- **README** — widget behavior and install paths aligned with current Homebrew/Scoop layout
+
 ## v0.1.0
 
 Initial release.

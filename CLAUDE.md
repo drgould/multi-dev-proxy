@@ -38,7 +38,7 @@ internal/
   proxy/           httputil.ReverseProxy wrapper with cookie-based routing
   registry/        In-memory server registry with RWMutex, dead server pruner
   routing/         Cookie parsing, upstream resolution
-  ui/              Switch page HTML renderer, widget JS (Shadow DOM)
+  ui/              Switch page HTML renderer; widget.js (go:embed) Shadow DOM script
 ```
 
 ## Key Conventions

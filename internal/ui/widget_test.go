@@ -35,8 +35,8 @@ func TestWidgetHandler(t *testing.T) {
 }
 
 func TestWidgetJSContainsShadowDOM(t *testing.T) {
-	if !strings.Contains(WidgetJS, "attachShadow({ mode: 'open' })") &&
-		!strings.Contains(WidgetJS, "attachShadow({mode:'open'})") {
+	if !strings.Contains(WidgetJS, `attachShadow({ mode: "open" })`) &&
+		!strings.Contains(WidgetJS, "attachShadow({ mode: 'open' })") {
 		t.Error("WidgetJS missing attachShadow with mode open")
 	}
 }
@@ -56,5 +56,11 @@ func TestWidgetJSSetsCookie(t *testing.T) {
 func TestWidgetJSReloads(t *testing.T) {
 	if !strings.Contains(WidgetJS, "location.reload") {
 		t.Error("WidgetJS missing location.reload call")
+	}
+}
+
+func TestWidgetJSPillShowsRepoAndBranch(t *testing.T) {
+	if !strings.Contains(WidgetJS, "function pillLabel(") {
+		t.Error("WidgetJS missing pillLabel for repo · branch pill")
 	}
 }
