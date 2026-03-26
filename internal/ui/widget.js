@@ -1,9 +1,12 @@
 (() => {
 	"use strict";
 
-	const COOKIE = "__mdp_upstream";
 	const POLL_MS = 5000;
-	const API = "/__mdp/servers";
+	const API_SERVERS = "/__mdp/servers";
+	const API_CONFIG = "/__mdp/config";
+
+	let COOKIE = "__mdp_upstream";
+	let config = null;
 
 	function getCookie() {
 		const m = document.cookie.match(new RegExp(`(?:^|; )${COOKIE}=([^;]*)`));
@@ -23,7 +26,6 @@
 			: "dark";
 	}
 
-	// Create host element and attach shadow
 	const host = document.createElement("div");
 	host.id = "__mdp-widget-host";
 	host.style.cssText =
@@ -64,7 +66,7 @@
     .dropdown {
       position: absolute; top: 100%; left: 50%; transform: translateX(-50%);
       background: var(--dropdown-bg); border: 1px solid var(--border); border-radius: 6px;
-      margin-top: 4px; min-width: 200px; overflow: hidden;
+      margin-top: 4px; min-width: 240px; max-height: 400px; overflow-y: auto;
       box-shadow: 0 4px 16px var(--dropdown-shadow);
     }
     .item {
@@ -77,9 +79,11 @@
     .item-dot.green { background: #22c55e; }
     .item-dot.gray  { background: var(--dot-gray); }
     .group-label { padding: 6px 12px 2px; font-size: 10px; color: var(--group-label); text-transform: uppercase; letter-spacing: 0.05em; }
+    .section-divider { border-top: 1px solid var(--border); margin: 4px 0; }
     .settings { display:flex; align-items:center; gap:6px; padding:8px 12px; font-size:11px; color:var(--group-label); cursor:pointer; border-top:1px solid var(--border); text-decoration:none; }
     .settings:hover { background:var(--item-hover); color:var(--text); }
     .gear { font-size:13px; }
+    .sibling-label { padding: 4px 12px 2px; font-size: 10px; color: var(--group-label); }
   `;
 
 	shadow.appendChild(style);
@@ -88,7 +92,6 @@
 	let open = false;
 	let servers = {};
 
-	// Pill shows "repo · branch"; branch may contain slashes (e.g. feature/auth).
 	function pillLabel(data, activeName, allNames) {
 		if (allNames.length === 0) return "";
 		const name =
@@ -134,6 +137,24 @@
 			shadow.appendChild(dropdownEl);
 		}
 		dropdownEl.innerHTML = "";
+
+		if (config && config.groups && Object.keys(config.groups).length > 0) {
+			const glabel = document.createElement("div");
+			glabel.className = "group-label";
+			glabel.textContent = "groups";
+			dropdownEl.appendChild(glabel);
+			for (const gname of Object.keys(config.groups).sort()) {
+				const item = document.createElement("div");
+				item.className = "item";
+				item.innerHTML = `<span class="item-dot gray"></span>${gname}`;
+				item.onclick = () => switchGroup(gname);
+				dropdownEl.appendChild(item);
+			}
+			const div = document.createElement("div");
+			div.className = "section-divider";
+			dropdownEl.appendChild(div);
+		}
+
 		for (const repo of Object.keys(data).sort()) {
 			const label = document.createElement("div");
 			label.className = "group-label";
@@ -153,6 +174,19 @@
 				dropdownEl.appendChild(item);
 			}
 		}
+
+		if (config && config.siblings && config.siblings.length > 0) {
+			const div = document.createElement("div");
+			div.className = "section-divider";
+			dropdownEl.appendChild(div);
+			for (const sib of config.siblings) {
+				const slabel = document.createElement("div");
+				slabel.className = "sibling-label";
+				slabel.textContent = `${sib.label || "proxy"} :${sib.port}`;
+				dropdownEl.appendChild(slabel);
+			}
+		}
+
 		const link = document.createElement("a");
 		link.className = "settings";
 		link.href = "/__mdp/switch";
@@ -160,9 +194,35 @@
 		dropdownEl.appendChild(link);
 	}
 
+	async function switchGroup(name) {
+		try {
+			await fetch(`/__mdp/groups/${name}/switch`, { method: "POST" });
+			const members = (config && config.groups && config.groups[name]) || [];
+			const localNames = Object.keys(servers).flatMap((r) =>
+				Object.keys(servers[r]),
+			);
+			const localMember = members.find((m) => localNames.includes(m));
+			if (localMember) {
+				setCookie(localMember);
+			}
+			window.location.reload();
+		} catch { /* ignore */ }
+	}
+
+	async function fetchConfig() {
+		try {
+			const resp = await fetch(API_CONFIG, { signal: AbortSignal.timeout(1000) });
+			if (resp.ok) {
+				config = await resp.json();
+				if (config.cookieName) COOKIE = config.cookieName;
+			}
+		} catch { /* ignore */ }
+	}
+
 	async function poll() {
 		try {
-			const resp = await fetch(API, { signal: AbortSignal.timeout(1000) });
+			await fetchConfig();
+			const resp = await fetch(API_SERVERS, { signal: AbortSignal.timeout(1000) });
 			if (!resp.ok) return;
 			servers = await resp.json();
 			const active = getCookie();
@@ -181,7 +241,6 @@
 	poll();
 	setInterval(poll, POLL_MS);
 
-	// Close dropdown on outside click
 	document.addEventListener("click", (e) => {
 		if (!host.contains(e.target) && open) {
 			open = false;

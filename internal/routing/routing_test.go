@@ -91,11 +91,23 @@ func TestParseCookies(t *testing.T) {
 	}
 }
 
+func TestCookieNameForPort(t *testing.T) {
+	if got := CookieNameForPort(3000); got != "__mdp_upstream_3000" {
+		t.Errorf("CookieNameForPort(3000) = %q, want %q", got, "__mdp_upstream_3000")
+	}
+	if got := CookieNameForPort(4000); got != "__mdp_upstream_4000" {
+		t.Errorf("CookieNameForPort(4000) = %q, want %q", got, "__mdp_upstream_4000")
+	}
+}
+
 func TestResolveUpstream(t *testing.T) {
+	const cookie = DefaultCookieName
+
 	tests := []struct {
 		name             string
 		registrySetup    func() *registry.Registry
 		cookieHeader     string
+		defaultServer    string
 		expectedName     string
 		expectedRedirect bool
 	}{
@@ -104,8 +116,6 @@ func TestResolveUpstream(t *testing.T) {
 			registrySetup: func() *registry.Registry {
 				return registry.New()
 			},
-			cookieHeader:     "",
-			expectedName:     "",
 			expectedRedirect: false,
 		},
 		{
@@ -115,7 +125,6 @@ func TestResolveUpstream(t *testing.T) {
 				reg.Register(&registry.ServerEntry{Name: "app/main", Repo: "app", Port: 3000, PID: 1234})
 				return reg
 			},
-			cookieHeader:     "",
 			expectedName:     "app/main",
 			expectedRedirect: false,
 		},
@@ -127,7 +136,7 @@ func TestResolveUpstream(t *testing.T) {
 				reg.Register(&registry.ServerEntry{Name: "app/feature", Repo: "app", Port: 3001, PID: 1235})
 				return reg
 			},
-			cookieHeader:     "__mdp_upstream=" + url.QueryEscape("app/feature"),
+			cookieHeader:     DefaultCookieName + "=" + url.QueryEscape("app/feature"),
 			expectedName:     "app/feature",
 			expectedRedirect: false,
 		},
@@ -139,8 +148,7 @@ func TestResolveUpstream(t *testing.T) {
 				reg.Register(&registry.ServerEntry{Name: "app/feature", Repo: "app", Port: 3001, PID: 1235})
 				return reg
 			},
-			cookieHeader:     "__mdp_upstream=" + url.QueryEscape("app/deleted"),
-			expectedName:     "",
+			cookieHeader:     DefaultCookieName + "=" + url.QueryEscape("app/deleted"),
 			expectedRedirect: true,
 		},
 		{
@@ -151,8 +159,6 @@ func TestResolveUpstream(t *testing.T) {
 				reg.Register(&registry.ServerEntry{Name: "app/feature", Repo: "app", Port: 3001, PID: 1235})
 				return reg
 			},
-			cookieHeader:     "",
-			expectedName:     "",
 			expectedRedirect: true,
 		},
 		{
@@ -164,7 +170,7 @@ func TestResolveUpstream(t *testing.T) {
 				reg.Register(&registry.ServerEntry{Name: "app/staging", Repo: "app", Port: 3002, PID: 1236})
 				return reg
 			},
-			cookieHeader:     "__mdp_upstream=" + url.QueryEscape("app/staging"),
+			cookieHeader:     DefaultCookieName + "=" + url.QueryEscape("app/staging"),
 			expectedName:     "app/staging",
 			expectedRedirect: false,
 		},
@@ -176,7 +182,68 @@ func TestResolveUpstream(t *testing.T) {
 				reg.Register(&registry.ServerEntry{Name: "app/feature", Repo: "app", Port: 3001, PID: 1235})
 				return reg
 			},
-			cookieHeader:     "session=xyz; __mdp_upstream=" + url.QueryEscape("app/feature") + "; user=john",
+			cookieHeader:     "session=xyz; " + DefaultCookieName + "=" + url.QueryEscape("app/feature") + "; user=john",
+			expectedName:     "app/feature",
+			expectedRedirect: false,
+		},
+		{
+			name: "default upstream used when no cookie",
+			registrySetup: func() *registry.Registry {
+				reg := registry.New()
+				reg.Register(&registry.ServerEntry{Name: "app/main", Repo: "app", Port: 3000, PID: 1234})
+				reg.Register(&registry.ServerEntry{Name: "app/feature", Repo: "app", Port: 3001, PID: 1235})
+				return reg
+			},
+			defaultServer:    "app/main",
+			expectedName:     "app/main",
+			expectedRedirect: false,
+		},
+		{
+			name: "cookie takes priority over default",
+			registrySetup: func() *registry.Registry {
+				reg := registry.New()
+				reg.Register(&registry.ServerEntry{Name: "app/main", Repo: "app", Port: 3000, PID: 1234})
+				reg.Register(&registry.ServerEntry{Name: "app/feature", Repo: "app", Port: 3001, PID: 1235})
+				return reg
+			},
+			cookieHeader:     DefaultCookieName + "=" + url.QueryEscape("app/feature"),
+			defaultServer:    "app/main",
+			expectedName:     "app/feature",
+			expectedRedirect: false,
+		},
+		{
+			name: "stale default ignored",
+			registrySetup: func() *registry.Registry {
+				reg := registry.New()
+				reg.Register(&registry.ServerEntry{Name: "app/main", Repo: "app", Port: 3000, PID: 1234})
+				reg.Register(&registry.ServerEntry{Name: "app/feature", Repo: "app", Port: 3001, PID: 1235})
+				return reg
+			},
+			defaultServer:    "app/deleted",
+			expectedRedirect: true,
+		},
+		{
+			name: "stale cookie falls through to valid default",
+			registrySetup: func() *registry.Registry {
+				reg := registry.New()
+				reg.Register(&registry.ServerEntry{Name: "app/main", Repo: "app", Port: 3000, PID: 1234})
+				reg.Register(&registry.ServerEntry{Name: "app/feature", Repo: "app", Port: 3001, PID: 1235})
+				return reg
+			},
+			cookieHeader:     DefaultCookieName + "=" + url.QueryEscape("app/deleted"),
+			defaultServer:    "app/main",
+			expectedName:     "app/main",
+			expectedRedirect: false,
+		},
+		{
+			name: "custom cookie name",
+			registrySetup: func() *registry.Registry {
+				reg := registry.New()
+				reg.Register(&registry.ServerEntry{Name: "app/main", Repo: "app", Port: 3000, PID: 1234})
+				reg.Register(&registry.ServerEntry{Name: "app/feature", Repo: "app", Port: 3001, PID: 1235})
+				return reg
+			},
+			cookieHeader:     "__mdp_upstream_4000=" + url.QueryEscape("app/feature"),
 			expectedName:     "app/feature",
 			expectedRedirect: false,
 		},
@@ -185,7 +252,11 @@ func TestResolveUpstream(t *testing.T) {
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
 			reg := tt.registrySetup()
-			result := ResolveUpstream(reg, tt.cookieHeader)
+			cookieName := cookie
+			if tt.name == "custom cookie name" {
+				cookieName = "__mdp_upstream_4000"
+			}
+			result := ResolveUpstream(reg, tt.cookieHeader, cookieName, tt.defaultServer)
 
 			if result.Redirect != tt.expectedRedirect {
 				t.Errorf("redirect: got %v, expected %v", result.Redirect, tt.expectedRedirect)
@@ -209,14 +280,16 @@ func TestResolveUpstream(t *testing.T) {
 func TestMakeSetCookie(t *testing.T) {
 	tests := []struct {
 		name       string
+		cookieName string
 		serverName string
 		checkFn    func(*http.Cookie) bool
 	}{
 		{
 			name:       "simple name",
+			cookieName: DefaultCookieName,
 			serverName: "app",
 			checkFn: func(c *http.Cookie) bool {
-				return c.Name == CookieName &&
+				return c.Name == DefaultCookieName &&
 					c.Value == "app" &&
 					c.Path == "/" &&
 					c.SameSite == http.SameSiteLaxMode
@@ -224,29 +297,29 @@ func TestMakeSetCookie(t *testing.T) {
 		},
 		{
 			name:       "name with slash (URL-encoded)",
+			cookieName: DefaultCookieName,
 			serverName: "myapp/feature-branch",
 			checkFn: func(c *http.Cookie) bool {
-				return c.Name == CookieName &&
+				return c.Name == DefaultCookieName &&
 					c.Value == url.QueryEscape("myapp/feature-branch") &&
 					c.Path == "/" &&
 					c.SameSite == http.SameSiteLaxMode
 			},
 		},
 		{
-			name:       "name with special chars",
-			serverName: "app/feature@v1.0",
+			name:       "custom cookie name",
+			cookieName: "__mdp_upstream_4000",
+			serverName: "myapp/feature-branch",
 			checkFn: func(c *http.Cookie) bool {
-				return c.Name == CookieName &&
-					c.Value == url.QueryEscape("app/feature@v1.0") &&
-					c.Path == "/" &&
-					c.SameSite == http.SameSiteLaxMode
+				return c.Name == "__mdp_upstream_4000" &&
+					c.Value == url.QueryEscape("myapp/feature-branch")
 			},
 		},
 	}
 
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
-			cookie := MakeSetCookie(tt.serverName)
+			cookie := MakeSetCookie(tt.cookieName, tt.serverName)
 			if !tt.checkFn(cookie) {
 				t.Errorf("cookie validation failed: %+v", cookie)
 			}
@@ -275,12 +348,9 @@ func TestCookieRoundTrip(t *testing.T) {
 
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
-			// Encode
-			cookie := MakeSetCookie(tt.serverName)
-
-			// Decode
-			cookies := ParseCookies(CookieName + "=" + cookie.Value)
-			decoded := cookies[CookieName]
+			cookie := MakeSetCookie(DefaultCookieName, tt.serverName)
+			cookies := ParseCookies(DefaultCookieName + "=" + cookie.Value)
+			decoded := cookies[DefaultCookieName]
 
 			if decoded != tt.serverName {
 				t.Errorf("round-trip failed: got %q, expected %q", decoded, tt.serverName)

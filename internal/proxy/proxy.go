@@ -21,20 +21,24 @@ type Proxy struct {
 	reg        *registry.Registry
 	listenPort int
 	listenTLS  bool
+	cookieName string
 	rp         *httputil.ReverseProxy
 }
 
 // NewProxy creates a new Proxy.
-func NewProxy(reg *registry.Registry, listenPort int, listenTLS bool) *Proxy {
+func NewProxy(reg *registry.Registry, listenPort int, listenTLS bool, cookieName string) *Proxy {
+	if cookieName == "" {
+		cookieName = routing.DefaultCookieName
+	}
 	p := &Proxy{
 		reg:        reg,
 		listenPort: listenPort,
 		listenTLS:  listenTLS,
+		cookieName: cookieName,
 	}
-	// Skip TLS verification for upstream connections (localhost self-signed certs)
 	p.rp = &httputil.ReverseProxy{
 		Rewrite:       p.rewrite,
-		FlushInterval: -1, // required for SSE / streaming
+		FlushInterval: -1,
 		Transport: &http.Transport{
 			TLSClientConfig: &tls.Config{InsecureSkipVerify: true},
 		},
@@ -52,6 +56,11 @@ func NewProxy(reg *registry.Registry, listenPort int, listenTLS bool) *Proxy {
 	return p
 }
 
+// CookieName returns the cookie name this proxy uses for routing.
+func (p *Proxy) CookieName() string {
+	return p.cookieName
+}
+
 // SetModifyResponse wires an external ModifyResponse hook (e.g. HTML injection).
 // It chains after the built-in Location header rewriting.
 func (p *Proxy) SetModifyResponse(fn func(*http.Response) error) {
@@ -66,11 +75,15 @@ func (p *Proxy) SetModifyResponse(fn func(*http.Response) error) {
 	}
 }
 
+func (p *Proxy) resolve(cookieHeader string) routing.ResolveResult {
+	return routing.ResolveUpstream(p.reg, cookieHeader, p.cookieName, p.reg.GetDefault())
+}
+
 // rewrite is the Rewrite function for httputil.ReverseProxy.
 // MUST use Rewrite — Director is deprecated since Go 1.20.
 func (p *Proxy) rewrite(r *httputil.ProxyRequest) {
 	cookieHeader := r.In.Header.Get("Cookie")
-	result := routing.ResolveUpstream(p.reg, cookieHeader)
+	result := p.resolve(cookieHeader)
 	if result.Entry == nil {
 		return
 	}
@@ -93,7 +106,6 @@ func (p *Proxy) rewrite(r *httputil.ProxyRequest) {
 	r.Out.Header.Set("X-Forwarded-Proto", proto)
 	r.Out.Header.Set("X-Forwarded-Port", fmt.Sprintf("%d", p.listenPort))
 
-	// Fix WebSocket header casing (Go canonicalises Sec-WebSocket-Key incorrectly)
 	if IsWebSocketUpgrade(r.In) {
 		FixWebSocketHeaders(r.Out.Header)
 	}
@@ -102,7 +114,7 @@ func (p *Proxy) rewrite(r *httputil.ProxyRequest) {
 // ServeHTTP implements http.Handler.
 func (p *Proxy) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 	cookieHeader := r.Header.Get("Cookie")
-	result := routing.ResolveUpstream(p.reg, cookieHeader)
+	result := p.resolve(cookieHeader)
 
 	if result.Redirect || result.Entry == nil {
 		http.Redirect(w, r, switchPagePath, http.StatusFound)
@@ -126,7 +138,6 @@ func (p *Proxy) rewriteLocationByHost(resp *http.Response, host string) {
 	proxyAddr := fmt.Sprintf("localhost:%d", p.listenPort)
 	loc = strings.ReplaceAll(loc, "http://"+host, proto+"://"+proxyAddr)
 	loc = strings.ReplaceAll(loc, "https://"+host, proto+"://"+proxyAddr)
-	// Also rewrite 127.0.0.1 and [::1] variants of the same port
 	_, portStr, _ := net.SplitHostPort(host)
 	if portStr != "" {
 		for _, alt := range []string{"127.0.0.1:" + portStr, "[::1]:" + portStr} {

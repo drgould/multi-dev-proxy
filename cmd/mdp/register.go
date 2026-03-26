@@ -26,14 +26,22 @@ func init() {
 	registerCmd.Flags().Int("pid", 0, "Process ID of the service")
 	registerCmd.Flags().IntP("proxy-port", "P", 3000, "Proxy port to connect to")
 	registerCmd.Flags().BoolP("list", "l", false, "List registered services")
+	registerCmd.Flags().String("group", "", "Group name override (default: git branch)")
+	registerCmd.Flags().Int("control-port", 13100, "Orchestrator control port")
 }
 
 func runRegister(cmd *cobra.Command, args []string) error {
 	proxyPort, _ := cmd.Flags().GetInt("proxy-port")
 	listFlag, _ := cmd.Flags().GetBool("list")
+	controlPort, _ := cmd.Flags().GetInt("control-port")
+	groupFlag, _ := cmd.Flags().GetString("group")
 
 	if envPort := os.Getenv("MDP_PROXY_PORT"); envPort != "" && !cmd.Flags().Changed("proxy-port") {
 		fmt.Sscanf(envPort, "%d", &proxyPort)
+	}
+
+	if isOrchestratorRunning(controlPort) {
+		return runRegisterViaOrchestrator(cmd, args, controlPort, proxyPort, groupFlag, listFlag)
 	}
 
 	proxyURL := discoverProxyURL(proxyPort)
@@ -53,7 +61,7 @@ func runRegister(cmd *cobra.Command, args []string) error {
 	}
 	pid, _ := cmd.Flags().GetInt("pid")
 
-	body, _ := json.Marshal(map[string]any{"name": name, "port": port, "pid": pid})
+	body, _ := json.Marshal(map[string]any{"name": name, "port": port, "pid": pid, "group": groupFlag})
 	req, _ := http.NewRequest(http.MethodPost, proxyURL+"/__mdp/register", bytes.NewReader(body))
 	req.Header.Set("Content-Type", "application/json")
 	resp, err := tlsSkipClient().Do(req)
@@ -66,6 +74,62 @@ func runRegister(cmd *cobra.Command, args []string) error {
 		return fmt.Errorf("register failed (%d): %s", resp.StatusCode, b)
 	}
 	fmt.Printf("Registered %s on port %d\n", name, port)
+	return nil
+}
+
+func runRegisterViaOrchestrator(cmd *cobra.Command, args []string, controlPort, proxyPort int, groupFlag string, listFlag bool) error {
+	controlURL := fmt.Sprintf("http://127.0.0.1:%d", controlPort)
+	client := &http.Client{Timeout: 5 * time.Second}
+
+	if listFlag {
+		resp, err := client.Get(controlURL + "/__mdp/proxies")
+		if err != nil {
+			return fmt.Errorf("orchestrator not reachable: %w", err)
+		}
+		defer resp.Body.Close()
+		var result []map[string]any
+		json.NewDecoder(resp.Body).Decode(&result)
+		for _, p := range result {
+			fmt.Printf("[:%v]\n", p["port"])
+			if servers, ok := p["servers"].([]any); ok {
+				for _, s := range servers {
+					if srv, ok := s.(map[string]any); ok {
+						fmt.Printf("  %s (:%v)\n", srv["name"], srv["port"])
+					}
+				}
+			}
+		}
+		return nil
+	}
+
+	if len(args) == 0 {
+		return fmt.Errorf("name is required (or use --list to list servers)")
+	}
+	name := args[0]
+
+	port, _ := cmd.Flags().GetInt("port")
+	if port <= 0 {
+		return fmt.Errorf("--port is required and must be positive")
+	}
+	pid, _ := cmd.Flags().GetInt("pid")
+
+	body, _ := json.Marshal(map[string]any{
+		"name":      name,
+		"port":      port,
+		"pid":       pid,
+		"proxyPort": proxyPort,
+		"group":     groupFlag,
+	})
+	resp, err := client.Post(controlURL+"/__mdp/register", "application/json", bytes.NewReader(body))
+	if err != nil {
+		return fmt.Errorf("orchestrator not reachable: %w", err)
+	}
+	defer resp.Body.Close()
+	if resp.StatusCode != http.StatusOK {
+		b, _ := io.ReadAll(resp.Body)
+		return fmt.Errorf("register failed (%d): %s", resp.StatusCode, b)
+	}
+	fmt.Printf("Registered %s on port %d (proxy :%d)\n", name, port, proxyPort)
 	return nil
 }
 

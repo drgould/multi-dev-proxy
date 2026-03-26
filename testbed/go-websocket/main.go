@@ -52,8 +52,7 @@ func infoHandler(port string) http.HandlerFunc {
 	return func(w http.ResponseWriter, r *http.Request) {
 		w.Header().Set("Content-Type", "application/json")
 		json.NewEncoder(w).Encode(map[string]string{
-			"server": "a",
-			"color":  "blue",
+			"server": "go-websocket",
 			"port":   port,
 			"time":   time.Now().Format(time.RFC3339),
 		})
@@ -73,10 +72,10 @@ func indexHandler(port string) http.HandlerFunc {
 
 const page = `<!DOCTYPE html>
 <html>
-<head><title>Server A — Blue</title></head>
+<head><title>Go WebSocket</title></head>
 <body style="margin:0;font-family:-apple-system,BlinkMacSystemFont,'Segoe UI',sans-serif;background:linear-gradient(135deg,#0f2027,#1e3a5f,#2c5364);color:#fff;min-height:100vh;display:flex;align-items:center;justify-content:center">
 <div style="max-width:600px;width:100%%;padding:2rem">
-  <h1 style="font-size:2.5rem;margin:0 0 0.5rem">Server A — Blue</h1>
+  <h1 style="font-size:2.5rem;margin:0 0 0.5rem">Go WebSocket</h1>
   <div style="background:rgba(255,255,255,0.1);border-radius:12px;padding:1.5rem;margin-bottom:1.5rem">
     <p><strong>Port:</strong> %s</p>
     <p><strong>Time:</strong> %s</p>

@@ -298,6 +298,77 @@ func TestCount(t *testing.T) {
 	})
 }
 
+func TestDefaultUpstream(t *testing.T) {
+	t.Run("set and get", func(t *testing.T) {
+		r := New()
+		r.Register(&ServerEntry{Name: "repo/main", Repo: "repo", Port: 3000})
+		if err := r.SetDefault("repo/main"); err != nil {
+			t.Fatalf("SetDefault() error = %v", err)
+		}
+		if got := r.GetDefault(); got != "repo/main" {
+			t.Errorf("GetDefault() = %q, want %q", got, "repo/main")
+		}
+	})
+
+	t.Run("set nonexistent server", func(t *testing.T) {
+		r := New()
+		if err := r.SetDefault("repo/main"); err == nil {
+			t.Error("SetDefault() expected error for nonexistent server")
+		}
+	})
+
+	t.Run("clear", func(t *testing.T) {
+		r := New()
+		r.Register(&ServerEntry{Name: "repo/main", Repo: "repo", Port: 3000})
+		r.SetDefault("repo/main")
+		r.ClearDefault()
+		if got := r.GetDefault(); got != "" {
+			t.Errorf("GetDefault() after ClearDefault() = %q, want empty", got)
+		}
+	})
+
+	t.Run("deregister clears default", func(t *testing.T) {
+		r := New()
+		r.Register(&ServerEntry{Name: "repo/main", Repo: "repo", Port: 3000})
+		r.Register(&ServerEntry{Name: "repo/dev", Repo: "repo", Port: 3001})
+		r.SetDefault("repo/main")
+		r.Deregister("repo/main")
+		if got := r.GetDefault(); got != "" {
+			t.Errorf("GetDefault() after deregistering default = %q, want empty", got)
+		}
+	})
+
+	t.Run("deregister non-default preserves default", func(t *testing.T) {
+		r := New()
+		r.Register(&ServerEntry{Name: "repo/main", Repo: "repo", Port: 3000})
+		r.Register(&ServerEntry{Name: "repo/dev", Repo: "repo", Port: 3001})
+		r.SetDefault("repo/main")
+		r.Deregister("repo/dev")
+		if got := r.GetDefault(); got != "repo/main" {
+			t.Errorf("GetDefault() = %q, want %q", got, "repo/main")
+		}
+	})
+
+	t.Run("empty default by default", func(t *testing.T) {
+		r := New()
+		if got := r.GetDefault(); got != "" {
+			t.Errorf("GetDefault() on new registry = %q, want empty", got)
+		}
+	})
+}
+
+func TestGroupField(t *testing.T) {
+	r := New()
+	entry := &ServerEntry{Name: "repo/main", Repo: "repo", Group: "main", Port: 3000}
+	if err := r.Register(entry); err != nil {
+		t.Fatalf("Register() error = %v", err)
+	}
+	got := r.Get("repo/main")
+	if got.Group != "main" {
+		t.Errorf("Group = %q, want %q", got.Group, "main")
+	}
+}
+
 func TestConcurrent(t *testing.T) {
 	t.Run("50 goroutines concurrently registering different names", func(t *testing.T) {
 		r := New()

@@ -10,6 +10,7 @@ import (
 type ServerEntry struct {
 	Name         string
 	Repo         string
+	Group        string // group this service belongs to (typically git branch)
 	Port         int
 	PID          int
 	Scheme       string // "http" or "https"; defaults to "http"
@@ -20,8 +21,9 @@ type ServerEntry struct {
 
 // Registry holds all registered dev servers in memory.
 type Registry struct {
-	mu      sync.RWMutex
-	servers map[string]*ServerEntry
+	mu             sync.RWMutex
+	servers        map[string]*ServerEntry
+	defaultServer  string
 }
 
 // New creates a new empty Registry.
@@ -47,11 +49,15 @@ func (r *Registry) Register(entry *ServerEntry) error {
 }
 
 // Deregister removes a server entry. Returns true if it existed.
+// Clears the default if the deregistered server was the default.
 func (r *Registry) Deregister(name string) bool {
 	r.mu.Lock()
 	defer r.mu.Unlock()
 	_, exists := r.servers[name]
 	delete(r.servers, name)
+	if r.defaultServer == name {
+		r.defaultServer = ""
+	}
 	return exists
 }
 
@@ -89,4 +95,29 @@ func (r *Registry) Count() int {
 	r.mu.RLock()
 	defer r.mu.RUnlock()
 	return len(r.servers)
+}
+
+// SetDefault sets the default upstream server. Returns error if the server is not registered.
+func (r *Registry) SetDefault(name string) error {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	if _, ok := r.servers[name]; !ok {
+		return errors.New("server not found: " + name)
+	}
+	r.defaultServer = name
+	return nil
+}
+
+// ClearDefault removes the default upstream setting.
+func (r *Registry) ClearDefault() {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	r.defaultServer = ""
+}
+
+// GetDefault returns the current default upstream server name, or "".
+func (r *Registry) GetDefault() string {
+	r.mu.RLock()
+	defer r.mu.RUnlock()
+	return r.defaultServer
 }

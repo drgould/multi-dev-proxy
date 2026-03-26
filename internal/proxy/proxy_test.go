@@ -17,7 +17,7 @@ func serverPort(s *httptest.Server) int {
 func newTestProxy(t *testing.T) (*Proxy, *registry.Registry) {
 	t.Helper()
 	reg := registry.New()
-	p := NewProxy(reg, 3000, false)
+	p := NewProxy(reg, 3000, false, "")
 	return p, reg
 }
 

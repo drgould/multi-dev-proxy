@@ -35,7 +35,7 @@ export default async function Home() {
           letterSpacing: "-0.5px",
         }}
       >
-        Server C &mdash; Next.js
+        Next.js
       </h1>
 
       <p style={{ margin: "0 0 32px", opacity: 0.6, fontSize: "0.9rem" }}>

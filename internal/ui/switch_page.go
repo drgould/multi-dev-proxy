@@ -113,6 +113,16 @@ func renderPage(content string, isEmpty bool) string {
     .theme-btn:last-child { border-radius: 0 4px 4px 0; }
     .theme-btn:not(:first-child) { border-left: none; }
     .theme-btn.active { background: #3b82f6; color: #fff; border-color: #3b82f6; }
+    .groups-section { margin-bottom: 2rem; }
+    .groups-section h2 { font-size: 0.9rem; font-weight: 500; color: var(--muted); text-transform: uppercase; letter-spacing: 0.05em; margin-bottom: 0.5rem; }
+    .group-row { display: flex; align-items: center; justify-content: space-between; padding: 0.5rem 0.75rem; border-bottom: 1px solid var(--border-light); }
+    .group-name { font-size: 0.9rem; }
+    .group-members { font-size: 0.75rem; color: var(--muted); }
+    .siblings-section { margin-bottom: 2rem; }
+    .siblings-section h2 { font-size: 0.9rem; font-weight: 500; color: var(--muted); text-transform: uppercase; letter-spacing: 0.05em; margin-bottom: 0.5rem; }
+    .sibling-row { padding: 0.5rem 0.75rem; border-bottom: 1px solid var(--border-light); }
+    .sibling-link { color: #3b82f6; text-decoration: none; font-size: 0.9rem; }
+    .sibling-link:hover { text-decoration: underline; }
   </style>
 </head>
 <body>
@@ -155,6 +165,87 @@ func renderPage(content string, isEmpty bool) string {
     document.getElementById('theme-dark').onclick = function() { setThemeCookie('dark'); applyTheme(); };
     applyTheme();
     setTimeout(function() { location.reload(); }, 3000);
+
+    var localServerNames = [];
+    fetch('/__mdp/servers').then(function(r) { return r.json(); }).then(function(data) {
+      Object.keys(data).forEach(function(repo) {
+        Object.keys(data[repo]).forEach(function(n) { localServerNames.push(n); });
+      });
+    }).catch(function() {});
+
+    fetch('/__mdp/config').then(function(r) { return r.json(); }).then(function(cfg) {
+      var container = document.querySelector('.container');
+      var header = document.querySelector('.header');
+      var cookieName = cfg.cookieName || '__mdp_upstream';
+
+      function switchGroup(name) {
+        var members = cfg.groups[name] || [];
+        fetch('/__mdp/groups/' + name + '/switch', {method:'POST'}).then(function() {
+          var local = members.find(function(m) { return localServerNames.indexOf(m) >= 0; });
+          if (local) {
+            document.cookie = cookieName + '=' + encodeURIComponent(local) + '; path=/; SameSite=Lax';
+          }
+          window.location.href = '/';
+        });
+      }
+
+      if (cfg.groups && Object.keys(cfg.groups).length > 0) {
+        var sec = document.createElement('div');
+        sec.className = 'groups-section';
+        sec.innerHTML = '<h2>Groups</h2>';
+        Object.keys(cfg.groups).sort().forEach(function(name) {
+          var row = document.createElement('div');
+          row.className = 'group-row';
+          var members = cfg.groups[name] || [];
+          row.innerHTML = '<span class="group-name">' + name + '<span class="group-members"> — ' + members.join(', ') + '</span></span>';
+          var btn = document.createElement('button');
+          btn.className = 'btn';
+          btn.textContent = 'Switch';
+          btn.onclick = function() { switchGroup(name); };
+          row.appendChild(btn);
+          sec.appendChild(row);
+        });
+        header.after(sec);
+      }
+
+      if (cfg.siblings && cfg.siblings.length > 0) {
+        var proto = location.protocol;
+        cfg.siblings.forEach(function(sib) {
+          var sibBase = proto + '//localhost:' + sib.port;
+          fetch(sibBase + '/__mdp/servers').then(function(r) { return r.json(); }).then(function(data) {
+            var repos = Object.keys(data).sort();
+            if (repos.length === 0) return;
+            var sibSec = document.createElement('div');
+            sibSec.className = 'repo-group';
+            var label = sib.label || 'proxy';
+            sibSec.innerHTML = '<h2 class="repo-name">' + label + ' :' + sib.port + '</h2>';
+            repos.forEach(function(repo) {
+              var tbl = document.createElement('table');
+              tbl.innerHTML = '<thead><tr><th>Branch</th><th>Port</th><th>PID</th><th></th></tr></thead>';
+              var tbody = document.createElement('tbody');
+              Object.keys(data[repo]).sort().forEach(function(fullName) {
+                var info = data[repo][fullName];
+                var branch = fullName.indexOf('/') >= 0 ? fullName.split('/').pop() : fullName;
+                var tr = document.createElement('tr');
+                var form = document.createElement('form');
+                form.method = 'POST';
+                form.action = sibBase + '/__mdp/switch/' + encodeURIComponent(fullName);
+                form.innerHTML = '<button type="submit" class="btn">Switch</button>';
+                var tdName = document.createElement('td'); tdName.textContent = branch;
+                var tdPort = document.createElement('td'); tdPort.className = 'mono'; tdPort.textContent = ':' + info.port;
+                var tdPid = document.createElement('td'); tdPid.className = 'mono'; tdPid.textContent = info.pid || '0';
+                var tdBtn = document.createElement('td'); tdBtn.appendChild(form);
+                tr.appendChild(tdName); tr.appendChild(tdPort); tr.appendChild(tdPid); tr.appendChild(tdBtn);
+                tbody.appendChild(tr);
+              });
+              tbl.appendChild(tbody);
+              sibSec.appendChild(tbl);
+            });
+            container.insertBefore(sibSec, container.querySelector('.refresh'));
+          }).catch(function() {});
+        });
+      }
+    }).catch(function() {});
   })();
   </script>
 </body>

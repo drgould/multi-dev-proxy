@@ -2,7 +2,7 @@
 
 ## Project
 
-`mdp` — a cross-platform Go CLI that runs a reverse proxy in front of multiple dev servers across branches and repos. Binary name is `mdp`.
+`mdp` — a cross-platform Go CLI that runs an orchestrator managing multiple reverse proxies in front of dev servers across branches and repos. Binary name is `mdp`.
 
 ## Build & Test
 
@@ -27,18 +27,21 @@ npm run test:e2e         # run Playwright tests (separate terminal)
 ## Architecture
 
 ```
-cmd/mdp/           CLI entrypoints (start, run, register)
+cmd/mdp/              CLI entrypoints (root orchestrator, run, register, switch, kill)
 internal/
-  api/             HTTP handlers for /__mdp/* control endpoints
-  certs/           TLS cert generation (mkcert preferred, self-signed fallback)
-  detect/          Git repo/branch detection, stdout port detection
-  inject/          HTML response injection (<script> tag for widget)
-  ports/           Free port allocation within a configurable range
-  process/         Process group management, signal handling (build-tagged unix/windows)
-  proxy/           httputil.ReverseProxy wrapper with cookie-based routing
-  registry/        In-memory server registry with RWMutex, dead server pruner
-  routing/         Cookie parsing, upstream resolution
-  ui/              Switch page HTML renderer; widget.js (go:embed) Shadow DOM script
+  api/                HTTP handlers for /__mdp/* per-proxy endpoints + CORS + config
+  certs/              TLS cert generation (mkcert preferred, self-signed fallback)
+  config/             mdp.yaml parser (service definitions, env vars, port mappings)
+  detect/             Git repo/branch detection, stdout port detection
+  inject/             HTML response injection (<script> tag for widget)
+  orchestrator/       Core orchestrator: proxy instance management, service runner, control API, groups
+  ports/              Free port allocation within a configurable range
+  process/            Process group management, signal handling (build-tagged unix/windows)
+  proxy/              httputil.ReverseProxy wrapper with cookie-based routing
+  registry/           In-memory server registry with RWMutex, dead server pruner, default upstream
+  routing/            Cookie parsing, upstream resolution (cookie → default → redirect)
+  tui/                Bubbletea TUI: groups + proxies/services, keyboard nav, live updates
+  ui/                 Switch page HTML renderer; widget.js (go:embed) Shadow DOM script
 ```
 
 ## Key Conventions
@@ -50,13 +53,16 @@ internal/
 - **`httputil.ReverseProxy.Rewrite`** — never use the deprecated `Director` field
 - **Connect upstreams via `localhost`** — not hardcoded IP addresses
 - **Shadow DOM** for the injected widget — prevents CSS leaking in either direction
-- Cookie name: `__mdp_upstream`, API prefix: `/__mdp/`
+- Cookie name: `__mdp_upstream_<port>` (port-specific to avoid collisions), API prefix: `/__mdp/`
 - Server names use `repo/branch` format
 - PID is optional when registering servers (for externally managed processes like Docker)
+- Control API on port 13100 (configurable via `--control-port`)
+- Service groups derived dynamically from registered services' group fields (typically git branch)
 
 ## Dependencies
 
-Only two direct dependencies — keep it minimal:
-
 - `github.com/spf13/cobra` — CLI framework
 - `github.com/andybalholm/brotli` — brotli decompression for HTML injection
+- `gopkg.in/yaml.v3` — YAML config file parsing
+- `github.com/charmbracelet/bubbletea` — TUI framework
+- `github.com/charmbracelet/lipgloss` — TUI styling

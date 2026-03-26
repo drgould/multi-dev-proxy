@@ -1,0 +1,44 @@
+services:
+  # === dev environment: Vite frontend + Echo API backend ===
+  vite:
+    command: npm --prefix ./vite-ts run dev
+    proxy: 3000
+    group: dev
+
+  echo:
+    command: ./echo-api/echo-api
+    proxy: 3001
+    group: dev
+
+  # === staging environment: Next.js frontend + Docker backend ===
+  next:
+    command: npm --prefix ./nextjs run dev
+    proxy: 3000
+    group: staging
+
+  docker:
+    command: docker compose up --build --wait
+    dir: ./docker
+    proxy: 3001
+    group: staging
+    env:
+      NGINX_PORT: auto
+    ports:
+      - env: NGINX_PORT
+        proxy: 3001
+        name: docker
+
+  # === ungrouped frontends (manual switch on :3000 only) ===
+  vue:
+    command: npm --prefix ./vue run dev
+    proxy: 3000
+
+  svelte:
+    command: npm --prefix ./svelte run dev
+    proxy: 3000
+
+  go-websocket:
+    command: ./go-websocket/go-websocket
+    proxy: 3000
+
+port_range: "10000-60000"

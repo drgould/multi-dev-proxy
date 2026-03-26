@@ -1,6 +1,7 @@
 package routing
 
 import (
+	"fmt"
 	"net/http"
 	"net/url"
 	"strings"
@@ -8,8 +9,14 @@ import (
 	"github.com/derekgould/multi-dev-proxy/internal/registry"
 )
 
-// CookieName is the cookie used to track the active upstream server.
-const CookieName = "__mdp_upstream"
+// DefaultCookieName is the default cookie used to track the active upstream server.
+const DefaultCookieName = "__mdp_upstream"
+
+// CookieNameForPort returns a port-scoped cookie name to avoid collisions
+// when multiple proxies run on the same host.
+func CookieNameForPort(port int) string {
+	return fmt.Sprintf("__mdp_upstream_%d", port)
+}
 
 // ParseCookies parses a Cookie header string into a name→value map.
 // Values are URL-decoded.
@@ -42,12 +49,13 @@ type ResolveResult struct {
 	Redirect bool                  // true if should redirect to /__mdp/switch
 }
 
-// ResolveUpstream picks the upstream server based on registry state and cookie.
+// ResolveUpstream picks the upstream server based on registry state, cookie, and default.
 //   - 0 servers → {nil, false} (show empty switch page inline)
 //   - 1 server  → {that server, false} (auto-route, no cookie needed)
 //   - N servers + valid cookie → {matched server, false}
-//   - N servers + no/stale cookie → {nil, true} (redirect to switch page)
-func ResolveUpstream(reg *registry.Registry, cookieHeader string) ResolveResult {
+//   - N servers + valid default → {default server, false}
+//   - N servers + no cookie/default → {nil, true} (redirect to switch page)
+func ResolveUpstream(reg *registry.Registry, cookieHeader, cookieName, defaultServer string) ResolveResult {
 	count := reg.Count()
 	if count == 0 {
 		return ResolveResult{}
@@ -56,23 +64,29 @@ func ResolveUpstream(reg *registry.Registry, cookieHeader string) ResolveResult 
 	if count == 1 {
 		return ResolveResult{Entry: entries[0]}
 	}
-	// Multiple servers — check cookie
+
 	cookies := ParseCookies(cookieHeader)
-	preferred := cookies[CookieName]
+	preferred := cookies[cookieName]
 	if preferred != "" {
 		if entry := reg.Get(preferred); entry != nil {
 			return ResolveResult{Entry: entry}
 		}
 	}
-	// No valid cookie → redirect
+
+	if defaultServer != "" {
+		if entry := reg.Get(defaultServer); entry != nil {
+			return ResolveResult{Entry: entry}
+		}
+	}
+
 	return ResolveResult{Redirect: true}
 }
 
 // MakeSetCookie creates the Set-Cookie header value for the given server name.
 // Server names like "repo/branch" are URL-encoded.
-func MakeSetCookie(serverName string) *http.Cookie {
+func MakeSetCookie(cookieName, serverName string) *http.Cookie {
 	return &http.Cookie{
-		Name:     CookieName,
+		Name:     cookieName,
 		Value:    url.QueryEscape(serverName),
 		Path:     "/",
 		SameSite: http.SameSiteLaxMode,

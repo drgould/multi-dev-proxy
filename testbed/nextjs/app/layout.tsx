@@ -2,8 +2,8 @@ import type { Metadata } from "next";
 import "./globals.css";
 
 export const metadata: Metadata = {
-  title: "Server C — Next.js",
-  description: "mdp testbed server C",
+  title: "Next.js",
+  description: "mdp testbed — Next.js",
 };
 
 export default function RootLayout({

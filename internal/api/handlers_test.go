@@ -308,6 +308,8 @@ func TestDeregisterHandler(t *testing.T) {
 }
 
 func TestSwitchHandler(t *testing.T) {
+	cookieName := routing.DefaultCookieName
+
 	tests := []struct {
 		name        string
 		method      string
@@ -348,7 +350,7 @@ func TestSwitchHandler(t *testing.T) {
 			if tt.preRegister {
 				_ = reg.Register(&registry.ServerEntry{Name: "app/main", Repo: "app", Port: 3000, PID: 100})
 			}
-			handler := SwitchHandler(reg)
+			handler := SwitchHandler(reg, cookieName)
 
 			req := httptest.NewRequest(tt.method, tt.path, nil)
 			namePart := strings.TrimPrefix(tt.path, "/__mdp/switch/")
@@ -366,16 +368,19 @@ func TestSwitchHandler(t *testing.T) {
 				cookies := rec.Result().Cookies()
 				found := false
 				for _, c := range cookies {
-					if c.Name == routing.CookieName {
+					if c.Name == cookieName {
 						found = true
 						break
 					}
 				}
 				if !found {
-					t.Errorf("expected Set-Cookie header with cookie name %q, not found", routing.CookieName)
+					t.Errorf("expected Set-Cookie header with cookie name %q, not found", cookieName)
 				}
 				if loc := rec.Header().Get("Location"); loc != "/" {
-					t.Errorf("Location = %q, want /", loc)
+					t.Errorf("Location = %q, want /__mdp/switch", loc)
+				}
+				if d := reg.GetDefault(); d != "app/main" {
+					t.Errorf("default = %q, want %q", d, "app/main")
 				}
 			}
 
@@ -388,4 +393,65 @@ func TestSwitchHandler(t *testing.T) {
 			}
 		})
 	}
+}
+
+func TestDefaultHandler(t *testing.T) {
+	t.Run("get empty default", func(t *testing.T) {
+		reg := registry.New()
+		handler := DefaultHandler(reg)
+		req := httptest.NewRequest(http.MethodGet, "/__mdp/default", nil)
+		rec := httptest.NewRecorder()
+		handler.ServeHTTP(rec, req)
+		var body map[string]string
+		decodeJSON(t, rec, &body)
+		if body["default"] != "" {
+			t.Errorf("default = %q, want empty", body["default"])
+		}
+	})
+
+	t.Run("delete default", func(t *testing.T) {
+		reg := registry.New()
+		reg.Register(&registry.ServerEntry{Name: "app/main", Repo: "app", Port: 3000})
+		reg.SetDefault("app/main")
+		handler := DefaultHandler(reg)
+		req := httptest.NewRequest(http.MethodDelete, "/__mdp/default", nil)
+		rec := httptest.NewRecorder()
+		handler.ServeHTTP(rec, req)
+		if rec.Code != http.StatusOK {
+			t.Fatalf("status = %d, want %d", rec.Code, http.StatusOK)
+		}
+		if d := reg.GetDefault(); d != "" {
+			t.Errorf("default not cleared: %q", d)
+		}
+	})
+}
+
+func TestDefaultSetHandler(t *testing.T) {
+	t.Run("set existing", func(t *testing.T) {
+		reg := registry.New()
+		reg.Register(&registry.ServerEntry{Name: "app/main", Repo: "app", Port: 3000})
+		handler := DefaultSetHandler(reg)
+		req := httptest.NewRequest(http.MethodPost, "/__mdp/default/app%2Fmain", nil)
+		req.SetPathValue("name", "app/main")
+		rec := httptest.NewRecorder()
+		handler.ServeHTTP(rec, req)
+		if rec.Code != http.StatusOK {
+			t.Fatalf("status = %d, want %d", rec.Code, http.StatusOK)
+		}
+		if d := reg.GetDefault(); d != "app/main" {
+			t.Errorf("default = %q, want %q", d, "app/main")
+		}
+	})
+
+	t.Run("set nonexistent", func(t *testing.T) {
+		reg := registry.New()
+		handler := DefaultSetHandler(reg)
+		req := httptest.NewRequest(http.MethodPost, "/__mdp/default/missing", nil)
+		req.SetPathValue("name", "missing")
+		rec := httptest.NewRecorder()
+		handler.ServeHTTP(rec, req)
+		if rec.Code != http.StatusNotFound {
+			t.Fatalf("status = %d, want %d", rec.Code, http.StatusNotFound)
+		}
+	})
 }

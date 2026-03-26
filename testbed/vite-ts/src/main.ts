@@ -201,7 +201,7 @@ function render(): void {
         margin:0 0 8px;
         color:#b7e4c7;
         letter-spacing:-0.5px;
-      ">Server B &mdash; Vite + TypeScript</h1>
+      ">Vite + TypeScript</h1>
 
       <p style="margin:0 0 32px;opacity:0.6;font-size:0.9rem;">
         Port <strong style="color:#52b788;">${port}</strong>
