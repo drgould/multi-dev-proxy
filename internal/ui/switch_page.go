@@ -230,7 +230,11 @@ func renderPage(content string, isEmpty bool) string {
                 var form = document.createElement('form');
                 form.method = 'POST';
                 form.action = sibBase + '/__mdp/switch/' + encodeURIComponent(fullName);
-                form.innerHTML = '<button type="submit" class="btn">Switch</button>';
+                var formBtn = document.createElement('button');
+                formBtn.type = 'submit';
+                formBtn.className = 'btn';
+                formBtn.textContent = 'Switch';
+                form.appendChild(formBtn);
                 var tdName = document.createElement('td'); tdName.textContent = branch;
                 var tdPort = document.createElement('td'); tdPort.className = 'mono'; tdPort.textContent = ':' + info.port;
                 var tdPid = document.createElement('td'); tdPid.className = 'mono'; tdPid.textContent = info.pid || '0';
