@@ -1,5 +1,30 @@
 # Changelog
 
+## v1.0.0
+
+### Features
+
+- **Orchestrator** — new `mdp.yaml` config drives multi-proxy setups with named groups, sibling awareness, and coordinated group switching across proxies
+- **Daemon mode** — `mdp start` daemonizes the process; `mdp status`, `mdp logs`, and `mdp switch` control it from separate terminals
+- **Interactive TUI** — live dashboard with tabs (Groups, Proxies, Services), mouse support, hover highlights, clickable rows, and keyboard navigation
+- **Group switching** — switch all proxies to a named group (e.g. `dev`, `staging`) from the TUI, widget pill, switch page, or `mdp switch` CLI command
+- **Switch page sibling support** — the `/__mdp/switch` page now lists servers from sibling proxies with direct switch buttons
+
+### Changed
+
+- **Widget pill group switching** — correctly sets the browser cookie after switching groups so the page reloads to the right upstream
+- **Switch page group switching** — same cookie fix; navigates to `/` after switching instead of staying on the switch page
+- **Switch handler** — redirects to `/` after switching instead of back to `/__mdp/switch`
+- **E2E tests** migrated from Playwright to Puppeteer + Vitest; run headed locally, headless in CI, serial execution
+
+### New commands
+
+- `mdp start` — start proxy in daemon mode
+- `mdp status` — show daemon status
+- `mdp logs` — tail daemon logs
+- `mdp switch <group>` — switch active group from CLI
+- `mdp deregister` — remove a registered server
+
 ## v0.1.1
 
 ### Changed
@@ -41,4 +66,4 @@ Initial release.
 ### Testbed
 
 - 6 demo servers: Go (WebSocket), Vite + TypeScript, Next.js, Vue 3, SvelteKit, Docker (nginx + Go API + Postgres)
-- Playwright e2e tests covering proxy routing, switch page, widget injection, and all server reachability
+- Playwright E2E tests covering proxy routing, switch page, widget injection, and all server reachability
