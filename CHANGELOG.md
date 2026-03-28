@@ -1,5 +1,14 @@
 # Changelog
 
+## v1.0.1
+
+### Changed
+
+- **Group switcher hidden with single proxy** — the groups UI (widget pill, switch page, TUI, `mdp status`) is now hidden when there is only one proxy, since groups are only useful for coordinating multiple proxies
+- **`MDP=1` env var** — proxied child processes receive `MDP=1` in their environment so build tooling can detect it and adjust config dynamically
+- **Registration errors are fatal** — `mdp run` now exits immediately if service registration with the orchestrator fails, instead of silently continuing
+- **Health watchdog** — services started via `mdp run` automatically shut down when the orchestrator/proxy becomes unreachable
+
 ## v1.0.0
 
 ### Features
