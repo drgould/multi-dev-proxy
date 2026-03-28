@@ -367,12 +367,12 @@ func runSingleMode(cmd *cobra.Command, args []string, controlPort int, groupFlag
 		resp.Body.Close()
 		slog.Info("registered with orchestrator", "name", serverName, "proxy", proxyPort)
 		healthURL := fmt.Sprintf("http://127.0.0.1:%d/__mdp/health", controlPort)
-		return runSoloWithHealth(args, envVar, assignedPort, healthURL)
+		return runProxied(args, envVar, assignedPort, healthURL)
 	} else {
 		proxyURL, proxyRunning := detectProxy(proxyPort)
 		if !proxyRunning {
 			slog.Info("no proxy detected, starting in solo mode", "proxy-port", proxyPort)
-			return runSolo(args, envVar, assignedPort)
+			return runSolo(args)
 		}
 		slog.Info("proxy detected, starting in proxy mode", "url", proxyURL)
 
@@ -478,7 +478,7 @@ func watchHealth(healthURL string) <-chan struct{} {
 	return gone
 }
 
-func runSoloWithHealth(args []string, envVar string, port int, healthURL string) error {
+func runProxied(args []string, envVar string, port int, healthURL string) error {
 	cmd := exec.Command(args[0], args[1:]...)
 	cmd.Stdin = os.Stdin
 	cmd.Stdout = os.Stdout
@@ -522,12 +522,11 @@ func runSoloWithHealth(args []string, envVar string, port int, healthURL string)
 	return nil
 }
 
-func runSolo(args []string, envVar string, port int) error {
+func runSolo(args []string) error {
 	cmd := exec.Command(args[0], args[1:]...)
 	cmd.Stdin = os.Stdin
 	cmd.Stdout = os.Stdout
 	cmd.Stderr = os.Stderr
-	cmd.Env = append(os.Environ(), fmt.Sprintf("%s=%d", envVar, port))
 
 	if err := cmd.Start(); err != nil {
 		return fmt.Errorf("start %q: %w", args[0], err)
