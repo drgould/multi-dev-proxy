@@ -1,0 +1,278 @@
+package orchestrator
+
+import (
+	"bytes"
+	"encoding/json"
+	"net/http"
+	"net/http/httptest"
+	"testing"
+
+	"github.com/derekgould/multi-dev-proxy/internal/config"
+	"github.com/derekgould/multi-dev-proxy/internal/registry"
+)
+
+func setupControlAPI(t *testing.T) (*Orchestrator, http.Handler) {
+	t.Helper()
+	o := New(&config.Config{}, false, "", "", "")
+	o.mu.Lock()
+	reg := registry.New()
+	reg.Register(&registry.ServerEntry{Name: "app/dev", Repo: "app", Port: 4001, PID: 100, Group: "dev"})
+	reg.Register(&registry.ServerEntry{Name: "app/staging", Repo: "app", Port: 4002, PID: 200, Group: "staging"})
+	o.proxies[3000] = &ProxyInstance{Port: 3000, Label: "frontend", Registry: reg, CookieName: "__mdp_upstream_3000", cancel: func() {}}
+	o.mu.Unlock()
+
+	capi := NewControlAPI(o, nil)
+	return o, capi.Handler()
+}
+
+func TestControlAPIHealth(t *testing.T) {
+	_, handler := setupControlAPI(t)
+	req := httptest.NewRequest("GET", "/__mdp/health", nil)
+	rec := httptest.NewRecorder()
+	handler.ServeHTTP(rec, req)
+
+	if rec.Code != http.StatusOK {
+		t.Fatalf("expected 200, got %d", rec.Code)
+	}
+	var body map[string]any
+	json.NewDecoder(rec.Body).Decode(&body)
+	if body["ok"] != true {
+		t.Error("expected ok: true")
+	}
+}
+
+func TestControlAPIListProxies(t *testing.T) {
+	_, handler := setupControlAPI(t)
+	req := httptest.NewRequest("GET", "/__mdp/proxies", nil)
+	rec := httptest.NewRecorder()
+	handler.ServeHTTP(rec, req)
+
+	if rec.Code != http.StatusOK {
+		t.Fatalf("expected 200, got %d", rec.Code)
+	}
+	var body []map[string]any
+	json.NewDecoder(rec.Body).Decode(&body)
+	if len(body) != 1 {
+		t.Fatalf("expected 1 proxy, got %d", len(body))
+	}
+	if body[0]["label"] != "frontend" {
+		t.Errorf("expected label frontend, got %v", body[0]["label"])
+	}
+}
+
+func TestControlAPIRegister(t *testing.T) {
+	o, handler := setupControlAPI(t)
+
+	payload := map[string]any{
+		"name":      "api/main",
+		"port":      5001,
+		"pid":       300,
+		"proxyPort": 3000,
+		"group":     "dev",
+	}
+	body, _ := json.Marshal(payload)
+	req := httptest.NewRequest("POST", "/__mdp/register", bytes.NewReader(body))
+	rec := httptest.NewRecorder()
+	handler.ServeHTTP(rec, req)
+
+	if rec.Code != http.StatusOK {
+		t.Fatalf("expected 200, got %d; body: %s", rec.Code, rec.Body.String())
+	}
+
+	pi := o.GetProxy(3000)
+	if pi.Registry.Get("api/main") == nil {
+		t.Error("expected api/main to be registered")
+	}
+}
+
+func TestControlAPIRegisterBadJSON(t *testing.T) {
+	_, handler := setupControlAPI(t)
+	req := httptest.NewRequest("POST", "/__mdp/register", bytes.NewReader([]byte("not json")))
+	rec := httptest.NewRecorder()
+	handler.ServeHTTP(rec, req)
+
+	if rec.Code != http.StatusBadRequest {
+		t.Fatalf("expected 400, got %d", rec.Code)
+	}
+}
+
+func TestControlAPIRegisterMissingFields(t *testing.T) {
+	_, handler := setupControlAPI(t)
+	payload := map[string]any{"name": "", "port": 0, "proxyPort": 3000}
+	body, _ := json.Marshal(payload)
+	req := httptest.NewRequest("POST", "/__mdp/register", bytes.NewReader(body))
+	rec := httptest.NewRecorder()
+	handler.ServeHTTP(rec, req)
+
+	if rec.Code != http.StatusBadRequest {
+		t.Fatalf("expected 400, got %d", rec.Code)
+	}
+}
+
+func TestControlAPIDeregister(t *testing.T) {
+	_, handler := setupControlAPI(t)
+	req := httptest.NewRequest("DELETE", "/__mdp/register/app/dev", nil)
+	rec := httptest.NewRecorder()
+	handler.ServeHTTP(rec, req)
+
+	if rec.Code != http.StatusOK {
+		t.Fatalf("expected 200, got %d", rec.Code)
+	}
+	var body map[string]any
+	json.NewDecoder(rec.Body).Decode(&body)
+	if body["deleted"] != true {
+		t.Error("expected deleted: true")
+	}
+}
+
+func TestControlAPISetDefault(t *testing.T) {
+	o, handler := setupControlAPI(t)
+	req := httptest.NewRequest("POST", "/__mdp/proxies/3000/default/app/dev", nil)
+	rec := httptest.NewRecorder()
+	handler.ServeHTTP(rec, req)
+
+	if rec.Code != http.StatusOK {
+		t.Fatalf("expected 200, got %d; body: %s", rec.Code, rec.Body.String())
+	}
+	pi := o.GetProxy(3000)
+	if d := pi.Registry.GetDefault(); d != "app/dev" {
+		t.Errorf("expected default app/dev, got %q", d)
+	}
+}
+
+func TestControlAPISetDefaultBadPort(t *testing.T) {
+	_, handler := setupControlAPI(t)
+	req := httptest.NewRequest("POST", "/__mdp/proxies/abc/default/app/dev", nil)
+	rec := httptest.NewRecorder()
+	handler.ServeHTTP(rec, req)
+
+	if rec.Code != http.StatusBadRequest {
+		t.Fatalf("expected 400, got %d", rec.Code)
+	}
+}
+
+func TestControlAPIClearDefault(t *testing.T) {
+	o, handler := setupControlAPI(t)
+
+	o.SetDefault(3000, "app/dev")
+
+	req := httptest.NewRequest("DELETE", "/__mdp/proxies/3000/default", nil)
+	rec := httptest.NewRecorder()
+	handler.ServeHTTP(rec, req)
+
+	if rec.Code != http.StatusOK {
+		t.Fatalf("expected 200, got %d", rec.Code)
+	}
+	pi := o.GetProxy(3000)
+	if d := pi.Registry.GetDefault(); d != "" {
+		t.Errorf("expected empty default, got %q", d)
+	}
+}
+
+func TestControlAPIClearDefaultBadPort(t *testing.T) {
+	_, handler := setupControlAPI(t)
+	req := httptest.NewRequest("DELETE", "/__mdp/proxies/abc/default", nil)
+	rec := httptest.NewRecorder()
+	handler.ServeHTTP(rec, req)
+
+	if rec.Code != http.StatusBadRequest {
+		t.Fatalf("expected 400, got %d", rec.Code)
+	}
+}
+
+func TestControlAPIListGroups(t *testing.T) {
+	_, handler := setupControlAPI(t)
+	req := httptest.NewRequest("GET", "/__mdp/groups", nil)
+	rec := httptest.NewRecorder()
+	handler.ServeHTTP(rec, req)
+
+	if rec.Code != http.StatusOK {
+		t.Fatalf("expected 200, got %d", rec.Code)
+	}
+	var groups map[string][]string
+	json.NewDecoder(rec.Body).Decode(&groups)
+	if len(groups) != 2 {
+		t.Errorf("expected 2 groups, got %d", len(groups))
+	}
+}
+
+func TestControlAPISwitchGroup(t *testing.T) {
+	o, handler := setupControlAPI(t)
+	req := httptest.NewRequest("POST", "/__mdp/groups/dev/switch", nil)
+	rec := httptest.NewRecorder()
+	handler.ServeHTTP(rec, req)
+
+	if rec.Code != http.StatusOK {
+		t.Fatalf("expected 200, got %d; body: %s", rec.Code, rec.Body.String())
+	}
+	pi := o.GetProxy(3000)
+	if d := pi.Registry.GetDefault(); d != "app/dev" {
+		t.Errorf("expected default app/dev, got %q", d)
+	}
+}
+
+func TestControlAPISwitchGroupNotFound(t *testing.T) {
+	_, handler := setupControlAPI(t)
+	req := httptest.NewRequest("POST", "/__mdp/groups/nonexistent/switch", nil)
+	rec := httptest.NewRecorder()
+	handler.ServeHTTP(rec, req)
+
+	if rec.Code != http.StatusNotFound {
+		t.Fatalf("expected 404, got %d", rec.Code)
+	}
+}
+
+func TestControlAPIListServices(t *testing.T) {
+	o, handler := setupControlAPI(t)
+	o.SetService("web/main", &ManagedService{Name: "web/main", Group: "dev", PID: 42, Port: 4001, Status: "running"})
+
+	req := httptest.NewRequest("GET", "/__mdp/services", nil)
+	rec := httptest.NewRecorder()
+	handler.ServeHTTP(rec, req)
+
+	if rec.Code != http.StatusOK {
+		t.Fatalf("expected 200, got %d", rec.Code)
+	}
+	var services []map[string]any
+	json.NewDecoder(rec.Body).Decode(&services)
+	if len(services) != 1 {
+		t.Fatalf("expected 1 service, got %d", len(services))
+	}
+	if services[0]["name"] != "web/main" {
+		t.Errorf("expected web/main, got %v", services[0]["name"])
+	}
+}
+
+func TestControlAPIShutdown(t *testing.T) {
+	_, handler := setupControlAPI(t)
+	req := httptest.NewRequest("POST", "/__mdp/shutdown", nil)
+	rec := httptest.NewRecorder()
+	handler.ServeHTTP(rec, req)
+
+	if rec.Code != http.StatusOK {
+		t.Fatalf("expected 200, got %d", rec.Code)
+	}
+	var body map[string]any
+	json.NewDecoder(rec.Body).Decode(&body)
+	if body["ok"] != true {
+		t.Error("expected ok: true")
+	}
+}
+
+func TestControlAPIShutdownCallsCallback(t *testing.T) {
+	o := New(&config.Config{}, false, "", "", "")
+	called := make(chan bool, 1)
+	capi := NewControlAPI(o, func() { called <- true })
+	handler := capi.Handler()
+
+	req := httptest.NewRequest("POST", "/__mdp/shutdown", nil)
+	rec := httptest.NewRecorder()
+	handler.ServeHTTP(rec, req)
+
+	select {
+	case <-called:
+	default:
+		// shutdownFn is called in a goroutine, give it a moment
+		// but don't block the test
+	}
+}

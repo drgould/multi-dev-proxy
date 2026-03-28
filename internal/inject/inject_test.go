@@ -8,6 +8,8 @@ import (
 	"net/http"
 	"strings"
 	"testing"
+
+	"github.com/andybalholm/brotli"
 )
 
 func makeResp(body string, contentType string, extraHeaders map[string]string) *http.Response {
@@ -152,5 +154,66 @@ func TestContentLengthUpdated(t *testing.T) {
 	expected := fmt.Sprintf("%d", len(body))
 	if resp.Header.Get("Content-Length") != expected {
 		t.Errorf("Content-Length %q != %q", resp.Header.Get("Content-Length"), expected)
+	}
+}
+
+func TestInjectBrotli(t *testing.T) {
+	htmlBody := "<html><body><p>Brotli compressed</p></body></html>"
+	var buf bytes.Buffer
+	bw := brotli.NewWriter(&buf)
+	bw.Write([]byte(htmlBody))
+	bw.Close()
+
+	resp := &http.Response{
+		StatusCode: 200,
+		Header:     make(http.Header),
+		Body:       io.NopCloser(bytes.NewReader(buf.Bytes())),
+	}
+	resp.Header.Set("Content-Type", "text/html")
+	resp.Header.Set("Content-Encoding", "br")
+
+	inj := New()
+	if err := inj.ModifyResponse(resp); err != nil {
+		t.Fatal(err)
+	}
+	if resp.Header.Get("Content-Encoding") != "" {
+		t.Error("Content-Encoding should be removed after brotli decompression")
+	}
+	body := readBody(t, resp)
+	if !strings.Contains(body, widgetScriptTag) {
+		t.Error("widget not injected into brotli-compressed response")
+	}
+	if !strings.Contains(body, "Brotli compressed") {
+		t.Error("original content lost after brotli decompression")
+	}
+}
+
+func TestInjectOversizedBody(t *testing.T) {
+	large := "<html><body>" + strings.Repeat("x", maxBodySize) + "</body></html>"
+	inj := New()
+	resp := makeResp(large, "text/html", nil)
+	if err := inj.ModifyResponse(resp); err != nil {
+		t.Fatal(err)
+	}
+	body := readBody(t, resp)
+	if strings.Contains(body, widgetScriptTag) {
+		t.Error("widget should not be injected into oversized response")
+	}
+	cl := resp.Header.Get("Content-Length")
+	if cl != fmt.Sprintf("%d", len(body)) {
+		t.Errorf("Content-Length %q != body length %d", cl, len(body))
+	}
+}
+
+func TestTransferEncodingStripped(t *testing.T) {
+	inj := New()
+	resp := makeResp("<html><body></body></html>", "text/html", map[string]string{
+		"Transfer-Encoding": "chunked",
+	})
+	if err := inj.ModifyResponse(resp); err != nil {
+		t.Fatal(err)
+	}
+	if resp.Header.Get("Transfer-Encoding") != "" {
+		t.Error("Transfer-Encoding should be stripped")
 	}
 }

@@ -56,3 +56,39 @@ func TestDetectPortTimeout(t *testing.T) {
 		t.Errorf("expected ErrPortNotDetected, got %v", err)
 	}
 }
+
+func TestTeeAndDetect(t *testing.T) {
+	input := "Starting server...\nListening on http://localhost:4567/\nReady\n"
+	pr, pw := io.Pipe()
+	go func() {
+		pw.Write([]byte(input))
+		pw.Close()
+	}()
+
+	var output strings.Builder
+	result, err := TeeAndDetect(pr, &output, 2*time.Second)
+	if err != nil {
+		t.Fatalf("TeeAndDetect: %v", err)
+	}
+	if result.Port != 4567 {
+		t.Errorf("expected port 4567, got %d", result.Port)
+	}
+	if result.Scheme != "http" {
+		t.Errorf("expected scheme http, got %q", result.Scheme)
+	}
+}
+
+func TestTeeAndDetectNoPort(t *testing.T) {
+	input := "Starting server...\nNo URL here\n"
+	pr, pw := io.Pipe()
+	go func() {
+		pw.Write([]byte(input))
+		pw.Close()
+	}()
+
+	var output strings.Builder
+	_, err := TeeAndDetect(pr, &output, 500*time.Millisecond)
+	if !errors.Is(err, ErrPortNotDetected) {
+		t.Errorf("expected ErrPortNotDetected, got %v", err)
+	}
+}

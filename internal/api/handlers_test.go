@@ -455,3 +455,180 @@ func TestDefaultSetHandler(t *testing.T) {
 		}
 	})
 }
+
+func TestConfigHandler(t *testing.T) {
+	configFn := func() ConfigResponse {
+		return ConfigResponse{
+			Port:       3000,
+			CookieName: "__mdp_upstream",
+			Label:      "frontend",
+			Default:    "app/main",
+			Siblings: []SiblingProxy{
+				{Port: 3001, Label: "backend", CookieName: "__mdp_upstream_3001"},
+			},
+			Groups: map[string][]string{"dev": {"app/dev", "api/dev"}},
+		}
+	}
+	handler := ConfigHandler(configFn)
+
+	req := httptest.NewRequest(http.MethodGet, "/__mdp/config", nil)
+	rec := httptest.NewRecorder()
+	handler.ServeHTTP(rec, req)
+
+	if rec.Code != http.StatusOK {
+		t.Fatalf("status = %d, want %d", rec.Code, http.StatusOK)
+	}
+
+	var body ConfigResponse
+	decodeJSON(t, rec, &body)
+
+	if body.Port != 3000 {
+		t.Errorf("port = %d, want 3000", body.Port)
+	}
+	if body.CookieName != "__mdp_upstream" {
+		t.Errorf("cookieName = %q, want __mdp_upstream", body.CookieName)
+	}
+	if body.Default != "app/main" {
+		t.Errorf("default = %q, want app/main", body.Default)
+	}
+	if len(body.Siblings) != 1 {
+		t.Fatalf("expected 1 sibling, got %d", len(body.Siblings))
+	}
+	if body.Siblings[0].Port != 3001 {
+		t.Errorf("sibling port = %d, want 3001", body.Siblings[0].Port)
+	}
+	if len(body.Groups) != 1 {
+		t.Fatalf("expected 1 group, got %d", len(body.Groups))
+	}
+}
+
+func TestCORSMiddleware(t *testing.T) {
+	inner := http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.WriteHeader(http.StatusOK)
+	})
+	handler := CORSMiddleware(inner)
+
+	t.Run("adds CORS headers to __mdp paths", func(t *testing.T) {
+		req := httptest.NewRequest(http.MethodGet, "/__mdp/health", nil)
+		req.Header.Set("Origin", "http://localhost:3000")
+		rec := httptest.NewRecorder()
+		handler.ServeHTTP(rec, req)
+
+		if rec.Code != http.StatusOK {
+			t.Fatalf("status = %d, want 200", rec.Code)
+		}
+		if got := rec.Header().Get("Access-Control-Allow-Origin"); got != "http://localhost:3000" {
+			t.Errorf("Allow-Origin = %q, want http://localhost:3000", got)
+		}
+		if got := rec.Header().Get("Access-Control-Allow-Credentials"); got != "true" {
+			t.Errorf("Allow-Credentials = %q, want true", got)
+		}
+	})
+
+	t.Run("uses wildcard when no origin", func(t *testing.T) {
+		req := httptest.NewRequest(http.MethodGet, "/__mdp/config", nil)
+		rec := httptest.NewRecorder()
+		handler.ServeHTTP(rec, req)
+
+		if got := rec.Header().Get("Access-Control-Allow-Origin"); got != "*" {
+			t.Errorf("Allow-Origin = %q, want *", got)
+		}
+	})
+
+	t.Run("OPTIONS preflight returns 204", func(t *testing.T) {
+		req := httptest.NewRequest(http.MethodOptions, "/__mdp/register", nil)
+		req.Header.Set("Origin", "http://localhost:3000")
+		rec := httptest.NewRecorder()
+		handler.ServeHTTP(rec, req)
+
+		if rec.Code != http.StatusNoContent {
+			t.Fatalf("status = %d, want 204", rec.Code)
+		}
+	})
+
+	t.Run("no CORS headers on non-__mdp paths", func(t *testing.T) {
+		req := httptest.NewRequest(http.MethodGet, "/app", nil)
+		rec := httptest.NewRecorder()
+		handler.ServeHTTP(rec, req)
+
+		if got := rec.Header().Get("Access-Control-Allow-Origin"); got != "" {
+			t.Errorf("expected no CORS on /app, got Allow-Origin = %q", got)
+		}
+	})
+
+	t.Run("methods header includes expected values", func(t *testing.T) {
+		req := httptest.NewRequest(http.MethodGet, "/__mdp/servers", nil)
+		rec := httptest.NewRecorder()
+		handler.ServeHTTP(rec, req)
+
+		methods := rec.Header().Get("Access-Control-Allow-Methods")
+		for _, m := range []string{"GET", "POST", "DELETE", "OPTIONS"} {
+			if !strings.Contains(methods, m) {
+				t.Errorf("Allow-Methods = %q, missing %s", methods, m)
+			}
+		}
+	})
+}
+
+func TestRegisterHandlerInfersRepo(t *testing.T) {
+	reg := registry.New()
+	handler := RegisterHandler(reg)
+
+	body := `{"name":"myrepo/feature","port":3000,"pid":100}`
+	req := httptest.NewRequest(http.MethodPost, "/__mdp/register", strings.NewReader(body))
+	req.Header.Set("Content-Type", "application/json")
+	rec := httptest.NewRecorder()
+	handler.ServeHTTP(rec, req)
+
+	if rec.Code != http.StatusOK {
+		t.Fatalf("status = %d, want 200", rec.Code)
+	}
+	entry := reg.Get("myrepo/feature")
+	if entry == nil {
+		t.Fatal("expected entry to be registered")
+	}
+	if entry.Repo != "myrepo" {
+		t.Errorf("repo = %q, want myrepo (inferred from name)", entry.Repo)
+	}
+}
+
+func TestRegisterHandlerDefaultScheme(t *testing.T) {
+	reg := registry.New()
+	handler := RegisterHandler(reg)
+
+	body := `{"name":"app/main","port":3000,"pid":100}`
+	req := httptest.NewRequest(http.MethodPost, "/__mdp/register", strings.NewReader(body))
+	req.Header.Set("Content-Type", "application/json")
+	rec := httptest.NewRecorder()
+	handler.ServeHTTP(rec, req)
+
+	entry := reg.Get("app/main")
+	if entry.Scheme != "http" {
+		t.Errorf("scheme = %q, want http (default)", entry.Scheme)
+	}
+}
+
+func TestDefaultHandlerMethodNotAllowed(t *testing.T) {
+	reg := registry.New()
+	handler := DefaultHandler(reg)
+	req := httptest.NewRequest(http.MethodPost, "/__mdp/default", nil)
+	rec := httptest.NewRecorder()
+	handler.ServeHTTP(rec, req)
+
+	if rec.Code != http.StatusMethodNotAllowed {
+		t.Fatalf("status = %d, want 405", rec.Code)
+	}
+}
+
+func TestDefaultSetHandlerMethodNotAllowed(t *testing.T) {
+	reg := registry.New()
+	handler := DefaultSetHandler(reg)
+	req := httptest.NewRequest(http.MethodGet, "/__mdp/default/app/main", nil)
+	req.SetPathValue("name", "app/main")
+	rec := httptest.NewRecorder()
+	handler.ServeHTTP(rec, req)
+
+	if rec.Code != http.StatusMethodNotAllowed {
+		t.Fatalf("status = %d, want 405", rec.Code)
+	}
+}
