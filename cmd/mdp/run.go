@@ -137,7 +137,15 @@ func runBatchMode(cmd *cobra.Command, controlPort int, groupFlag string) error {
 
 	sigCh := make(chan os.Signal, 1)
 	signal.Notify(sigCh, syscall.SIGINT, syscall.SIGTERM)
-	<-sigCh
+
+	healthURL := fmt.Sprintf("http://127.0.0.1:%d/__mdp/health", controlPort)
+	gone := watchHealth(healthURL)
+
+	select {
+	case <-sigCh:
+	case <-gone:
+		slog.Warn("orchestrator is no longer reachable, shutting down")
+	}
 	return nil
 }
 
@@ -358,6 +366,8 @@ func runSingleMode(cmd *cobra.Command, args []string, controlPort int, groupFlag
 		}
 		resp.Body.Close()
 		slog.Info("registered with orchestrator", "name", serverName, "proxy", proxyPort)
+		healthURL := fmt.Sprintf("http://127.0.0.1:%d/__mdp/health", controlPort)
+		return runSoloWithHealth(args, envVar, assignedPort, healthURL)
 	} else {
 		proxyURL, proxyRunning := detectProxy(proxyPort)
 		if !proxyRunning {
@@ -442,6 +452,76 @@ func detectMkcertCerts() (string, string) {
 		return "", ""
 	}
 	return certPath, keyPath
+}
+
+func watchHealth(healthURL string) <-chan struct{} {
+	gone := make(chan struct{})
+	client := &http.Client{Timeout: 2 * time.Second}
+	go func() {
+		failures := 0
+		for {
+			time.Sleep(3 * time.Second)
+			resp, err := client.Get(healthURL)
+			if err != nil || resp.StatusCode != http.StatusOK {
+				failures++
+				if resp != nil {
+					resp.Body.Close()
+				}
+				if failures >= 3 {
+					close(gone)
+					return
+				}
+				continue
+			}
+			resp.Body.Close()
+			failures = 0
+		}
+	}()
+	return gone
+}
+
+func runSoloWithHealth(args []string, envVar string, port int, healthURL string) error {
+	cmd := exec.Command(args[0], args[1:]...)
+	cmd.Stdin = os.Stdin
+	cmd.Stdout = os.Stdout
+	cmd.Stderr = os.Stderr
+	cmd.Env = append(os.Environ(), fmt.Sprintf("%s=%d", envVar, port), "MDP=1")
+
+	if err := cmd.Start(); err != nil {
+		return fmt.Errorf("start %q: %w", args[0], err)
+	}
+
+	sigCh := make(chan os.Signal, 1)
+	signal.Notify(sigCh, syscall.SIGINT, syscall.SIGTERM)
+	defer signal.Stop(sigCh)
+
+	done := make(chan error, 1)
+	go func() { done <- cmd.Wait() }()
+
+	gone := watchHealth(healthURL)
+
+	select {
+	case <-sigCh:
+		cmd.Process.Signal(syscall.SIGTERM)
+		<-done
+	case <-gone:
+		slog.Warn("proxy is no longer reachable, shutting down")
+		cmd.Process.Signal(syscall.SIGTERM)
+		select {
+		case <-done:
+		case <-time.After(5 * time.Second):
+			cmd.Process.Kill()
+			<-done
+		}
+	case err := <-done:
+		if err != nil {
+			if ee, ok := err.(*exec.ExitError); ok {
+				os.Exit(ee.ExitCode())
+			}
+			return err
+		}
+	}
+	return nil
 }
 
 func runSolo(args []string, envVar string, port int) error {
