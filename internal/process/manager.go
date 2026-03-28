@@ -43,7 +43,7 @@ func (m *Manager) Run(ctx context.Context, args []string, opts RunOpts) (int, er
 	cmd := exec.CommandContext(ctx, args[0], args[1:]...)
 	cmd.Stdin = os.Stdin
 	cmd.Stderr = os.Stderr
-	cmd.Env = append(os.Environ(), fmt.Sprintf("PORT=%d", opts.AssignedPort))
+	cmd.Env = append(os.Environ(), fmt.Sprintf("PORT=%d", opts.AssignedPort), "MDP=1")
 	SetProcessGroup(cmd)
 
 	stdout, err := cmd.StdoutPipe()

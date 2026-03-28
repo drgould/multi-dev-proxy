@@ -125,7 +125,7 @@ func runBatchMode(cmd *cobra.Command, controlPort int, groupFlag string) error {
 		}
 
 		if svc.Command != "" {
-			env := []string{fmt.Sprintf("PORT=%d", assignedPort)}
+			env := []string{fmt.Sprintf("PORT=%d", assignedPort), "MDP=1"}
 			for k, v := range svc.Env {
 				if v != "auto" {
 					env = append(env, k+"="+v)
@@ -179,7 +179,7 @@ func registerMultiPortBatch(client *http.Client, controlURL, name string, svc co
 	}
 
 	if svc.Command != "" {
-		var env []string
+		env := []string{"MDP=1"}
 		for k, v := range svc.Env {
 			if v == "auto" {
 				if port, ok := portAssignments[k]; ok {
