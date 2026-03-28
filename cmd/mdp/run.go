@@ -396,8 +396,6 @@ func runSingleMode(cmd *cobra.Command, args []string, controlPort int, groupFlag
 		}
 		return nil
 	}
-
-	return runSolo(args, envVar, assignedPort)
 }
 
 func isOrchestratorRunning(controlPort int) bool {
