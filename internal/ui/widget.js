@@ -138,7 +138,7 @@
 		}
 		dropdownEl.innerHTML = "";
 
-		if (config && config.groups && Object.keys(config.groups).length > 0) {
+		if (config && config.groups && Object.keys(config.groups).length > 0 && config.siblings && config.siblings.length > 0) {
 			const glabel = document.createElement("div");
 			glabel.className = "group-label";
 			glabel.textContent = "groups";

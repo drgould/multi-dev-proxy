@@ -191,8 +191,13 @@ func printStatus(data statusData) {
 	for _, p := range data.Proxies {
 		totalServers += len(p.Servers)
 	}
-	fmt.Printf("  %d proxy(s), %d server(s), %d group(s)\n\n",
-		len(data.Proxies), totalServers, len(data.Groups))
+	if len(data.Proxies) > 1 && len(data.Groups) > 0 {
+		fmt.Printf("  %d proxies, %d servers, %d groups\n\n",
+			len(data.Proxies), totalServers, len(data.Groups))
+	} else {
+		fmt.Printf("  %d proxy, %d servers\n\n",
+			len(data.Proxies), totalServers)
+	}
 
 	for _, p := range data.Proxies {
 		label := p.Label
@@ -221,7 +226,7 @@ func printStatus(data statusData) {
 		fmt.Println()
 	}
 
-	if len(data.Groups) > 0 {
+	if len(data.Groups) > 0 && len(data.Proxies) > 1 {
 		fmt.Println("Groups:")
 		names := make([]string, 0, len(data.Groups))
 		for name := range data.Groups {

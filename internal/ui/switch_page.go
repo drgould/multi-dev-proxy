@@ -189,7 +189,7 @@ func renderPage(content string, isEmpty bool) string {
         });
       }
 
-      if (cfg.groups && Object.keys(cfg.groups).length > 0) {
+      if (cfg.groups && Object.keys(cfg.groups).length > 0 && cfg.siblings && cfg.siblings.length > 0) {
         var sec = document.createElement('div');
         sec.className = 'groups-section';
         sec.innerHTML = '<h2>Groups</h2>';

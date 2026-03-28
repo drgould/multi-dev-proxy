@@ -301,7 +301,7 @@ func (m *Model) innerOffset() (int, int) {
 
 func (m *Model) rebuildTabs() {
 	snap := m.backend.Snapshot()
-	hasGroups := len(snap.Groups) > 0
+	hasGroups := len(snap.Groups) > 0 && len(snap.Proxies) > 1
 	hasServices := hasManagedServices(snap)
 
 	if !hasGroups {
