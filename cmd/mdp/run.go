@@ -94,7 +94,7 @@ func runBatchMode(cmd *cobra.Command, controlPort int, groupFlag string) error {
 
 		if len(svc.Ports) > 0 {
 			if err := registerMultiPortBatch(client, controlURL, name, svc, svcGroup, portRange); err != nil {
-				slog.Error("batch register multi-port service", "name", name, "err", err)
+				return fmt.Errorf("register multi-port service %q: %w", name, err)
 			}
 			continue
 		}
@@ -104,8 +104,7 @@ func runBatchMode(cmd *cobra.Command, controlPort int, groupFlag string) error {
 		if assignedPort == 0 {
 			assignedPort, err = ports.FindFreePort(portRange, nil)
 			if err != nil {
-				slog.Error("find free port", "name", name, "err", err)
-				continue
+				return fmt.Errorf("find free port for %q: %w", name, err)
 			}
 		}
 
@@ -118,8 +117,7 @@ func runBatchMode(cmd *cobra.Command, controlPort int, groupFlag string) error {
 			})
 			resp, err := client.Post(controlURL+"/__mdp/register", "application/json", bytes.NewReader(body))
 			if err != nil {
-				slog.Error("register", "name", serverName, "err", err)
-				continue
+				return fmt.Errorf("register %q: %w", serverName, err)
 			}
 			resp.Body.Close()
 		}
@@ -355,10 +353,11 @@ func runSingleMode(cmd *cobra.Command, args []string, controlPort int, groupFlag
 			"application/json",
 			bytes.NewReader(body),
 		)
-		if err == nil {
-			resp.Body.Close()
-			slog.Info("registered with orchestrator", "name", serverName, "proxy", proxyPort)
+		if err != nil {
+			return fmt.Errorf("register %q with orchestrator: %w", serverName, err)
 		}
+		resp.Body.Close()
+		slog.Info("registered with orchestrator", "name", serverName, "proxy", proxyPort)
 	} else {
 		proxyURL, proxyRunning := detectProxy(proxyPort)
 		if !proxyRunning {
