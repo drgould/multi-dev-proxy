@@ -62,6 +62,9 @@ type Orchestrator struct {
 	tlsKey   string
 	useTLS   bool
 	host     string
+
+	certMu sync.RWMutex
+	certs  []tls.Certificate // dynamically loaded certs (default + service-provided)
 }
 
 // New creates a new Orchestrator.
@@ -69,7 +72,7 @@ func New(cfg *config.Config, useTLS bool, tlsCert, tlsKey, host string) *Orchest
 	if host == "" {
 		host = "0.0.0.0"
 	}
-	return &Orchestrator{
+	o := &Orchestrator{
 		proxies:  make(map[int]*ProxyInstance),
 		services: make(map[string]*ManagedService),
 		events:   make(chan Event, 256),
@@ -79,6 +82,69 @@ func New(cfg *config.Config, useTLS bool, tlsCert, tlsKey, host string) *Orchest
 		useTLS:   useTLS,
 		host:     host,
 	}
+	// Pre-load the default cert if provided.
+	if useTLS && tlsCert != "" {
+		if err := o.AddCert(tlsCert, tlsKey); err != nil {
+			slog.Error("failed to pre-load default TLS cert", "err", err)
+		}
+	}
+	return o
+}
+
+// AddCert loads a TLS certificate from the given paths and adds it to the
+// dynamic cert store. Duplicate cert/key pairs are silently ignored.
+func (o *Orchestrator) AddCert(certPath, keyPath string) error {
+	cert, err := tls.LoadX509KeyPair(certPath, keyPath)
+	if err != nil {
+		return fmt.Errorf("load TLS keypair: %w", err)
+	}
+	o.certMu.Lock()
+	defer o.certMu.Unlock()
+	// Avoid adding the exact same file pair twice.
+	for _, existing := range o.certs {
+		if certsEqual(existing, cert) {
+			return nil
+		}
+	}
+	o.certs = append(o.certs, cert)
+	slog.Info("loaded TLS certificate", "cert", certPath)
+	return nil
+}
+
+// certsEqual compares two certificates by their raw leaf bytes.
+func certsEqual(a, b tls.Certificate) bool {
+	if len(a.Certificate) == 0 || len(b.Certificate) == 0 {
+		return false
+	}
+	if len(a.Certificate[0]) != len(b.Certificate[0]) {
+		return false
+	}
+	for i := range a.Certificate[0] {
+		if a.Certificate[0][i] != b.Certificate[0][i] {
+			return false
+		}
+	}
+	return true
+}
+
+// getCertificate is the tls.Config.GetCertificate callback. It returns the
+// best matching certificate from the dynamic store, falling back to the first.
+func (o *Orchestrator) getCertificate(hello *tls.ClientHelloInfo) (*tls.Certificate, error) {
+	o.certMu.RLock()
+	defer o.certMu.RUnlock()
+	if len(o.certs) == 0 {
+		return nil, fmt.Errorf("no TLS certificates loaded")
+	}
+	// Try SNI matching if the client sent a server name.
+	if hello.ServerName != "" {
+		for i := range o.certs {
+			if err := hello.SupportsCertificate(&o.certs[i]); err == nil {
+				return &o.certs[i], nil
+			}
+		}
+	}
+	// Fall back to the first (default) cert.
+	return &o.certs[0], nil
 }
 
 // Events returns the event channel for TUI subscription.
@@ -167,13 +233,8 @@ func (o *Orchestrator) createProxyLocked(port int, label string) (*ProxyInstance
 	ctx, cancel := context.WithCancel(context.Background())
 	registry.StartPruner(ctx, reg, 10*time.Second, process.IsProcessAlive)
 
-	if o.useTLS && o.tlsCert != "" {
-		cert, loadErr := tls.LoadX509KeyPair(o.tlsCert, o.tlsKey)
-		if loadErr != nil {
-			cancel()
-			return nil, fmt.Errorf("load TLS keypair for port %d: %w", port, loadErr)
-		}
-		srv.TLSConfig = &tls.Config{Certificates: []tls.Certificate{cert}}
+	if o.useTLS {
+		srv.TLSConfig = &tls.Config{GetCertificate: o.getCertificate}
 	}
 
 	ln, listenErr := net.Listen("tcp", addr)

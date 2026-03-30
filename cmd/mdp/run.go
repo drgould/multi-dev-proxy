@@ -422,13 +422,18 @@ func runSingleMode(cmd *cobra.Command, args []string, controlPort int, groupFlag
 
 	if isOrchestratorRunning(controlPort) {
 		client := &http.Client{Timeout: 5 * time.Second}
-		body, _ := json.Marshal(map[string]any{
+		regPayload := map[string]any{
 			"name":      serverName,
 			"port":      assignedPort,
 			"proxyPort": proxyPort,
 			"group":     group,
 			"scheme":    scheme,
-		})
+		}
+		if tlsCert != "" {
+			regPayload["tlsCertPath"] = tlsCert
+			regPayload["tlsKeyPath"] = tlsKey
+		}
+		body, _ := json.Marshal(regPayload)
 		resp, err := client.Post(
 			fmt.Sprintf("http://127.0.0.1:%d/__mdp/register", controlPort),
 			"application/json",

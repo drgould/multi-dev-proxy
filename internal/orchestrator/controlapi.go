@@ -87,13 +87,15 @@ func (c *ControlAPI) handleListProxies(w http.ResponseWriter, r *http.Request) {
 }
 
 type controlRegisterBody struct {
-	Name      string `json:"name"`
-	Port      int    `json:"port"`
-	PID       int    `json:"pid"`
-	ProxyPort int    `json:"proxyPort"`
-	Group     string `json:"group"`
-	Repo      string `json:"repo"`
-	Scheme    string `json:"scheme"`
+	Name        string `json:"name"`
+	Port        int    `json:"port"`
+	PID         int    `json:"pid"`
+	ProxyPort   int    `json:"proxyPort"`
+	Group       string `json:"group"`
+	Repo        string `json:"repo"`
+	Scheme      string `json:"scheme"`
+	TLSCertPath string `json:"tlsCertPath"`
+	TLSKeyPath  string `json:"tlsKeyPath"`
 }
 
 func (c *ControlAPI) handleRegister(w http.ResponseWriter, r *http.Request) {
@@ -119,16 +121,24 @@ func (c *ControlAPI) handleRegister(w http.ResponseWriter, r *http.Request) {
 		scheme = "http"
 	}
 	entry := &registry.ServerEntry{
-		Name:   body.Name,
-		Repo:   repo,
-		Group:  body.Group,
-		Port:   body.Port,
-		PID:    body.PID,
-		Scheme: scheme,
+		Name:        body.Name,
+		Repo:        repo,
+		Group:       body.Group,
+		Port:        body.Port,
+		PID:         body.PID,
+		Scheme:      scheme,
+		TLSCertPath: body.TLSCertPath,
+		TLSKeyPath:  body.TLSKeyPath,
 	}
 	if err := c.orch.Register(body.ProxyPort, entry); err != nil {
 		writeJSON(w, http.StatusInternalServerError, map[string]string{"error": err.Error()})
 		return
+	}
+	// Dynamically load the service's TLS cert into the proxy cert store.
+	if body.TLSCertPath != "" && body.TLSKeyPath != "" {
+		if err := c.orch.AddCert(body.TLSCertPath, body.TLSKeyPath); err != nil {
+			slog.Warn("failed to load service TLS cert", "name", body.Name, "err", err)
+		}
 	}
 	writeJSON(w, http.StatusOK, map[string]bool{"ok": true})
 }
