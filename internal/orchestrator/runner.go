@@ -190,7 +190,7 @@ func buildEnv(configEnv map[string]string, portAssignments map[string]int) []str
 // DetectGroup returns the current git branch or fallback "default".
 func DetectGroup(dir string) string {
 	branch := detect.DetectBranch(dir)
-	if branch == "" {
+	if branch == "" || branch == "unknown" {
 		return "default"
 	}
 	return branch

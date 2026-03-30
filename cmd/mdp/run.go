@@ -13,6 +13,7 @@ import (
 	"os/signal"
 	"path/filepath"
 	"strings"
+	"sync"
 	"syscall"
 	"time"
 
@@ -57,7 +58,10 @@ func runRun(cmd *cobra.Command, args []string) error {
 }
 
 func runBatchMode(cmd *cobra.Command, controlPort int, groupFlag string) error {
-	cwd, _ := os.Getwd()
+	cwd, err := os.Getwd()
+	if err != nil {
+		return fmt.Errorf("cannot determine working directory: %w", err)
+	}
 	configPath := config.Find(cwd)
 	if configPath == "" {
 		return fmt.Errorf("no command specified and no mdp.yaml found — usage: mdp run [-- command]")
@@ -80,7 +84,12 @@ func runBatchMode(cmd *cobra.Command, controlPort int, groupFlag string) error {
 	client := &http.Client{Timeout: 5 * time.Second}
 	controlURL := fmt.Sprintf("http://127.0.0.1:%d", controlPort)
 
-	portRange, _ := ports.ParseRange(cfg.PortRange)
+	portRange, err := ports.ParseRange(cfg.PortRange)
+	if err != nil {
+		return fmt.Errorf("invalid port range in config: %w", err)
+	}
+
+	bt := &batchTracker{}
 
 	for name, svc := range cfg.Services {
 		if svc.Command == "" && svc.Port == 0 {
@@ -93,7 +102,7 @@ func runBatchMode(cmd *cobra.Command, controlPort int, groupFlag string) error {
 		}
 
 		if len(svc.Ports) > 0 {
-			if err := registerMultiPortBatch(client, controlURL, name, svc, svcGroup, portRange); err != nil {
+			if err := registerMultiPortBatch(client, controlURL, name, svc, svcGroup, portRange, bt); err != nil {
 				return fmt.Errorf("register multi-port service %q: %w", name, err)
 			}
 			continue
@@ -120,6 +129,9 @@ func runBatchMode(cmd *cobra.Command, controlPort int, groupFlag string) error {
 				return fmt.Errorf("register %q: %w", serverName, err)
 			}
 			resp.Body.Close()
+			if resp.StatusCode != http.StatusOK {
+				return fmt.Errorf("register %q failed (status %d)", serverName, resp.StatusCode)
+			}
 		}
 
 		if svc.Command != "" {
@@ -129,7 +141,8 @@ func runBatchMode(cmd *cobra.Command, controlPort int, groupFlag string) error {
 					env = append(env, k+"="+v)
 				}
 			}
-			go runServiceProcess(name, svc.Command, svc.Dir, env)
+			bt.wg.Add(1)
+			go runServiceProcess(bt, name, svc.Command, svc.Dir, env)
 		}
 	}
 
@@ -137,6 +150,7 @@ func runBatchMode(cmd *cobra.Command, controlPort int, groupFlag string) error {
 
 	sigCh := make(chan os.Signal, 1)
 	signal.Notify(sigCh, syscall.SIGINT, syscall.SIGTERM)
+	defer signal.Stop(sigCh)
 
 	healthURL := fmt.Sprintf("http://127.0.0.1:%d/__mdp/health", controlPort)
 	gone := watchHealth(healthURL)
@@ -146,10 +160,20 @@ func runBatchMode(cmd *cobra.Command, controlPort int, groupFlag string) error {
 	case <-gone:
 		slog.Warn("orchestrator is no longer reachable, shutting down")
 	}
+
+	bt.signalAll()
+	waitDone := make(chan struct{})
+	go func() { bt.wg.Wait(); close(waitDone) }()
+	select {
+	case <-waitDone:
+	case <-time.After(5 * time.Second):
+		bt.killAll()
+		<-waitDone
+	}
 	return nil
 }
 
-func registerMultiPortBatch(client *http.Client, controlURL, name string, svc config.ServiceConfig, group string, portRange ports.PortRange) error {
+func registerMultiPortBatch(client *http.Client, controlURL, name string, svc config.ServiceConfig, group string, portRange ports.PortRange, bt *batchTracker) error {
 	portAssignments := make(map[string]int)
 	for envName, value := range svc.Env {
 		if value == "auto" {
@@ -182,6 +206,9 @@ func registerMultiPortBatch(client *http.Client, controlURL, name string, svc co
 			return err
 		}
 		resp.Body.Close()
+		if resp.StatusCode != http.StatusOK {
+			return fmt.Errorf("register %q failed (status %d)", serverName, resp.StatusCode)
+		}
 	}
 
 	if svc.Command != "" {
@@ -195,7 +222,8 @@ func registerMultiPortBatch(client *http.Client, controlURL, name string, svc co
 				env = append(env, k+"="+v)
 			}
 		}
-		go runServiceProcess(name, svc.Command, svc.Dir, env)
+		bt.wg.Add(1)
+		go runServiceProcess(bt, name, svc.Command, svc.Dir, env)
 	}
 
 	return nil
@@ -228,9 +256,12 @@ var serviceColors = []string{
 	"38;5;204", // coral
 }
 
+var colorMu sync.Mutex
 var colorIndex int
 
 func nextColor() string {
+	colorMu.Lock()
+	defer colorMu.Unlock()
 	c := serviceColors[colorIndex%len(serviceColors)]
 	colorIndex++
 	return c
@@ -272,12 +303,49 @@ func (w *prefixWriter) Flush() {
 	}
 }
 
-func runServiceProcess(name, command, dir string, env []string) {
+type batchTracker struct {
+	mu   sync.Mutex
+	cmds []*exec.Cmd
+	wg   sync.WaitGroup
+}
+
+func (bt *batchTracker) add(cmd *exec.Cmd) {
+	bt.mu.Lock()
+	defer bt.mu.Unlock()
+	bt.cmds = append(bt.cmds, cmd)
+}
+
+func (bt *batchTracker) signalAll() {
+	bt.mu.Lock()
+	defer bt.mu.Unlock()
+	for _, cmd := range bt.cmds {
+		if cmd.Process != nil {
+			cmd.Process.Signal(syscall.SIGTERM)
+		}
+	}
+}
+
+func (bt *batchTracker) killAll() {
+	bt.mu.Lock()
+	defer bt.mu.Unlock()
+	for _, cmd := range bt.cmds {
+		if cmd.Process != nil {
+			cmd.Process.Kill()
+		}
+	}
+}
+
+func runServiceProcess(bt *batchTracker, name, command, dir string, env []string) {
+	defer bt.wg.Done()
 	color := nextColor()
 	pw := newPrefixWriter(name, color, os.Stdout)
 	pwErr := newPrefixWriter(name, color, os.Stderr)
 
 	parts := strings.Fields(command)
+	if len(parts) == 0 {
+		slog.Error("empty command", "name", name)
+		return
+	}
 	cmd := exec.Command(parts[0], parts[1:]...)
 	cmd.Env = append(os.Environ(), env...)
 	if dir != "" {
@@ -285,6 +353,8 @@ func runServiceProcess(name, command, dir string, env []string) {
 	}
 	cmd.Stdout = pw
 	cmd.Stderr = pwErr
+
+	bt.add(cmd)
 	if err := cmd.Run(); err != nil {
 		slog.Error("service process exited", "name", name, "command", command, "err", err)
 	}
@@ -321,7 +391,10 @@ func runSingleMode(cmd *cobra.Command, args []string, controlPort int, groupFlag
 		return fmt.Errorf("invalid --port-range: %w", err)
 	}
 
-	cwd, _ := os.Getwd()
+	cwd, err := os.Getwd()
+	if err != nil {
+		return fmt.Errorf("cannot determine working directory: %w", err)
+	}
 	serverName := nameOverride
 	if serverName == "" {
 		repo := repoOverride
@@ -365,6 +438,9 @@ func runSingleMode(cmd *cobra.Command, args []string, controlPort int, groupFlag
 			return fmt.Errorf("register %q with orchestrator: %w", serverName, err)
 		}
 		resp.Body.Close()
+		if resp.StatusCode != http.StatusOK {
+			return fmt.Errorf("register %q failed (status %d)", serverName, resp.StatusCode)
+		}
 		slog.Info("registered with orchestrator", "name", serverName, "proxy", proxyPort)
 		healthURL := fmt.Sprintf("http://127.0.0.1:%d/__mdp/health", controlPort)
 		return runProxied(args, envVar, assignedPort, healthURL)
@@ -441,10 +517,7 @@ func detectMkcertCerts() (string, string) {
 	certPath := filepath.Join(caRoot, "localhost.pem")
 	keyPath := filepath.Join(caRoot, "localhost-key.pem")
 	if _, err := os.Stat(certPath); err != nil {
-		certPath = filepath.Join(caRoot, "rootCA.pem")
-		if _, err := os.Stat(certPath); err != nil {
-			return "", ""
-		}
+		return "", ""
 	}
 	if _, err := os.Stat(keyPath); err != nil {
 		return "", ""
@@ -501,7 +574,12 @@ func runProxied(args []string, envVar string, port int, healthURL string) error 
 	select {
 	case <-sigCh:
 		cmd.Process.Signal(syscall.SIGTERM)
-		<-done
+		select {
+		case <-done:
+		case <-time.After(5 * time.Second):
+			cmd.Process.Kill()
+			<-done
+		}
 	case <-gone:
 		slog.Warn("proxy is no longer reachable, shutting down")
 		cmd.Process.Signal(syscall.SIGTERM)
@@ -542,7 +620,12 @@ func runSolo(args []string) error {
 	select {
 	case <-sigCh:
 		cmd.Process.Signal(syscall.SIGTERM)
-		<-done
+		select {
+		case <-done:
+		case <-time.After(5 * time.Second):
+			cmd.Process.Kill()
+			<-done
+		}
 	case err := <-done:
 		if err != nil {
 			if ee, ok := err.(*exec.ExitError); ok {

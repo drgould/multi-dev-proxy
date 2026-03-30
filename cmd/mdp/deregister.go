@@ -4,6 +4,7 @@ import (
 	"encoding/json"
 	"fmt"
 	"net/http"
+	"net/url"
 	"time"
 
 	"github.com/spf13/cobra"
@@ -30,11 +31,14 @@ func runDeregister(cmd *cobra.Command, args []string) error {
 	}
 
 	client := &http.Client{Timeout: 5 * time.Second}
-	req, _ := http.NewRequest(
+	req, err := http.NewRequest(
 		http.MethodDelete,
-		fmt.Sprintf("http://127.0.0.1:%d/__mdp/register/%s", controlPort, name),
+		fmt.Sprintf("http://127.0.0.1:%d/__mdp/register/%s", controlPort, url.PathEscape(name)),
 		nil,
 	)
+	if err != nil {
+		return fmt.Errorf("build request: %w", err)
+	}
 	resp, err := client.Do(req)
 	if err != nil {
 		return fmt.Errorf("orchestrator not reachable: %w", err)
@@ -45,7 +49,9 @@ func runDeregister(cmd *cobra.Command, args []string) error {
 		OK      bool `json:"ok"`
 		Deleted bool `json:"deleted"`
 	}
-	json.NewDecoder(resp.Body).Decode(&result)
+	if err := json.NewDecoder(resp.Body).Decode(&result); err != nil {
+		return fmt.Errorf("decode response: %w", err)
+	}
 
 	if !result.Deleted {
 		fmt.Printf("No server named %q found\n", name)

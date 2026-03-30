@@ -95,8 +95,9 @@ func runDaemonProcess(cmd *cobra.Command, controlPort int) error {
 
 	var cfg *config.Config
 	if configPath == "" {
-		cwd, _ := os.Getwd()
-		configPath = config.Find(cwd)
+		if cwd, err := os.Getwd(); err == nil {
+			configPath = config.Find(cwd)
+		}
 	}
 	if configPath != "" {
 		var err error
@@ -129,10 +130,13 @@ func runDaemonProcess(cmd *cobra.Command, controlPort int) error {
 	case <-ctx.Done():
 	}
 
-	shutdownCtx, shutdownCancel := context.WithTimeout(context.Background(), 5*time.Second)
-	defer shutdownCancel()
-	orch.Shutdown(shutdownCtx)
-	ctrlSrv.Shutdown(shutdownCtx)
+	orchCtx, orchCancel := context.WithTimeout(context.Background(), 5*time.Second)
+	orch.Shutdown(orchCtx)
+	orchCancel()
+
+	ctrlCtx, ctrlCancel := context.WithTimeout(context.Background(), 2*time.Second)
+	ctrlSrv.Shutdown(ctrlCtx)
+	ctrlCancel()
 	return nil
 }
 
@@ -174,10 +178,13 @@ func runStop(controlPort int) error {
 		"application/json", nil,
 	)
 	if err == nil {
-		resp.Body.Close()
-		fmt.Println("Shutdown signal sent via control API")
-		cleanupPIDFile()
-		return nil
+		defer resp.Body.Close()
+		if resp.StatusCode == http.StatusOK {
+			fmt.Println("Shutdown signal sent via control API")
+			cleanupPIDFile()
+			return nil
+		}
+		slog.Warn("shutdown request returned unexpected status", "status", resp.StatusCode)
 	}
 
 	pidData, err := os.ReadFile(pidFilePath())

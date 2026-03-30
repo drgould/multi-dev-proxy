@@ -6,6 +6,7 @@ import (
 	"io"
 	"log"
 	"log/slog"
+	"net"
 	"net/http"
 	"strconv"
 	"strings"
@@ -138,10 +139,8 @@ func (c *ControlAPI) handleDeregister(w http.ResponseWriter, r *http.Request) {
 		writeJSON(w, http.StatusBadRequest, map[string]string{"error": "name is required"})
 		return
 	}
-	c.orch.mu.RLock()
-	defer c.orch.mu.RUnlock()
 	deleted := false
-	for _, pi := range c.orch.proxies {
+	for _, pi := range c.orch.ListProxies() {
 		if pi.Registry.Deregister(name) {
 			deleted = true
 		}
@@ -224,15 +223,18 @@ func (c *ControlAPI) handleShutdown(w http.ResponseWriter, r *http.Request) {
 func StartControlServer(orch *Orchestrator, port int, shutdownFn func()) (*http.Server, error) {
 	capi := NewControlAPI(orch, shutdownFn)
 	addr := fmt.Sprintf("127.0.0.1:%d", port)
+	ln, err := net.Listen("tcp", addr)
+	if err != nil {
+		return nil, fmt.Errorf("control API listen on %s: %w", addr, err)
+	}
 	srv := &http.Server{
-		Addr:     addr,
 		Handler:  capi.Handler(),
 		ErrorLog: log.New(io.Discard, "", 0),
 	}
 
 	go func() {
-		if err := srv.ListenAndServe(); err != nil && err != http.ErrServerClosed {
-			slog.Error("control API listener failed", "addr", addr, "err", err)
+		if err := srv.Serve(ln); err != nil && err != http.ErrServerClosed {
+			slog.Error("control API serve failed", "addr", addr, "err", err)
 		}
 	}()
 

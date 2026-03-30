@@ -19,7 +19,10 @@ import (
 )
 
 func DefaultDir() string {
-	home, _ := os.UserHomeDir()
+	home, err := os.UserHomeDir()
+	if err != nil || home == "" {
+		return filepath.Join(os.TempDir(), "mdp", "certs")
+	}
 	return filepath.Join(home, ".mdp", "certs")
 }
 
@@ -97,8 +100,10 @@ func generateSelfSigned(certPath, keyPath string) error {
 	if err != nil {
 		return fmt.Errorf("write cert: %w", err)
 	}
-	pem.Encode(certFile, &pem.Block{Type: "CERTIFICATE", Bytes: certDER})
-	certFile.Close()
+	defer certFile.Close()
+	if err := pem.Encode(certFile, &pem.Block{Type: "CERTIFICATE", Bytes: certDER}); err != nil {
+		return fmt.Errorf("encode cert PEM: %w", err)
+	}
 
 	keyDER, err := x509.MarshalECPrivateKey(key)
 	if err != nil {
@@ -108,8 +113,10 @@ func generateSelfSigned(certPath, keyPath string) error {
 	if err != nil {
 		return fmt.Errorf("write key: %w", err)
 	}
-	pem.Encode(keyFile, &pem.Block{Type: "EC PRIVATE KEY", Bytes: keyDER})
-	keyFile.Close()
+	defer keyFile.Close()
+	if err := pem.Encode(keyFile, &pem.Block{Type: "EC PRIVATE KEY", Bytes: keyDER}); err != nil {
+		return fmt.Errorf("encode key PEM: %w", err)
+	}
 
 	return nil
 }

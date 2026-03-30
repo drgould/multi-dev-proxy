@@ -5,6 +5,7 @@ import (
 	"fmt"
 	"io"
 	"os"
+	"time"
 
 	"github.com/spf13/cobra"
 )
@@ -82,8 +83,6 @@ func tailFollow(path string, n int) error {
 		for _, line := range allLines[start:] {
 			fmt.Println(line)
 		}
-		// seek to end for following
-		f.Seek(0, io.SeekEnd)
 	} else {
 		if _, err := io.Copy(os.Stdout, f); err != nil {
 			return err
@@ -98,7 +97,7 @@ func tailFollow(path string, n int) error {
 		}
 		if err != nil {
 			if err == io.EOF {
-				// poll — reopen isn't necessary since we keep the fd
+				time.Sleep(100 * time.Millisecond)
 				continue
 			}
 			return err

@@ -38,6 +38,7 @@ func (inj *Injector) ModifyResponse(resp *http.Response) error {
 	case "gzip":
 		gr, err := gzip.NewReader(resp.Body)
 		if err != nil {
+			resp.Body.Close()
 			return nil
 		}
 		defer gr.Close()
@@ -50,13 +51,16 @@ func (inj *Injector) ModifyResponse(resp *http.Response) error {
 
 	body, err := io.ReadAll(io.LimitReader(reader, maxBodySize+1))
 	resp.Body.Close()
-	if err != nil {
-		resp.Body = io.NopCloser(bytes.NewReader(body))
-		return nil
-	}
 
 	resp.Header.Del("Content-Encoding")
 	resp.Header.Del("Transfer-Encoding")
+
+	if err != nil {
+		resp.Body = io.NopCloser(bytes.NewReader(body))
+		resp.ContentLength = int64(len(body))
+		resp.Header.Set("Content-Length", fmt.Sprintf("%d", len(body)))
+		return nil
+	}
 
 	if int64(len(body)) > maxBodySize {
 		resp.Body = io.NopCloser(bytes.NewReader(body))

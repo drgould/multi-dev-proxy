@@ -66,13 +66,45 @@ func DetectPort(reader io.Reader, timeout time.Duration) (PortResult, error) {
 // Returns the detected port (or 0 and ErrPortNotDetected on timeout).
 // The tee continues even after port detection.
 func TeeAndDetect(stdout io.ReadCloser, output io.Writer, timeout time.Duration) (PortResult, error) {
-	pr, pw := io.Pipe()
-	tr := io.TeeReader(stdout, pw)
+	result := make(chan PortResult, 1)
+	done := make(chan struct{})
+	detected := make(chan struct{})
 
 	go func() {
-		defer pw.Close()
-		io.Copy(output, tr)
+		defer close(done)
+		scanner := bufio.NewScanner(stdout)
+		scanner.Buffer(make([]byte, 0, 64*1024), 1024*1024)
+		portFound := false
+		for scanner.Scan() {
+			line := scanner.Text()
+			fmt.Fprintln(output, line)
+			if !portFound {
+				if m := portPattern.FindStringSubmatch(line); m != nil {
+					port, err := strconv.Atoi(m[2])
+					if err == nil && port > 0 && port <= 65535 {
+						portFound = true
+						select {
+						case result <- PortResult{Port: port, Scheme: m[1]}:
+						default:
+						}
+						close(detected)
+					}
+				}
+			}
+		}
 	}()
 
-	return DetectPort(pr, timeout)
+	select {
+	case pr := <-result:
+		return pr, nil
+	case <-time.After(timeout):
+		return PortResult{}, fmt.Errorf("%w after %s", ErrPortNotDetected, timeout)
+	case <-done:
+		select {
+		case pr := <-result:
+			return pr, nil
+		default:
+			return PortResult{}, ErrPortNotDetected
+		}
+	}
 }

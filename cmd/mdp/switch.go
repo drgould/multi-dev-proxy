@@ -3,6 +3,7 @@ package main
 import (
 	"fmt"
 	"net/http"
+	"net/url"
 	"time"
 
 	"github.com/spf13/cobra"
@@ -33,7 +34,7 @@ func runSwitch(cmd *cobra.Command, args []string) error {
 	client := &http.Client{Timeout: 5 * time.Second}
 
 	if groupName != "" {
-		resp, err := client.Post(controlURL+"/__mdp/groups/"+groupName+"/switch", "application/json", nil)
+		resp, err := client.Post(controlURL+"/__mdp/groups/"+url.PathEscape(groupName)+"/switch", "application/json", nil)
 		if err != nil {
 			return fmt.Errorf("orchestrator not reachable: %w", err)
 		}
@@ -68,7 +69,7 @@ func runSwitch(cmd *cobra.Command, args []string) error {
 		return fmt.Errorf("--proxy-port is required for individual server switch")
 	}
 
-	resp, err := client.Post(fmt.Sprintf("%s/__mdp/proxies/%d/default/%s", controlURL, proxyPort, name), "application/json", nil)
+	resp, err := client.Post(fmt.Sprintf("%s/__mdp/proxies/%d/default/%s", controlURL, proxyPort, url.PathEscape(name)), "application/json", nil)
 	if err != nil {
 		return fmt.Errorf("orchestrator not reachable: %w", err)
 	}

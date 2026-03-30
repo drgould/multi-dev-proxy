@@ -129,7 +129,10 @@ func registerWithProxy(proxyURL string, opts RunOpts, pid int, timeout time.Dura
 	body, _ := json.Marshal(payload)
 	ctx, cancel := context.WithTimeout(context.Background(), timeout)
 	defer cancel()
-	req, _ := http.NewRequestWithContext(ctx, http.MethodPost, proxyURL+"/__mdp/register", bytes.NewReader(body))
+	req, err := http.NewRequestWithContext(ctx, http.MethodPost, proxyURL+"/__mdp/register", bytes.NewReader(body))
+	if err != nil {
+		return fmt.Errorf("build register request: %w", err)
+	}
 	req.Header.Set("Content-Type", "application/json")
 	resp, err := tlsClient().Do(req)
 	if err != nil {
@@ -148,7 +151,11 @@ func deregisterFromProxy(proxyURL, name string, timeout time.Duration) {
 	}
 	ctx, cancel := context.WithTimeout(context.Background(), timeout)
 	defer cancel()
-	req, _ := http.NewRequestWithContext(ctx, http.MethodDelete, proxyURL+"/__mdp/register/"+urlEncodeServerName(name), nil)
+	req, err := http.NewRequestWithContext(ctx, http.MethodDelete, proxyURL+"/__mdp/register/"+urlEncodeServerName(name), nil)
+	if err != nil {
+		slog.Debug("deregister: bad request URL", "err", err)
+		return
+	}
 	resp, err := tlsClient().Do(req)
 	if err != nil {
 		slog.Debug("deregister failed", "err", err)

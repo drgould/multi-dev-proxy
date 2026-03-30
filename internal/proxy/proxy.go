@@ -1,6 +1,7 @@
 package proxy
 
 import (
+	"context"
 	"crypto/tls"
 	"fmt"
 	"log/slog"
@@ -79,12 +80,13 @@ func (p *Proxy) resolve(cookieHeader string) routing.ResolveResult {
 	return routing.ResolveUpstream(p.reg, cookieHeader, p.cookieName, p.reg.GetDefault())
 }
 
+type contextKey struct{}
+
 // rewrite is the Rewrite function for httputil.ReverseProxy.
 // MUST use Rewrite — Director is deprecated since Go 1.20.
 func (p *Proxy) rewrite(r *httputil.ProxyRequest) {
-	cookieHeader := r.In.Header.Get("Cookie")
-	result := p.resolve(cookieHeader)
-	if result.Entry == nil {
+	result, ok := r.In.Context().Value(contextKey{}).(routing.ResolveResult)
+	if !ok || result.Entry == nil {
 		return
 	}
 
@@ -121,7 +123,8 @@ func (p *Proxy) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	p.rp.ServeHTTP(w, r)
+	ctx := context.WithValue(r.Context(), contextKey{}, result)
+	p.rp.ServeHTTP(w, r.WithContext(ctx))
 }
 
 // rewriteLocationByHost rewrites upstream Location headers to point to the proxy.

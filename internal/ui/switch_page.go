@@ -4,6 +4,7 @@ import (
 	"fmt"
 	"html"
 	"net/http"
+	"net/url"
 	"sort"
 	"strings"
 
@@ -33,7 +34,7 @@ func RenderSwitchPage(servers []*registry.ServerEntry) string {
 		sb.WriteString(renderRepoGroup(repo, groups[repo]))
 	}
 
-	return renderPage(sb.String(), false)
+	return renderPage(sb.String())
 }
 
 func renderRepoGroup(repo string, entries []*registry.ServerEntry) string {
@@ -46,7 +47,7 @@ func renderRepoGroup(repo string, entries []*registry.ServerEntry) string {
 		if idx := strings.LastIndex(e.Name, "/"); idx >= 0 {
 			branch = e.Name[idx+1:]
 		}
-		btn := fmt.Sprintf(`<form method="POST" action="/__mdp/switch/%s"><button type="submit" class="btn">Switch</button></form>`, html.EscapeString(e.Name))
+		btn := fmt.Sprintf(`<form method="POST" action="/__mdp/switch/%s"><button type="submit" class="btn">Switch</button></form>`, url.PathEscape(e.Name))
 		sb.WriteString(fmt.Sprintf(`<tr><td>%s</td><td class="mono">:%d</td><td class="mono">%d</td><td>%s</td></tr>`,
 			html.EscapeString(branch), e.Port, e.PID, btn))
 	}
@@ -55,11 +56,10 @@ func renderRepoGroup(repo string, entries []*registry.ServerEntry) string {
 }
 
 func renderEmpty() string {
-	return renderPage(`<div class="empty"><p>No dev servers registered.</p><p style="margin-top:0.75rem">Run <code>mdp run &lt;command&gt;</code> to start one.</p></div>`, true)
+	return renderPage(`<div class="empty"><p>No dev servers registered.</p><p style="margin-top:0.75rem">Run <code>mdp run &lt;command&gt;</code> to start one.</p></div>`)
 }
 
-func renderPage(content string, isEmpty bool) string {
-	_ = isEmpty
+func renderPage(content string) string {
 	return `<!DOCTYPE html>
 <html lang="en">
 <head>
@@ -180,7 +180,7 @@ func renderPage(content string, isEmpty bool) string {
 
       function switchGroup(name) {
         var members = cfg.groups[name] || [];
-        fetch('/__mdp/groups/' + name + '/switch', {method:'POST'}).then(function() {
+        fetch('/__mdp/groups/' + encodeURIComponent(name) + '/switch', {method:'POST'}).then(function() {
           var local = members.find(function(m) { return localServerNames.indexOf(m) >= 0; });
           if (local) {
             document.cookie = cookieName + '=' + encodeURIComponent(local) + '; path=/; SameSite=Lax';
@@ -197,7 +197,14 @@ func renderPage(content string, isEmpty bool) string {
           var row = document.createElement('div');
           row.className = 'group-row';
           var members = cfg.groups[name] || [];
-          row.innerHTML = '<span class="group-name">' + name + '<span class="group-members"> — ' + members.join(', ') + '</span></span>';
+          var nameSpan = document.createElement('span');
+          nameSpan.className = 'group-name';
+          nameSpan.textContent = name;
+          var membersSpan = document.createElement('span');
+          membersSpan.className = 'group-members';
+          membersSpan.textContent = ' \u2014 ' + members.join(', ');
+          nameSpan.appendChild(membersSpan);
+          row.appendChild(nameSpan);
           var btn = document.createElement('button');
           btn.className = 'btn';
           btn.textContent = 'Switch';
@@ -218,7 +225,10 @@ func renderPage(content string, isEmpty bool) string {
             var sibSec = document.createElement('div');
             sibSec.className = 'repo-group';
             var label = sib.label || 'proxy';
-            sibSec.innerHTML = '<h2 class="repo-name">' + label + ' :' + sib.port + '</h2>';
+            var h2 = document.createElement('h2');
+            h2.className = 'repo-name';
+            h2.textContent = label + ' :' + sib.port;
+            sibSec.appendChild(h2);
             repos.forEach(function(repo) {
               var tbl = document.createElement('table');
               tbl.innerHTML = '<thead><tr><th>Branch</th><th>Port</th><th>PID</th><th></th></tr></thead>';

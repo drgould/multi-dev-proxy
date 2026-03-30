@@ -5,6 +5,7 @@ import (
 	"fmt"
 	"net/http"
 	"net/url"
+	"sync"
 	"time"
 
 	"github.com/derekgould/multi-dev-proxy/internal/orchestrator"
@@ -26,6 +27,7 @@ type RemoteBackend struct {
 	client     *http.Client
 	events     chan orchestrator.Event
 	stopPoll   chan struct{}
+	stopOnce   sync.Once
 }
 
 // NewRemoteBackend creates a backend that polls the control API.
@@ -80,7 +82,7 @@ func (rb *RemoteBackend) healthCheck() bool {
 
 // Stop terminates the background poller.
 func (rb *RemoteBackend) Stop() {
-	close(rb.stopPoll)
+	rb.stopOnce.Do(func() { close(rb.stopPoll) })
 }
 
 func (rb *RemoteBackend) Events() <-chan orchestrator.Event {

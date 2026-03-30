@@ -3,10 +3,12 @@ package orchestrator
 import (
 	"context"
 	"crypto/tls"
+	"encoding/json"
 	"fmt"
 	"io"
 	"log"
 	"log/slog"
+	"net"
 	"net/http"
 	"sync"
 	"time"
@@ -109,12 +111,14 @@ func (o *Orchestrator) createProxyLocked(port int, label string) (*ProxyInstance
 	prx.SetModifyResponse(inj.ModifyResponse)
 
 	configFn := func() api.ConfigResponse {
+		o.mu.RLock()
+		defer o.mu.RUnlock()
 		resp := api.ConfigResponse{
 			Port:       port,
 			CookieName: cookieName,
 			Label:      label,
 			Default:    reg.GetDefault(),
-			Groups:     o.Groups(),
+			Groups:     o.groupsLocked(),
 		}
 		for _, pi := range o.proxies {
 			if pi.Port == port {
@@ -146,17 +150,16 @@ func (o *Orchestrator) createProxyLocked(port int, label string) (*ProxyInstance
 		w.Header().Set("Content-Type", "application/json")
 		if err := o.SwitchGroup(gname); err != nil {
 			w.WriteHeader(http.StatusNotFound)
-			fmt.Fprintf(w, `{"error":%q}`, err.Error())
+			json.NewEncoder(w).Encode(map[string]string{"error": err.Error()})
 			return
 		}
 		w.WriteHeader(http.StatusOK)
-		fmt.Fprint(w, `{"ok":true}`)
+		json.NewEncoder(w).Encode(map[string]bool{"ok": true})
 	})
 	mux.Handle("/", prx)
 
 	addr := fmt.Sprintf("%s:%d", o.host, port)
 	srv := &http.Server{
-		Addr:     addr,
 		Handler:  api.CORSMiddleware(mux),
 		ErrorLog: log.New(io.Discard, "", 0),
 	}
@@ -164,18 +167,27 @@ func (o *Orchestrator) createProxyLocked(port int, label string) (*ProxyInstance
 	ctx, cancel := context.WithCancel(context.Background())
 	registry.StartPruner(ctx, reg, 10*time.Second, process.IsProcessAlive)
 
+	if o.useTLS && o.tlsCert != "" {
+		cert, loadErr := tls.LoadX509KeyPair(o.tlsCert, o.tlsKey)
+		if loadErr != nil {
+			cancel()
+			return nil, fmt.Errorf("load TLS keypair for port %d: %w", port, loadErr)
+		}
+		srv.TLSConfig = &tls.Config{Certificates: []tls.Certificate{cert}}
+	}
+
+	ln, listenErr := net.Listen("tcp", addr)
+	if listenErr != nil {
+		cancel()
+		return nil, fmt.Errorf("listen on %s: %w", addr, listenErr)
+	}
+
 	go func() {
 		var err error
-		if o.useTLS && o.tlsCert != "" {
-			cert, loadErr := tls.LoadX509KeyPair(o.tlsCert, o.tlsKey)
-			if loadErr != nil {
-				slog.Error("load TLS keypair", "err", loadErr, "port", port)
-				return
-			}
-			srv.TLSConfig = &tls.Config{Certificates: []tls.Certificate{cert}}
-			err = srv.ListenAndServeTLS("", "")
+		if srv.TLSConfig != nil {
+			err = srv.ServeTLS(ln, "", "")
 		} else {
-			err = srv.ListenAndServe()
+			err = srv.Serve(ln)
 		}
 		if err != nil && err != http.ErrServerClosed {
 			slog.Error("proxy listener failed", "port", port, "err", err)
@@ -250,6 +262,10 @@ func (o *Orchestrator) ClearDefault(proxyPort int) error {
 func (o *Orchestrator) Groups() map[string][]string {
 	o.mu.RLock()
 	defer o.mu.RUnlock()
+	return o.groupsLocked()
+}
+
+func (o *Orchestrator) groupsLocked() map[string][]string {
 	groups := make(map[string][]string)
 	for _, pi := range o.proxies {
 		for _, entry := range pi.Registry.List() {
@@ -314,7 +330,7 @@ func (o *Orchestrator) Snapshot() Snapshot {
 	defer o.mu.RUnlock()
 
 	snap := Snapshot{
-		Groups: o.Groups(),
+		Groups: o.groupsLocked(),
 	}
 	for _, pi := range o.proxies {
 		snap.Proxies = append(snap.Proxies, ProxySnapshot{

@@ -62,9 +62,7 @@ func TestBuildEnv(t *testing.T) {
 
 func TestDetectGroupFallback(t *testing.T) {
 	group := DetectGroup("/nonexistent/path/that/has/no/git")
-	// DetectBranch returns "unknown" for non-git dirs, which is non-empty,
-	// so DetectGroup passes it through
-	if group != "unknown" {
-		t.Errorf("expected 'unknown' for non-git dir, got %q", group)
+	if group != "default" {
+		t.Errorf("expected 'default' for non-git dir, got %q", group)
 	}
 }

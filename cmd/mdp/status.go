@@ -75,7 +75,10 @@ func runStatus(cmd *cobra.Command, args []string) error {
 	controlURL := fmt.Sprintf("http://127.0.0.1:%d", controlPort)
 
 	resp, err := client.Get(controlURL + "/__mdp/health")
-	if err != nil {
+	if err != nil || resp.StatusCode != http.StatusOK {
+		if resp != nil {
+			resp.Body.Close()
+		}
 		data.Daemon.Running = false
 		if jsonOutput {
 			return outputJSON(data)
