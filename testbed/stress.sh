@@ -51,9 +51,7 @@ if ! curl -so /dev/null "${CTRL}/__mdp/health" 2>/dev/null; then
         -days 365 -nodes -subj '/CN=localhost' 2>/dev/null
     fi
     "$SCRIPT_DIR/mdp" -d \
-      --control-port "$CTRL_PORT" \
-      --tls-cert "$CERT_DIR/localhost.pem" \
-      --tls-key "$CERT_DIR/localhost-key.pem"
+      --control-port "$CTRL_PORT"
     STARTED_ORCH=1
     sleep 1
 fi

@@ -2,6 +2,7 @@ package orchestrator
 
 import (
 	"context"
+	"crypto/tls"
 	"net"
 	"net/http"
 	"testing"
@@ -11,11 +12,11 @@ import (
 )
 
 func newTestOrch() *Orchestrator {
-	return New(&config.Config{}, false, "", "", "")
+	return New(&config.Config{}, "")
 }
 
 func TestNewSetsDefaults(t *testing.T) {
-	o := New(nil, false, "", "", "")
+	o := New(nil, "")
 	if o.host != "0.0.0.0" {
 		t.Errorf("expected default host 0.0.0.0, got %q", o.host)
 	}
@@ -25,12 +26,9 @@ func TestNewSetsDefaults(t *testing.T) {
 }
 
 func TestNewCustomHost(t *testing.T) {
-	o := New(nil, true, "cert.pem", "key.pem", "127.0.0.1")
+	o := New(nil, "127.0.0.1")
 	if o.host != "127.0.0.1" {
 		t.Errorf("expected host 127.0.0.1, got %q", o.host)
-	}
-	if !o.useTLS {
-		t.Error("expected useTLS to be true")
 	}
 }
 
@@ -281,5 +279,55 @@ func TestEvents(t *testing.T) {
 		}
 	default:
 		t.Error("expected event on channel")
+	}
+}
+
+func TestHasCertsInitiallyFalse(t *testing.T) {
+	o := newTestOrch()
+	if o.HasCerts() {
+		t.Error("expected HasCerts to be false initially")
+	}
+}
+
+func TestAddCertInvalidPath(t *testing.T) {
+	o := newTestOrch()
+	err := o.AddCert("/nonexistent/cert.pem", "/nonexistent/key.pem")
+	if err == nil {
+		t.Error("expected error for nonexistent cert files")
+	}
+	if o.HasCerts() {
+		t.Error("HasCerts should still be false after failed AddCert")
+	}
+}
+
+func TestCertsEqualSameCert(t *testing.T) {
+	a := tls.Certificate{Certificate: [][]byte{{1, 2, 3}}}
+	b := tls.Certificate{Certificate: [][]byte{{1, 2, 3}}}
+	if !certsEqual(a, b) {
+		t.Error("expected certsEqual to return true for identical certs")
+	}
+}
+
+func TestCertsEqualDifferent(t *testing.T) {
+	a := tls.Certificate{Certificate: [][]byte{{1, 2, 3}}}
+	b := tls.Certificate{Certificate: [][]byte{{4, 5, 6}}}
+	if certsEqual(a, b) {
+		t.Error("expected certsEqual to return false for different certs")
+	}
+}
+
+func TestCertsEqualEmpty(t *testing.T) {
+	a := tls.Certificate{}
+	b := tls.Certificate{Certificate: [][]byte{{1, 2, 3}}}
+	if certsEqual(a, b) {
+		t.Error("expected certsEqual to return false when one has no certs")
+	}
+}
+
+func TestCertsEqualDifferentLengths(t *testing.T) {
+	a := tls.Certificate{Certificate: [][]byte{{1, 2}}}
+	b := tls.Certificate{Certificate: [][]byte{{1, 2, 3}}}
+	if certsEqual(a, b) {
+		t.Error("expected certsEqual to return false for different length certs")
 	}
 }

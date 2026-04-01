@@ -38,6 +38,7 @@ type ProxyInstance struct {
 	CookieName string
 	Proxy      *proxy.Proxy
 	Server     *http.Server
+	smartLn    *proxy.SmartListener
 	cancel     context.CancelFunc
 }
 
@@ -58,60 +59,83 @@ type Orchestrator struct {
 	services map[string]*ManagedService
 	events   chan Event
 	cfg      *config.Config
-	tlsCert  string
-	tlsKey   string
-	useTLS   bool
 	host     string
 
 	certMu sync.RWMutex
-	certs  []tls.Certificate // dynamically loaded certs (default + service-provided)
+	certs  []tls.Certificate // dynamically loaded certs from services
 }
 
 // New creates a new Orchestrator.
-func New(cfg *config.Config, useTLS bool, tlsCert, tlsKey, host string) *Orchestrator {
+func New(cfg *config.Config, host string) *Orchestrator {
 	if host == "" {
 		host = "0.0.0.0"
 	}
-	o := &Orchestrator{
+	return &Orchestrator{
 		proxies:  make(map[int]*ProxyInstance),
 		services: make(map[string]*ManagedService),
 		events:   make(chan Event, 256),
 		cfg:      cfg,
-		tlsCert:  tlsCert,
-		tlsKey:   tlsKey,
-		useTLS:   useTLS,
 		host:     host,
 	}
-	// Pre-load the default cert if provided.
-	if useTLS && tlsCert != "" {
-		if err := o.AddCert(tlsCert, tlsKey); err != nil {
-			slog.Error("failed to pre-load default TLS cert", "err", err)
-		}
-	}
-	return o
 }
 
 // AddCert loads a TLS certificate from the given paths and adds it to the
 // dynamic cert store. Duplicate cert/key pairs are silently ignored.
+// When the first cert is added, all proxy listeners automatically start
+// accepting TLS connections.
 func (o *Orchestrator) AddCert(certPath, keyPath string) error {
 	cert, err := tls.LoadX509KeyPair(certPath, keyPath)
 	if err != nil {
 		return fmt.Errorf("load TLS keypair: %w", err)
 	}
-	o.certMu.Lock()
-	defer o.certMu.Unlock()
-	// Avoid adding the exact same file pair twice.
-	for _, existing := range o.certs {
-		if certsEqual(existing, cert) {
-			return nil
+
+	var tlsCfg *tls.Config
+	func() {
+		o.certMu.Lock()
+		defer o.certMu.Unlock()
+		for _, existing := range o.certs {
+			if certsEqual(existing, cert) {
+				return
+			}
+		}
+		o.certs = append(o.certs, cert)
+		slog.Info("loaded TLS certificate", "cert", certPath)
+		tlsCfg = o.tlsConfigLocked()
+	}()
+
+	if tlsCfg == nil {
+		return nil // duplicate cert, nothing to update
+	}
+
+	// Update all existing proxy listeners with the new TLS config.
+	// Lock ordering: mu must be acquired without holding certMu to match
+	// createProxyLocked which holds mu then acquires certMu.
+	o.mu.RLock()
+	defer o.mu.RUnlock()
+	for _, pi := range o.proxies {
+		if pi.smartLn != nil {
+			pi.smartLn.SetTLSConfig(tlsCfg)
 		}
 	}
-	o.certs = append(o.certs, cert)
-	slog.Info("loaded TLS certificate", "cert", certPath)
 	return nil
 }
 
-// certsEqual compares two certificates by their raw leaf bytes.
+// HasCerts returns true if any TLS certificates have been loaded.
+func (o *Orchestrator) HasCerts() bool {
+	o.certMu.RLock()
+	defer o.certMu.RUnlock()
+	return len(o.certs) > 0
+}
+
+// tlsConfigLocked returns a tls.Config using getCertificate. Must be called
+// with certMu held.
+func (o *Orchestrator) tlsConfigLocked() *tls.Config {
+	if len(o.certs) == 0 {
+		return nil
+	}
+	return &tls.Config{GetCertificate: o.getCertificate}
+}
+
 func certsEqual(a, b tls.Certificate) bool {
 	if len(a.Certificate) == 0 || len(b.Certificate) == 0 {
 		return false
@@ -127,15 +151,12 @@ func certsEqual(a, b tls.Certificate) bool {
 	return true
 }
 
-// getCertificate is the tls.Config.GetCertificate callback. It returns the
-// best matching certificate from the dynamic store, falling back to the first.
 func (o *Orchestrator) getCertificate(hello *tls.ClientHelloInfo) (*tls.Certificate, error) {
 	o.certMu.RLock()
 	defer o.certMu.RUnlock()
 	if len(o.certs) == 0 {
 		return nil, fmt.Errorf("no TLS certificates loaded")
 	}
-	// Try SNI matching if the client sent a server name.
 	if hello.ServerName != "" {
 		for i := range o.certs {
 			if err := hello.SupportsCertificate(&o.certs[i]); err == nil {
@@ -143,7 +164,6 @@ func (o *Orchestrator) getCertificate(hello *tls.ClientHelloInfo) (*tls.Certific
 			}
 		}
 	}
-	// Fall back to the first (default) cert.
 	return &o.certs[0], nil
 }
 
@@ -172,7 +192,7 @@ func (o *Orchestrator) EnsureProxy(port int) (*ProxyInstance, error) {
 func (o *Orchestrator) createProxyLocked(port int, label string) (*ProxyInstance, error) {
 	reg := registry.New()
 	cookieName := routing.CookieNameForPort(port)
-	prx := proxy.NewProxy(reg, port, o.useTLS, cookieName)
+	prx := proxy.NewProxy(reg, port, cookieName)
 	inj := inject.New()
 	prx.SetModifyResponse(inj.ModifyResponse)
 
@@ -204,7 +224,8 @@ func (o *Orchestrator) createProxyLocked(port int, label string) (*ProxyInstance
 	mux.HandleFunc("GET /__mdp/servers", api.ServersHandler(reg))
 	mux.HandleFunc("POST /__mdp/register", api.RegisterHandler(reg))
 	mux.HandleFunc("DELETE /__mdp/register/{name...}", api.DeregisterHandler(reg))
-	mux.HandleFunc("POST /__mdp/switch/{name...}", api.SwitchHandler(reg, cookieName))
+	mux.HandleFunc("POST /__mdp/switch/{name...}", api.SwitchHandler(reg, cookieName, prx, port))
+	mux.HandleFunc("GET /__mdp/last-path/{name...}", api.LastPathHandler(prx))
 	mux.HandleFunc("GET /__mdp/switch", ui.SwitchPageHandler(reg))
 	mux.HandleFunc("GET /__mdp/widget.js", ui.WidgetHandler())
 	mux.HandleFunc("GET /__mdp/default", api.DefaultHandler(reg))
@@ -233,34 +254,27 @@ func (o *Orchestrator) createProxyLocked(port int, label string) (*ProxyInstance
 	ctx, cancel := context.WithCancel(context.Background())
 	registry.StartPruner(ctx, reg, 10*time.Second, process.IsProcessAlive)
 
-	if o.useTLS {
-		srv.TLSConfig = &tls.Config{GetCertificate: o.getCertificate}
-	}
-
 	ln, listenErr := net.Listen("tcp", addr)
 	if listenErr != nil {
 		cancel()
 		return nil, fmt.Errorf("listen on %s: %w", addr, listenErr)
 	}
 
+	// Smart listener handles both HTTP and HTTPS on the same port.
+	// TLS is enabled dynamically when services register with certs.
+	o.certMu.RLock()
+	tlsCfg := o.tlsConfigLocked()
+	o.certMu.RUnlock()
+	smartLn := proxy.NewSmartListener(ln, tlsCfg)
+
 	go func() {
-		var err error
-		if srv.TLSConfig != nil {
-			err = srv.ServeTLS(ln, "", "")
-		} else {
-			err = srv.Serve(ln)
-		}
-		if err != nil && err != http.ErrServerClosed {
+		if err := srv.Serve(smartLn); err != nil && err != http.ErrServerClosed {
 			slog.Error("proxy listener failed", "port", port, "err", err)
 		}
 	}()
 
-	proto := "http"
-	if o.useTLS {
-		proto = "https"
-	}
 	slog.Info("proxy started",
-		"addr", fmt.Sprintf("%s://%s", proto, addr),
+		"addr", addr,
 		"cookie", cookieName,
 	)
 
@@ -271,6 +285,7 @@ func (o *Orchestrator) createProxyLocked(port int, label string) (*ProxyInstance
 		CookieName: cookieName,
 		Proxy:      prx,
 		Server:     srv,
+		smartLn:    smartLn,
 		cancel:     cancel,
 	}
 	o.proxies[port] = pi

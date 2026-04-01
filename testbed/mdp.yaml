@@ -4,6 +4,8 @@ services:
     command: npm --prefix ./vite-ts run dev
     proxy: 3000
     group: dev
+    tls_cert: .certs/localhost.pem
+    tls_key: .certs/localhost-key.pem
 
   echo:
     command: ./echo-api/echo-api

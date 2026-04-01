@@ -13,7 +13,7 @@ import (
 
 func setupControlAPI(t *testing.T) (*Orchestrator, http.Handler) {
 	t.Helper()
-	o := New(&config.Config{}, false, "", "", "")
+	o := New(&config.Config{}, "")
 	o.mu.Lock()
 	reg := registry.New()
 	reg.Register(&registry.ServerEntry{Name: "app/dev", Repo: "app", Port: 4001, PID: 100, Group: "dev"})
@@ -260,7 +260,7 @@ func TestControlAPIShutdown(t *testing.T) {
 }
 
 func TestControlAPIShutdownCallsCallback(t *testing.T) {
-	o := New(&config.Config{}, false, "", "", "")
+	o := New(&config.Config{}, "")
 	called := make(chan bool, 1)
 	capi := NewControlAPI(o, func() { called <- true })
 	handler := capi.Handler()

@@ -50,8 +50,6 @@ echo ""
 
 "$SCRIPT_DIR/mdp" -d \
   --control-port "$CTRL_PORT" \
-  --tls-cert "$CERT_DIR/localhost.pem" \
-  --tls-key "$CERT_DIR/localhost-key.pem" \
   --config "$SCRIPT_DIR/mdp.yaml"
 
 if ! curl -so /dev/null "http://127.0.0.1:${CTRL_PORT}/__mdp/health" 2>/dev/null; then
@@ -74,8 +72,8 @@ printf "\033[1;36m  mdp testbed is running!\033[0m\n"
 printf "\033[1;36m============================================\033[0m\n"
 echo ""
 printf "  Control API: \033[1;36mhttp://127.0.0.1:${CTRL_PORT}\033[0m\n"
-printf "  Frontend:    \033[1;36mhttps://localhost:${FRONTEND_PORT}\033[0m\n"
-printf "  Backend:     \033[1;36mhttps://localhost:${BACKEND_PORT}\033[0m\n"
+printf "  Frontend:    \033[1;36mhttp://localhost:${FRONTEND_PORT}\033[0m\n"
+printf "  Backend:     \033[1;36mhttp://localhost:${BACKEND_PORT}\033[0m\n"
 echo ""
 printf "  \033[1;33mdev\033[0m       vite :%s + echo :%s\n" "$FRONTEND_PORT" "$BACKEND_PORT"
 printf "  \033[1;35mstaging\033[0m   next :%s + docker :%s\n" "$FRONTEND_PORT" "$BACKEND_PORT"

@@ -2,6 +2,7 @@ package api
 
 import (
 	"encoding/json"
+	"fmt"
 	"net/http"
 	"net/url"
 	"strings"
@@ -11,12 +12,18 @@ import (
 	"github.com/derekgould/multi-dev-proxy/internal/routing"
 )
 
+// LastPathProvider returns the last visited path for a given service name.
+type LastPathProvider interface {
+	GetLastPath(name string) string
+}
+
 // serverEntryJSON is the JSON shape for a registered server.
 type serverEntryJSON struct {
 	Repo         string    `json:"repo"`
 	Group        string    `json:"group,omitempty"`
 	Port         int       `json:"port"`
 	PID          int       `json:"pid"`
+	Scheme       string    `json:"scheme"`
 	RegisteredAt time.Time `json:"registeredAt"`
 }
 
@@ -31,10 +38,6 @@ type registerBody struct {
 	TLSCertPath string `json:"tlsCertPath"`
 	TLSKeyPath  string `json:"tlsKeyPath"`
 }
-
-// TLSUpgradeFunc is called when a server registers with TLS cert paths.
-// The proxy can use this to dynamically upgrade to HTTPS.
-type TLSUpgradeFunc func(certPath, keyPath string)
 
 func writeJSON(w http.ResponseWriter, status int, v any) {
 	w.Header().Set("Content-Type", "application/json")
@@ -65,11 +68,16 @@ func ServersHandler(reg *registry.Registry) http.HandlerFunc {
 		for repo, entries := range grouped {
 			result[repo] = make(map[string]serverEntryJSON)
 			for _, e := range entries {
+				scheme := e.Scheme
+				if scheme == "" {
+					scheme = "http"
+				}
 				result[repo][e.Name] = serverEntryJSON{
 					Repo:         e.Repo,
 					Group:        e.Group,
 					Port:         e.Port,
 					PID:          e.PID,
+					Scheme:       scheme,
 					RegisteredAt: e.RegisteredAt,
 				}
 			}
@@ -79,7 +87,7 @@ func ServersHandler(reg *registry.Registry) http.HandlerFunc {
 }
 
 // RegisterHandler handles POST /__mdp/register
-func RegisterHandler(reg *registry.Registry, onTLSUpgrade ...TLSUpgradeFunc) http.HandlerFunc {
+func RegisterHandler(reg *registry.Registry) http.HandlerFunc {
 	return func(w http.ResponseWriter, r *http.Request) {
 		if r.Method != http.MethodPost {
 			writeJSON(w, http.StatusMethodNotAllowed, map[string]string{"error": "method not allowed"})
@@ -120,9 +128,6 @@ func RegisterHandler(reg *registry.Registry, onTLSUpgrade ...TLSUpgradeFunc) htt
 			writeJSON(w, http.StatusBadRequest, map[string]string{"error": err.Error()})
 			return
 		}
-		if body.TLSCertPath != "" && body.TLSKeyPath != "" && len(onTLSUpgrade) > 0 && onTLSUpgrade[0] != nil {
-			onTLSUpgrade[0](body.TLSCertPath, body.TLSKeyPath)
-		}
 		writeJSON(w, http.StatusOK, map[string]bool{"ok": true})
 	}
 }
@@ -151,7 +156,9 @@ func DeregisterHandler(reg *registry.Registry) http.HandlerFunc {
 // SwitchHandler handles POST /__mdp/switch/{name}.
 // Sets both a cookie (for browser per-tab routing) and the registry default
 // (for cookie-less clients like dev-server proxies and curl).
-func SwitchHandler(reg *registry.Registry, cookieName string) http.HandlerFunc {
+// Redirects to the last visited path for the target service using the
+// appropriate scheme (http/https) based on the target service's TLS config.
+func SwitchHandler(reg *registry.Registry, cookieName string, lpp LastPathProvider, listenPort int) http.HandlerFunc {
 	return func(w http.ResponseWriter, r *http.Request) {
 		if r.Method != http.MethodPost {
 			writeJSON(w, http.StatusMethodNotAllowed, map[string]string{"error": "method not allowed"})
@@ -166,14 +173,52 @@ func SwitchHandler(reg *registry.Registry, cookieName string) http.HandlerFunc {
 		if err != nil {
 			decodedName = name
 		}
-		if reg.Get(decodedName) == nil {
+		entry := reg.Get(decodedName)
+		if entry == nil {
 			writeJSON(w, http.StatusNotFound, map[string]string{"error": "server not found"})
 			return
 		}
 		cookie := routing.MakeSetCookie(cookieName, decodedName)
 		http.SetCookie(w, cookie)
 		_ = reg.SetDefault(decodedName)
-		http.Redirect(w, r, "/", http.StatusFound)
+
+		path := "/"
+		if lpp != nil {
+			if last := lpp.GetLastPath(decodedName); last != "" {
+				path = last
+			}
+		}
+
+		// Build absolute URL with the correct scheme for the target service.
+		// Services that registered with TLS certs have their certs loaded into
+		// the proxy's SmartListener, so the proxy can serve HTTPS for them.
+		scheme := entry.Scheme
+		if scheme == "" {
+			scheme = "http"
+		}
+		redirectTo := fmt.Sprintf("%s://localhost:%d%s", scheme, listenPort, path)
+		http.Redirect(w, r, redirectTo, http.StatusFound)
+	}
+}
+
+// LastPathHandler handles GET /__mdp/last-path/{name...}.
+// Returns the last visited path for the given service.
+func LastPathHandler(lpp LastPathProvider) http.HandlerFunc {
+	return func(w http.ResponseWriter, r *http.Request) {
+		name := r.PathValue("name")
+		if name == "" {
+			writeJSON(w, http.StatusBadRequest, map[string]string{"error": "name is required"})
+			return
+		}
+		decodedName, err := urlDecode(name)
+		if err != nil {
+			decodedName = name
+		}
+		path := ""
+		if lpp != nil {
+			path = lpp.GetLastPath(decodedName)
+		}
+		writeJSON(w, http.StatusOK, map[string]string{"path": path})
 	}
 }
 

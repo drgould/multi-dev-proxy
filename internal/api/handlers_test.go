@@ -350,7 +350,7 @@ func TestSwitchHandler(t *testing.T) {
 			if tt.preRegister {
 				_ = reg.Register(&registry.ServerEntry{Name: "app/main", Repo: "app", Port: 3000, PID: 100})
 			}
-			handler := SwitchHandler(reg, cookieName)
+			handler := SwitchHandler(reg, cookieName, nil, 3000)
 
 			req := httptest.NewRequest(tt.method, tt.path, nil)
 			namePart := strings.TrimPrefix(tt.path, "/__mdp/switch/")
@@ -376,8 +376,8 @@ func TestSwitchHandler(t *testing.T) {
 				if !found {
 					t.Errorf("expected Set-Cookie header with cookie name %q, not found", cookieName)
 				}
-				if loc := rec.Header().Get("Location"); loc != "/" {
-					t.Errorf("Location = %q, want /__mdp/switch", loc)
+				if loc := rec.Header().Get("Location"); loc != "http://localhost:3000/" {
+					t.Errorf("Location = %q, want http://localhost:3000/", loc)
 				}
 				if d := reg.GetDefault(); d != "app/main" {
 					t.Errorf("default = %q, want %q", d, "app/main")
@@ -618,6 +618,146 @@ func TestDefaultHandlerMethodNotAllowed(t *testing.T) {
 	if rec.Code != http.StatusMethodNotAllowed {
 		t.Fatalf("status = %d, want 405", rec.Code)
 	}
+}
+
+// mockLastPathProvider implements LastPathProvider for testing.
+type mockLastPathProvider struct {
+	paths map[string]string
+}
+
+func (m *mockLastPathProvider) GetLastPath(name string) string {
+	if m == nil || m.paths == nil {
+		return ""
+	}
+	return m.paths[name]
+}
+
+func TestSwitchHandlerRedirectsToLastPath(t *testing.T) {
+	cookieName := routing.DefaultCookieName
+	reg := registry.New()
+	_ = reg.Register(&registry.ServerEntry{Name: "app/main", Repo: "app", Port: 3000, PID: 100})
+
+	lpp := &mockLastPathProvider{paths: map[string]string{
+		"app/main": "/dashboard?tab=settings",
+	}}
+	handler := SwitchHandler(reg, cookieName, lpp, 3000)
+
+	req := httptest.NewRequest(http.MethodPost, "/__mdp/switch/app%2Fmain", nil)
+	req.SetPathValue("name", "app/main")
+	rec := httptest.NewRecorder()
+	handler.ServeHTTP(rec, req)
+
+	if rec.Code != http.StatusFound {
+		t.Fatalf("status = %d, want %d", rec.Code, http.StatusFound)
+	}
+	if loc := rec.Header().Get("Location"); loc != "http://localhost:3000/dashboard?tab=settings" {
+		t.Errorf("Location = %q, want http://localhost:3000/dashboard?tab=settings", loc)
+	}
+}
+
+func TestSwitchHandlerHTTPSService(t *testing.T) {
+	cookieName := routing.DefaultCookieName
+	reg := registry.New()
+	_ = reg.Register(&registry.ServerEntry{Name: "app/main", Repo: "app", Port: 3000, PID: 100, Scheme: "https"})
+
+	handler := SwitchHandler(reg, cookieName, nil, 3000)
+
+	req := httptest.NewRequest(http.MethodPost, "/__mdp/switch/app%2Fmain", nil)
+	req.SetPathValue("name", "app/main")
+	rec := httptest.NewRecorder()
+	handler.ServeHTTP(rec, req)
+
+	if loc := rec.Header().Get("Location"); loc != "https://localhost:3000/" {
+		t.Errorf("Location = %q, want https://localhost:3000/", loc)
+	}
+}
+
+func TestSwitchHandlerNoLastPathDefaultsToRoot(t *testing.T) {
+	cookieName := routing.DefaultCookieName
+	reg := registry.New()
+	_ = reg.Register(&registry.ServerEntry{Name: "app/main", Repo: "app", Port: 3000, PID: 100})
+
+	lpp := &mockLastPathProvider{paths: map[string]string{}}
+	handler := SwitchHandler(reg, cookieName, lpp, 3000)
+
+	req := httptest.NewRequest(http.MethodPost, "/__mdp/switch/app%2Fmain", nil)
+	req.SetPathValue("name", "app/main")
+	rec := httptest.NewRecorder()
+	handler.ServeHTTP(rec, req)
+
+	if loc := rec.Header().Get("Location"); loc != "http://localhost:3000/" {
+		t.Errorf("Location = %q, want http://localhost:3000/", loc)
+	}
+}
+
+func TestSwitchHandlerNilLastPathProvider(t *testing.T) {
+	cookieName := routing.DefaultCookieName
+	reg := registry.New()
+	_ = reg.Register(&registry.ServerEntry{Name: "app/main", Repo: "app", Port: 3000, PID: 100})
+
+	handler := SwitchHandler(reg, cookieName, nil, 3000)
+
+	req := httptest.NewRequest(http.MethodPost, "/__mdp/switch/app%2Fmain", nil)
+	req.SetPathValue("name", "app/main")
+	rec := httptest.NewRecorder()
+	handler.ServeHTTP(rec, req)
+
+	if loc := rec.Header().Get("Location"); loc != "http://localhost:3000/" {
+		t.Errorf("Location = %q, want http://localhost:3000/", loc)
+	}
+}
+
+func TestLastPathHandler(t *testing.T) {
+	lpp := &mockLastPathProvider{paths: map[string]string{
+		"app/main": "/settings",
+	}}
+	handler := LastPathHandler(lpp)
+
+	t.Run("known service", func(t *testing.T) {
+		req := httptest.NewRequest(http.MethodGet, "/__mdp/last-path/app%2Fmain", nil)
+		req.SetPathValue("name", "app/main")
+		rec := httptest.NewRecorder()
+		handler.ServeHTTP(rec, req)
+
+		if rec.Code != http.StatusOK {
+			t.Fatalf("status = %d, want 200", rec.Code)
+		}
+		var body map[string]string
+		decodeJSON(t, rec, &body)
+		if body["path"] != "/settings" {
+			t.Errorf("path = %q, want /settings", body["path"])
+		}
+	})
+
+	t.Run("unknown service returns empty path", func(t *testing.T) {
+		req := httptest.NewRequest(http.MethodGet, "/__mdp/last-path/unknown", nil)
+		req.SetPathValue("name", "unknown")
+		rec := httptest.NewRecorder()
+		handler.ServeHTTP(rec, req)
+
+		if rec.Code != http.StatusOK {
+			t.Fatalf("status = %d, want 200", rec.Code)
+		}
+		var body map[string]string
+		decodeJSON(t, rec, &body)
+		if body["path"] != "" {
+			t.Errorf("path = %q, want empty", body["path"])
+		}
+	})
+
+	t.Run("nil provider returns empty path", func(t *testing.T) {
+		nilHandler := LastPathHandler(nil)
+		req := httptest.NewRequest(http.MethodGet, "/__mdp/last-path/app%2Fmain", nil)
+		req.SetPathValue("name", "app/main")
+		rec := httptest.NewRecorder()
+		nilHandler.ServeHTTP(rec, req)
+
+		var body map[string]string
+		decodeJSON(t, rec, &body)
+		if body["path"] != "" {
+			t.Errorf("path = %q, want empty", body["path"])
+		}
+	})
 }
 
 func TestDefaultSetHandlerMethodNotAllowed(t *testing.T) {

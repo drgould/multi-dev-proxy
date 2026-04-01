@@ -10,6 +10,7 @@ import (
 	"net/http/httputil"
 	"net/url"
 	"strings"
+	"sync"
 
 	"github.com/derekgould/multi-dev-proxy/internal/registry"
 	"github.com/derekgould/multi-dev-proxy/internal/routing"
@@ -21,21 +22,23 @@ const switchPagePath = "/__mdp/switch"
 type Proxy struct {
 	reg        *registry.Registry
 	listenPort int
-	listenTLS  bool
 	cookieName string
 	rp         *httputil.ReverseProxy
+
+	lastPathMu sync.RWMutex
+	lastPaths  map[string]string // service name → last URL path+query
 }
 
 // NewProxy creates a new Proxy.
-func NewProxy(reg *registry.Registry, listenPort int, listenTLS bool, cookieName string) *Proxy {
+func NewProxy(reg *registry.Registry, listenPort int, cookieName string) *Proxy {
 	if cookieName == "" {
 		cookieName = routing.DefaultCookieName
 	}
 	p := &Proxy{
 		reg:        reg,
 		listenPort: listenPort,
-		listenTLS:  listenTLS,
 		cookieName: cookieName,
+		lastPaths:  make(map[string]string),
 	}
 	p.rp = &httputil.ReverseProxy{
 		Rewrite:       p.rewrite,
@@ -45,7 +48,7 @@ func NewProxy(reg *registry.Registry, listenPort int, listenTLS bool, cookieName
 		},
 		ModifyResponse: func(resp *http.Response) error {
 			if resp.Request != nil {
-				p.rewriteLocationByHost(resp, resp.Request.URL.Host)
+				p.rewriteLocationByHost(resp, resp.Request)
 			}
 			return nil
 		},
@@ -55,6 +58,19 @@ func NewProxy(reg *registry.Registry, listenPort int, listenTLS bool, cookieName
 		},
 	}
 	return p
+}
+
+// GetLastPath returns the last visited path for the given service name.
+func (p *Proxy) GetLastPath(name string) string {
+	p.lastPathMu.RLock()
+	defer p.lastPathMu.RUnlock()
+	return p.lastPaths[name]
+}
+
+func (p *Proxy) setLastPath(name, path string) {
+	p.lastPathMu.Lock()
+	defer p.lastPathMu.Unlock()
+	p.lastPaths[name] = path
 }
 
 // CookieName returns the cookie name this proxy uses for routing.
@@ -67,7 +83,7 @@ func (p *Proxy) CookieName() string {
 func (p *Proxy) SetModifyResponse(fn func(*http.Response) error) {
 	p.rp.ModifyResponse = func(resp *http.Response) error {
 		if resp.Request != nil {
-			p.rewriteLocationByHost(resp, resp.Request.URL.Host)
+			p.rewriteLocationByHost(resp, resp.Request)
 		}
 		if fn != nil {
 			return fn(resp)
@@ -101,7 +117,7 @@ func (p *Proxy) rewrite(r *httputil.ProxyRequest) {
 	r.SetURL(target)
 
 	proto := "http"
-	if p.listenTLS {
+	if r.In.TLS != nil {
 		proto = "https"
 	}
 	r.Out.Header.Set("X-Forwarded-Host", fmt.Sprintf("localhost:%d", p.listenPort))
@@ -123,21 +139,45 @@ func (p *Proxy) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
+	// Track last visited page for this service. Only track browser navigation
+	// requests (Accept: text/html), skip assets, API calls, and /__mdp/ paths.
+	if isNavigationRequest(r) {
+		pathQuery := r.URL.Path
+		if r.URL.RawQuery != "" {
+			pathQuery += "?" + r.URL.RawQuery
+		}
+		p.setLastPath(result.Entry.Name, pathQuery)
+	}
+
 	ctx := context.WithValue(r.Context(), contextKey{}, result)
 	p.rp.ServeHTTP(w, r.WithContext(ctx))
 }
 
+// isNavigationRequest returns true if the request looks like a browser
+// page navigation (as opposed to an asset, XHR, or API request).
+func isNavigationRequest(r *http.Request) bool {
+	if r.Method != http.MethodGet {
+		return false
+	}
+	if strings.HasPrefix(r.URL.Path, "/__mdp/") {
+		return false
+	}
+	// Browser navigations send Accept: text/html.
+	accept := r.Header.Get("Accept")
+	return strings.Contains(accept, "text/html")
+}
+
 // rewriteLocationByHost rewrites upstream Location headers to point to the proxy.
-// host is the upstream host:port (e.g. "127.0.0.1:4001").
-func (p *Proxy) rewriteLocationByHost(resp *http.Response, host string) {
+func (p *Proxy) rewriteLocationByHost(resp *http.Response, req *http.Request) {
 	loc := resp.Header.Get("Location")
 	if loc == "" {
 		return
 	}
 	proto := "http"
-	if p.listenTLS {
+	if req.TLS != nil {
 		proto = "https"
 	}
+	host := req.URL.Host
 	proxyAddr := fmt.Sprintf("localhost:%d", p.listenPort)
 	loc = strings.ReplaceAll(loc, "http://"+host, proto+"://"+proxyAddr)
 	loc = strings.ReplaceAll(loc, "https://"+host, proto+"://"+proxyAddr)

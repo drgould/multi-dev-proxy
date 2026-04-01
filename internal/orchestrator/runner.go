@@ -67,14 +67,26 @@ func (o *Orchestrator) startSingleService(ctx context.Context, name string, svc 
 	}
 
 	if svc.Proxy > 0 {
+		scheme := svc.Scheme
+		if scheme == "" {
+			scheme = "http"
+		}
 		entry := &registry.ServerEntry{
-			Name:  serverName,
-			Repo:  name,
-			Group: group,
-			Port:  assignedPort,
+			Name:        serverName,
+			Repo:        name,
+			Group:       group,
+			Port:        assignedPort,
+			Scheme:      scheme,
+			TLSCertPath: svc.TLSCert,
+			TLSKeyPath:  svc.TLSKey,
 		}
 		if err := o.Register(svc.Proxy, entry); err != nil {
 			return fmt.Errorf("register %s: %w", serverName, err)
+		}
+		if svc.TLSCert != "" {
+			if err := o.AddCert(svc.TLSCert, svc.TLSKey); err != nil {
+				slog.Warn("failed to load service TLS cert", "name", serverName, "err", err)
+			}
 		}
 	}
 

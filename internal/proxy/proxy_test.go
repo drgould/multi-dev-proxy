@@ -17,7 +17,7 @@ func serverPort(s *httptest.Server) int {
 func newTestProxy(t *testing.T) (*Proxy, *registry.Registry) {
 	t.Helper()
 	reg := registry.New()
-	p := NewProxy(reg, 3000, false, "")
+	p := NewProxy(reg, 3000, "")
 	return p, reg
 }
 
@@ -151,6 +151,94 @@ func TestProxyLocationRewrite(t *testing.T) {
 	expected := "http://localhost:3000/foo"
 	if loc != expected {
 		t.Errorf("Location rewrite: got %q, want %q", loc, expected)
+	}
+}
+
+func TestProxyLastPathTracking(t *testing.T) {
+	upstream := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.WriteHeader(200)
+	}))
+	defer upstream.Close()
+
+	p, reg := newTestProxy(t)
+	registerUpstream(t, reg, upstream, "app/main", "app")
+
+	// Browser navigation (Accept: text/html) should be tracked.
+	req := httptest.NewRequest("GET", "/", nil)
+	req.Header.Set("Accept", "text/html,application/xhtml+xml")
+	rr := httptest.NewRecorder()
+	p.ServeHTTP(rr, req)
+
+	if got := p.GetLastPath("app/main"); got != "/" {
+		t.Errorf("last path = %q, want /", got)
+	}
+
+	// Navigate to another page with query string.
+	req = httptest.NewRequest("GET", "/dashboard?tab=settings", nil)
+	req.Header.Set("Accept", "text/html")
+	rr = httptest.NewRecorder()
+	p.ServeHTTP(rr, req)
+
+	if got := p.GetLastPath("app/main"); got != "/dashboard?tab=settings" {
+		t.Errorf("last path = %q, want /dashboard?tab=settings", got)
+	}
+}
+
+func TestProxyLastPathSkipsNonNavigation(t *testing.T) {
+	upstream := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.WriteHeader(200)
+	}))
+	defer upstream.Close()
+
+	p, reg := newTestProxy(t)
+	registerUpstream(t, reg, upstream, "app/main", "app")
+
+	// Navigate to a page first.
+	req := httptest.NewRequest("GET", "/some-page", nil)
+	req.Header.Set("Accept", "text/html")
+	rr := httptest.NewRecorder()
+	p.ServeHTTP(rr, req)
+
+	if got := p.GetLastPath("app/main"); got != "/some-page" {
+		t.Errorf("last path = %q, want /some-page", got)
+	}
+
+	// Asset request (no text/html Accept) should NOT overwrite.
+	req = httptest.NewRequest("GET", "/assets/main.js", nil)
+	req.Header.Set("Accept", "application/javascript")
+	rr = httptest.NewRecorder()
+	p.ServeHTTP(rr, req)
+
+	if got := p.GetLastPath("app/main"); got != "/some-page" {
+		t.Errorf("last path should still be /some-page after asset request, got %q", got)
+	}
+
+	// API/XHR request (Accept: application/json) should NOT overwrite.
+	req = httptest.NewRequest("GET", "/api/data", nil)
+	req.Header.Set("Accept", "application/json")
+	rr = httptest.NewRecorder()
+	p.ServeHTTP(rr, req)
+
+	if got := p.GetLastPath("app/main"); got != "/some-page" {
+		t.Errorf("last path should still be /some-page after API request, got %q", got)
+	}
+
+	// POST request should NOT overwrite (even with text/html).
+	req = httptest.NewRequest("POST", "/form-submit", nil)
+	req.Header.Set("Accept", "text/html")
+	rr = httptest.NewRecorder()
+	p.ServeHTTP(rr, req)
+
+	if got := p.GetLastPath("app/main"); got != "/some-page" {
+		t.Errorf("last path should still be /some-page after POST, got %q", got)
+	}
+}
+
+func TestProxyGetLastPathEmpty(t *testing.T) {
+	p, _ := newTestProxy(t)
+
+	if got := p.GetLastPath("nonexistent"); got != "" {
+		t.Errorf("last path for unknown service = %q, want empty", got)
 	}
 }
 

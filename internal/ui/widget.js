@@ -166,9 +166,22 @@
 				item.className = `item${isActive ? " active" : ""}`;
 				item.innerHTML = `<span class="item-dot ${isActive ? "green" : "gray"}"></span>${fullName.split("/").pop()}`;
 				if (!isActive) {
-					item.onclick = () => {
+					const info = data[repo][fullName];
+					const targetScheme = (info && info.scheme === "https") ? "https" : "http";
+					const targetBase = `${targetScheme}://${location.hostname}:${location.port}`;
+					item.onclick = async () => {
 						setCookie(fullName);
-						window.location.reload();
+						try {
+							const resp = await fetch(`/__mdp/last-path/${encodeURIComponent(fullName)}`);
+							if (resp.ok) {
+								const lpData = await resp.json();
+								if (lpData.path) {
+									window.location.href = `${targetBase}${lpData.path}`;
+									return;
+								}
+							}
+						} catch { /* ignore */ }
+						window.location.href = `${targetBase}/`;
 					};
 				}
 				dropdownEl.appendChild(item);

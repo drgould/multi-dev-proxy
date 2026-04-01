@@ -21,6 +21,9 @@ type ServiceConfig struct {
 	Proxy   int               `yaml:"proxy"`
 	Port    int               `yaml:"port"`
 	Group   string            `yaml:"group"`
+	Scheme  string            `yaml:"scheme"`   // "http" or "https"; defaults to "http"
+	TLSCert string            `yaml:"tls_cert"` // path to TLS certificate file
+	TLSKey  string            `yaml:"tls_key"`  // path to TLS key file
 	Env     map[string]string `yaml:"env"`
 	Ports   []PortMapping     `yaml:"ports"`
 }
@@ -49,6 +52,16 @@ func Load(path string) (*Config, error) {
 	for name, svc := range cfg.Services {
 		if svc.Dir != "" && !filepath.IsAbs(svc.Dir) {
 			svc.Dir = filepath.Join(dir, svc.Dir)
+		}
+		if svc.TLSCert != "" && !filepath.IsAbs(svc.TLSCert) {
+			svc.TLSCert = filepath.Join(dir, svc.TLSCert)
+		}
+		if svc.TLSKey != "" && !filepath.IsAbs(svc.TLSKey) {
+			svc.TLSKey = filepath.Join(dir, svc.TLSKey)
+		}
+		// Infer scheme from cert presence.
+		if svc.Scheme == "" && svc.TLSCert != "" {
+			svc.Scheme = "https"
 		}
 		cfg.Services[name] = svc
 	}

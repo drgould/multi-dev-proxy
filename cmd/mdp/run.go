@@ -54,7 +54,22 @@ func runRun(cmd *cobra.Command, args []string) error {
 	if len(args) == 0 {
 		return runBatchMode(cmd, controlPort, groupFlag)
 	}
-	return runSingleMode(cmd, args, controlPort, groupFlag)
+
+	tlsCert, _ := cmd.Flags().GetString("tls-cert")
+	tlsKey, _ := cmd.Flags().GetString("tls-key")
+	autoTLS, _ := cmd.Flags().GetBool("auto-tls")
+
+	if autoTLS && tlsCert == "" {
+		tlsCert, tlsKey = detectMkcertCerts()
+		if tlsCert != "" {
+			slog.Info("auto-detected mkcert certs", "cert", tlsCert, "key", tlsKey)
+		}
+	}
+	if (tlsCert != "") != (tlsKey != "") {
+		return fmt.Errorf("both --tls-cert and --tls-key are required")
+	}
+
+	return runSingleMode(cmd, args, controlPort, groupFlag, tlsCert, tlsKey)
 }
 
 func runBatchMode(cmd *cobra.Command, controlPort int, groupFlag string) error {
@@ -118,12 +133,20 @@ func runBatchMode(cmd *cobra.Command, controlPort int, groupFlag string) error {
 		}
 
 		if svc.Proxy > 0 {
-			body, _ := json.Marshal(map[string]any{
+			regPayload := map[string]any{
 				"name":      serverName,
 				"port":      assignedPort,
 				"proxyPort": svc.Proxy,
 				"group":     svcGroup,
-			})
+			}
+			if svc.Scheme != "" {
+				regPayload["scheme"] = svc.Scheme
+			}
+			if svc.TLSCert != "" {
+				regPayload["tlsCertPath"] = svc.TLSCert
+				regPayload["tlsKeyPath"] = svc.TLSKey
+			}
+			body, _ := json.Marshal(regPayload)
 			resp, err := client.Post(controlURL+"/__mdp/register", "application/json", bytes.NewReader(body))
 			if err != nil {
 				return fmt.Errorf("register %q: %w", serverName, err)
@@ -195,12 +218,20 @@ func registerMultiPortBatch(client *http.Client, controlURL, name string, svc co
 			serviceName = pm.Env
 		}
 		serverName := fmt.Sprintf("%s/%s", group, serviceName)
-		body, _ := json.Marshal(map[string]any{
+		regPayload := map[string]any{
 			"name":      serverName,
 			"port":      port,
 			"proxyPort": pm.Proxy,
 			"group":     group,
-		})
+		}
+		if svc.Scheme != "" {
+			regPayload["scheme"] = svc.Scheme
+		}
+		if svc.TLSCert != "" {
+			regPayload["tlsCertPath"] = svc.TLSCert
+			regPayload["tlsKeyPath"] = svc.TLSKey
+		}
+		body, _ := json.Marshal(regPayload)
 		resp, err := client.Post(controlURL+"/__mdp/register", "application/json", bytes.NewReader(body))
 		if err != nil {
 			return err
@@ -362,25 +393,12 @@ func runServiceProcess(bt *batchTracker, name, command, dir string, env []string
 	pwErr.Flush()
 }
 
-func runSingleMode(cmd *cobra.Command, args []string, controlPort int, groupFlag string) error {
+func runSingleMode(cmd *cobra.Command, args []string, controlPort int, groupFlag, tlsCert, tlsKey string) error {
 	proxyPort, _ := cmd.Flags().GetInt("proxy-port")
 	repoOverride, _ := cmd.Flags().GetString("repo")
 	nameOverride, _ := cmd.Flags().GetString("name")
 	portRangeStr, _ := cmd.Flags().GetString("port-range")
-	tlsCert, _ := cmd.Flags().GetString("tls-cert")
-	tlsKey, _ := cmd.Flags().GetString("tls-key")
-	autoTLS, _ := cmd.Flags().GetBool("auto-tls")
 	envVar, _ := cmd.Flags().GetString("env")
-
-	if autoTLS && tlsCert == "" {
-		tlsCert, tlsKey = detectMkcertCerts()
-		if tlsCert != "" {
-			slog.Info("auto-detected mkcert certs", "cert", tlsCert, "key", tlsKey)
-		}
-	}
-	if (tlsCert != "") != (tlsKey != "") {
-		return fmt.Errorf("both --tls-cert and --tls-key are required")
-	}
 
 	if envPort := os.Getenv("MDP_PROXY_PORT"); envPort != "" && !cmd.Flags().Changed("proxy-port") {
 		fmt.Sscanf(envPort, "%d", &proxyPort)

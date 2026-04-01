@@ -15,7 +15,6 @@ import (
 	tea "github.com/charmbracelet/bubbletea"
 	"github.com/spf13/cobra"
 
-	"github.com/derekgould/multi-dev-proxy/internal/certs"
 	"github.com/derekgould/multi-dev-proxy/internal/config"
 	"github.com/derekgould/multi-dev-proxy/internal/orchestrator"
 	"github.com/derekgould/multi-dev-proxy/internal/tui"
@@ -43,9 +42,6 @@ func init() {
 	rootCmd.Flags().Int("control-port", 13100, "Control API port")
 	rootCmd.Flags().BoolP("daemon", "d", false, "Start daemon without TUI")
 	rootCmd.Flags().Bool("stop", false, "Stop the background daemon")
-	rootCmd.Flags().Bool("no-tls", false, "Disable HTTPS and run plain HTTP")
-	rootCmd.Flags().String("tls-cert", "", "Path to TLS certificate file")
-	rootCmd.Flags().String("tls-key", "", "Path to TLS key file")
 	rootCmd.Flags().String("config", "", "Path to mdp.yaml (auto-detected if not set)")
 	rootCmd.Flags().String("host", "0.0.0.0", "Host for proxy listeners")
 }
@@ -77,21 +73,8 @@ func runOrchestrator(cmd *cobra.Command, args []string) error {
 }
 
 func runDaemonProcess(cmd *cobra.Command, controlPort int) error {
-	noTLS, _ := cmd.Flags().GetBool("no-tls")
-	tlsCert, _ := cmd.Flags().GetString("tls-cert")
-	tlsKey, _ := cmd.Flags().GetString("tls-key")
 	configPath, _ := cmd.Flags().GetString("config")
 	host, _ := cmd.Flags().GetString("host")
-
-	useTLS := !noTLS
-	if useTLS && tlsCert == "" {
-		certDir := certs.DefaultDir()
-		var err error
-		tlsCert, tlsKey, err = certs.EnsureCert(certDir)
-		if err != nil {
-			return fmt.Errorf("auto-generate TLS cert: %w", err)
-		}
-	}
 
 	var cfg *config.Config
 	if configPath == "" {
@@ -109,7 +92,7 @@ func runDaemonProcess(cmd *cobra.Command, controlPort int) error {
 		}
 	}
 
-	orch := orchestrator.New(cfg, useTLS, tlsCert, tlsKey, host)
+	orch := orchestrator.New(cfg, host)
 
 	ctx, cancel := context.WithCancel(context.Background())
 	defer cancel()

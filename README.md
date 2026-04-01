@@ -73,7 +73,6 @@ Starts the orchestrator with an interactive TUI. Manages all proxy instances and
 
 ```sh
 mdp
-mdp --no-tls
 mdp --control-port 13100
 ```
 
@@ -248,23 +247,21 @@ mdp run --repo frontend -- npm run dev
 
 ## HTTPS
 
-By default, mdp generates a self-signed certificate automatically. To use your own:
+mdp inherits TLS certificates from the services it proxies. When a service registers with `--tls-cert` and `--tls-key`, the proxy automatically starts accepting HTTPS connections using that certificate. Each proxy port serves both HTTP and HTTPS on the same port.
 
 ```sh
-mdp --tls-cert ./certs/localhost.pem --tls-key ./certs/localhost-key.pem
-```
+# Service provides its own cert — proxy inherits it
+mdp run --tls-cert ./certs/localhost.pem --tls-key ./certs/localhost-key.pem -- npm run dev
 
-Disable TLS entirely:
-
-```sh
-mdp --no-tls
+# Auto-detect mkcert certs
+mdp run --auto-tls -- npm run dev
 ```
 
 Generate a local cert with [mkcert](https://github.com/FiloSottile/mkcert):
 
 ```sh
 mkcert localhost
-mdp --tls-cert localhost.pem --tls-key localhost-key.pem
+mdp run --tls-cert localhost.pem --tls-key localhost-key.pem -- npm run dev
 ```
 
 ## Configuration
@@ -285,9 +282,6 @@ mdp --tls-cert localhost.pem --tls-key localhost-key.pem
 | `--control-port` | `13100`   | Control API port                            |
 | `-d, --daemon`   |           | Run as background daemon (no TUI)           |
 | `--stop`         |           | Stop the background daemon                  |
-| `--no-tls`       |           | Disable HTTPS                               |
-| `--tls-cert`     |           | Path to TLS certificate file                |
-| `--tls-key`      |           | Path to TLS key file                        |
 | `--config`       |           | Path to mdp.yaml (auto-detected if not set) |
 | `--host`         | `0.0.0.0` | Host for proxy listeners                    |
 

@@ -30,7 +30,7 @@ npm run test:e2e         # run Playwright tests (separate terminal)
 cmd/mdp/              CLI entrypoints (root orchestrator, run, register, switch, kill)
 internal/
   api/                HTTP handlers for /__mdp/* per-proxy endpoints + CORS + config
-  certs/              TLS cert generation (mkcert preferred, self-signed fallback)
+  certs/              TLS cert generation helpers (unused — proxy inherits certs from services)
   config/             mdp.yaml parser (service definitions, env vars, port mappings)
   detect/             Git repo/branch detection, stdout port detection
   inject/             HTML response injection (<script> tag for widget)
