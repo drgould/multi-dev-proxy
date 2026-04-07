@@ -1,5 +1,14 @@
 # Changelog
 
+## v1.1.0
+
+- Add /release slash command
+- Smart HTTP/HTTPS proxy with per-service TLS and last-path tracking
+- Dynamic TLS cert inheritance from services
+- Fix bugs and hardening from code review
+- Add comprehensive test coverage across packages
+- Skip port override in solo mode, rename runSoloWithHealth to runProxied
+
 ## v1.0.1
 
 ### Changed
