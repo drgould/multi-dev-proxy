@@ -48,8 +48,7 @@ curl -fsSL https://raw.githubusercontent.com/drgould/multi-dev-proxy/main/instal
 **Homebrew:**
 
 ```sh
-brew tap drgould/mdp
-brew install --cask mdp
+brew install drgould/mdp/mdp
 ```
 
 **Scoop (Windows):**
