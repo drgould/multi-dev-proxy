@@ -1,5 +1,9 @@
 # Changelog
 
+## v1.1.2
+
+- Deregister servers from orchestrator on shutdown
+
 ## v1.1.1
 
 - Fix macOS Gatekeeper warnings for installed binary
