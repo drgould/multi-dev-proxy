@@ -8,6 +8,7 @@ import (
 	"fmt"
 	"log/slog"
 	"net/http"
+	"net/url"
 	"os"
 	"os/exec"
 	"os/signal"
@@ -105,6 +106,7 @@ func runBatchMode(cmd *cobra.Command, controlPort int, groupFlag string) error {
 	}
 
 	bt := &batchTracker{}
+	var registeredNames []string
 
 	for name, svc := range cfg.Services {
 		if svc.Command == "" && svc.Port == 0 {
@@ -117,9 +119,11 @@ func runBatchMode(cmd *cobra.Command, controlPort int, groupFlag string) error {
 		}
 
 		if len(svc.Ports) > 0 {
-			if err := registerMultiPortBatch(client, controlURL, name, svc, svcGroup, portRange, bt); err != nil {
+			names, err := registerMultiPortBatch(client, controlURL, name, svc, svcGroup, portRange, bt)
+			if err != nil {
 				return fmt.Errorf("register multi-port service %q: %w", name, err)
 			}
+			registeredNames = append(registeredNames, names...)
 			continue
 		}
 
@@ -155,6 +159,7 @@ func runBatchMode(cmd *cobra.Command, controlPort int, groupFlag string) error {
 			if resp.StatusCode != http.StatusOK {
 				return fmt.Errorf("register %q failed (status %d)", serverName, resp.StatusCode)
 			}
+			registeredNames = append(registeredNames, serverName)
 		}
 
 		if svc.Command != "" {
@@ -193,16 +198,21 @@ func runBatchMode(cmd *cobra.Command, controlPort int, groupFlag string) error {
 		bt.killAll()
 		<-waitDone
 	}
+
+	for _, name := range registeredNames {
+		deregisterFromOrchestrator(controlURL, name)
+	}
 	return nil
 }
 
-func registerMultiPortBatch(client *http.Client, controlURL, name string, svc config.ServiceConfig, group string, portRange ports.PortRange, bt *batchTracker) error {
+func registerMultiPortBatch(client *http.Client, controlURL, name string, svc config.ServiceConfig, group string, portRange ports.PortRange, bt *batchTracker) ([]string, error) {
+	var registered []string
 	portAssignments := make(map[string]int)
 	for envName, value := range svc.Env {
 		if value == "auto" {
 			port, err := ports.FindFreePort(portRange, nil)
 			if err != nil {
-				return err
+				return nil, err
 			}
 			portAssignments[envName] = port
 		}
@@ -234,12 +244,13 @@ func registerMultiPortBatch(client *http.Client, controlURL, name string, svc co
 		body, _ := json.Marshal(regPayload)
 		resp, err := client.Post(controlURL+"/__mdp/register", "application/json", bytes.NewReader(body))
 		if err != nil {
-			return err
+			return registered, err
 		}
 		resp.Body.Close()
 		if resp.StatusCode != http.StatusOK {
-			return fmt.Errorf("register %q failed (status %d)", serverName, resp.StatusCode)
+			return registered, fmt.Errorf("register %q failed (status %d)", serverName, resp.StatusCode)
 		}
+		registered = append(registered, serverName)
 	}
 
 	if svc.Command != "" {
@@ -257,7 +268,7 @@ func registerMultiPortBatch(client *http.Client, controlURL, name string, svc co
 		go runServiceProcess(bt, name, svc.Command, svc.Dir, env)
 	}
 
-	return nil
+	return registered, nil
 }
 
 var serviceColors = []string{
@@ -465,8 +476,9 @@ func runSingleMode(cmd *cobra.Command, args []string, controlPort int, groupFlag
 			return fmt.Errorf("register %q failed (status %d)", serverName, resp.StatusCode)
 		}
 		slog.Info("registered with orchestrator", "name", serverName, "proxy", proxyPort)
-		healthURL := fmt.Sprintf("http://127.0.0.1:%d/__mdp/health", controlPort)
-		return runProxied(args, envVar, assignedPort, healthURL)
+		controlURL := fmt.Sprintf("http://127.0.0.1:%d", controlPort)
+		healthURL := controlURL + "/__mdp/health"
+		return runProxied(args, envVar, assignedPort, healthURL, controlURL, serverName)
 	} else {
 		proxyURL, proxyRunning := detectProxy(proxyPort)
 		if !proxyRunning {
@@ -574,7 +586,7 @@ func watchHealth(healthURL string) <-chan struct{} {
 	return gone
 }
 
-func runProxied(args []string, envVar string, port int, healthURL string) error {
+func runProxied(args []string, envVar string, port int, healthURL string, controlURL string, serverName string) error {
 	cmd := exec.Command(args[0], args[1:]...)
 	cmd.Stdin = os.Stdin
 	cmd.Stdout = os.Stdout
@@ -596,6 +608,7 @@ func runProxied(args []string, envVar string, port int, healthURL string) error 
 
 	select {
 	case <-sigCh:
+		deregisterFromOrchestrator(controlURL, serverName)
 		cmd.Process.Signal(syscall.SIGTERM)
 		select {
 		case <-done:
@@ -605,6 +618,7 @@ func runProxied(args []string, envVar string, port int, healthURL string) error 
 		}
 	case <-gone:
 		slog.Warn("proxy is no longer reachable, shutting down")
+		deregisterFromOrchestrator(controlURL, serverName)
 		cmd.Process.Signal(syscall.SIGTERM)
 		select {
 		case <-done:
@@ -613,6 +627,7 @@ func runProxied(args []string, envVar string, port int, healthURL string) error 
 			<-done
 		}
 	case err := <-done:
+		deregisterFromOrchestrator(controlURL, serverName)
 		if err != nil {
 			if ee, ok := err.(*exec.ExitError); ok {
 				os.Exit(ee.ExitCode())
@@ -621,6 +636,29 @@ func runProxied(args []string, envVar string, port int, healthURL string) error 
 		}
 	}
 	return nil
+}
+
+func deregisterFromOrchestrator(controlURL, serverName string) {
+	if controlURL == "" || serverName == "" {
+		return
+	}
+	client := &http.Client{Timeout: 5 * time.Second}
+	req, err := http.NewRequest(
+		http.MethodDelete,
+		controlURL+"/__mdp/register/"+url.PathEscape(serverName),
+		nil,
+	)
+	if err != nil {
+		slog.Debug("deregister: bad request URL", "err", err)
+		return
+	}
+	resp, err := client.Do(req)
+	if err != nil {
+		slog.Debug("deregister from orchestrator failed", "err", err)
+		return
+	}
+	resp.Body.Close()
+	slog.Info("deregistered from orchestrator", "name", serverName)
 }
 
 func runSolo(args []string) error {
