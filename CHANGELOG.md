@@ -1,5 +1,9 @@
 # Changelog
 
+## v1.1.1
+
+- Fix macOS Gatekeeper warnings for installed binary
+
 ## v1.1.0
 
 - Add /release slash command
