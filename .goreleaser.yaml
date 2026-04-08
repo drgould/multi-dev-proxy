@@ -57,7 +57,7 @@ changelog:
 release:
   replace_existing_artifacts: true
 
-homebrew_casks:
+brews:
   - name: mdp
     repository:
       owner: drgould
@@ -67,6 +67,8 @@ homebrew_casks:
     description: "Multi-dev proxy — run multiple dev servers behind one port"
     license: "GPL-3.0"
     skip_upload: auto
+    install: |
+      bin.install "mdp"
 
 scoops:
   - name: mdp

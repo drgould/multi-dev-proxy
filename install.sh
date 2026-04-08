@@ -51,6 +51,12 @@ if [ ! -w "$INSTALL_DIR" ]; then
 fi
 
 install -m755 "$TMPDIR/$BINARY" "$INSTALL_DIR/$BINARY"
+
+# macOS: strip quarantine attribute so Gatekeeper doesn't block the binary
+if [ "$OS" = "darwin" ]; then
+  xattr -d com.apple.quarantine "$INSTALL_DIR/$BINARY" 2>/dev/null || true
+fi
+
 echo "mdp ${VERSION} installed to ${INSTALL_DIR}/${BINARY}"
 
 if ! echo "$PATH" | grep -q "$INSTALL_DIR"; then
