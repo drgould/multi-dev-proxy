@@ -42,15 +42,7 @@ checksum:
   algorithm: sha256
 
 changelog:
-  sort: asc
-  filters:
-    exclude:
-      - "^docs:"
-      - "^test:"
-      - "^chore:"
-      - "^ci:"
-      - Merge pull request
-      - Merge branch
+  disable: true
 
 # Re-running the same tag (e.g. after moving the tag) leaves assets on the
 # GitHub release; replace them instead of failing with 422 already_exists.

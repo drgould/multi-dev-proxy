@@ -59,6 +59,15 @@ internal/
 - Control API on port 13100 (configurable via `--control-port`)
 - Service groups derived dynamically from registered services' group fields (typically git branch)
 
+## Releases
+
+Automated via [release-please](https://github.com/googleapis/release-please). Commits to `main` must use **conventional commit** prefixes:
+
+- `feat:` → minor bump, `fix:` → patch bump, `feat!:` / `fix!:` → major bump
+- `docs:`, `test:`, `chore:`, `ci:` → no release, hidden from changelog
+
+On push to `main`, release-please creates/updates a Release PR. Merging it creates a GitHub Release + `v*` tag, which triggers goreleaser to build and publish binaries.
+
 ## Dependencies
 
 - `github.com/spf13/cobra` — CLI framework
