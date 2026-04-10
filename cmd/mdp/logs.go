@@ -106,7 +106,7 @@ func tailFollow(path string, n int) error {
 }
 
 func readAllLines(f *os.File) ([]string, error) {
-	_, _ = f.Seek(0, io.SeekStart)
+	f.Seek(0, io.SeekStart)
 	var lines []string
 	scanner := bufio.NewScanner(f)
 	maxBuf := 1024 * 1024
