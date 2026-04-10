@@ -26,7 +26,7 @@ builds:
 
 archives:
   - id: mdp
-    builds:
+    ids:
       - mdp
     name_template: "mdp_{{ .Os }}_{{ .Arch }}"
     format_overrides:
@@ -42,23 +42,16 @@ checksum:
   algorithm: sha256
 
 changelog:
-  sort: asc
-  filters:
-    exclude:
-      - "^docs:"
-      - "^test:"
-      - "^chore:"
-      - "^ci:"
-      - Merge pull request
-      - Merge branch
+  disable: true
 
 # Re-running the same tag (e.g. after moving the tag) leaves assets on the
 # GitHub release; replace them instead of failing with 422 already_exists.
 release:
   replace_existing_artifacts: true
 
-brews:
+homebrew_casks:
   - name: mdp
+    directory: Casks
     repository:
       owner: drgould
       name: homebrew-mdp
@@ -67,8 +60,12 @@ brews:
     description: "Multi-dev proxy — run multiple dev servers behind one port"
     license: "GPL-3.0"
     skip_upload: auto
-    install: |
-      bin.install "mdp"
+    url:
+      verified: github.com/drgould/multi-dev-proxy
+    hooks:
+      post:
+        install: |
+          system_command "/usr/bin/xattr", args: ["-dr", "com.apple.quarantine", "#{staged_path}/mdp"]
 
 scoops:
   - name: mdp

@@ -397,11 +397,11 @@ func (m *Model) renderInner() string {
 
 	switch m.activeTab() {
 	case tabGroups:
-		y = m.renderGroups(&b, snap, y)
+		_ = m.renderGroups(&b, snap, y)
 	case tabProxies:
-		y = m.renderProxies(&b, snap, y)
+		_ = m.renderProxies(&b, snap, y)
 	case tabServices:
-		y = m.renderServices(&b, snap, y)
+		_ = m.renderServices(&b, snap, y)
 	}
 
 	// help
