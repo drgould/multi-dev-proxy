@@ -1,14 +1,8 @@
 linters:
-  enable:
+  disable:
     - errcheck
+  enable:
     - govet
     - ineffassign
     - staticcheck
     - unused
-
-issues:
-  exclude-rules:
-    # Test files: don't require checking every error return
-    - path: _test\.go
-      linters:
-        - errcheck

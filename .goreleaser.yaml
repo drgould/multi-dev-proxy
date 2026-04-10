@@ -51,6 +51,7 @@ release:
 
 homebrew_casks:
   - name: mdp
+    directory: Casks
     repository:
       owner: drgould
       name: homebrew-mdp
@@ -59,8 +60,12 @@ homebrew_casks:
     description: "Multi-dev proxy — run multiple dev servers behind one port"
     license: "GPL-3.0"
     skip_upload: auto
-    install: |
-      bin.install "mdp"
+    url:
+      verified: github.com/drgould/multi-dev-proxy
+    hooks:
+      post:
+        install: |
+          system_command "/usr/bin/xattr", args: ["-dr", "com.apple.quarantine", "#{staged_path}/mdp"]
 
 scoops:
   - name: mdp
