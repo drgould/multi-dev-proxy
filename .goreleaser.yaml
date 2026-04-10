@@ -26,7 +26,7 @@ builds:
 
 archives:
   - id: mdp
-    builds:
+    ids:
       - mdp
     name_template: "mdp_{{ .Os }}_{{ .Arch }}"
     format_overrides:
@@ -49,7 +49,7 @@ changelog:
 release:
   replace_existing_artifacts: true
 
-brews:
+homebrew_casks:
   - name: mdp
     repository:
       owner: drgould
