@@ -83,7 +83,11 @@
     .settings { display:flex; align-items:center; gap:6px; padding:8px 12px; font-size:11px; color:var(--group-label); cursor:pointer; border-top:1px solid var(--border); text-decoration:none; }
     .settings:hover { background:var(--item-hover); color:var(--text); }
     .gear { font-size:13px; }
-    .sibling-label { padding: 4px 12px 2px; font-size: 10px; color: var(--group-label); }
+    .sub-item {
+      display: flex; align-items: center; gap: 8px;
+      padding: 4px 12px 4px 28px; font-size: 11px; color: var(--group-label);
+    }
+    .sub-item .item-dot { width: 5px; height: 5px; }
   `;
 
 	shadow.appendChild(style);
@@ -107,6 +111,22 @@
 		const i = name.lastIndexOf("/");
 		if (i < 0) return name;
 		return `${name.slice(0, i)} \u00b7 ${name.slice(i + 1)}`;
+	}
+
+	function buildLocalGroups(data) {
+		const groups = {};
+		for (const repo of Object.keys(data)) {
+			for (const fullName of Object.keys(data[repo])) {
+				const info = data[repo][fullName];
+				const g = info.group || "";
+				if (!groups[g]) groups[g] = [];
+				const branch = fullName.startsWith(`${repo}/`)
+					? fullName.slice(repo.length + 1)
+					: fullName.split("/").pop();
+				groups[g].push({ name: fullName, repo, branch, scheme: info.scheme });
+			}
+		}
+		return groups;
 	}
 
 	function render(data, activeName) {
@@ -138,65 +158,43 @@
 		}
 		dropdownEl.innerHTML = "";
 
-		if (config && config.groups && Object.keys(config.groups).length > 0 && config.siblings && config.siblings.length > 0) {
-			const glabel = document.createElement("div");
-			glabel.className = "group-label";
-			glabel.textContent = "groups";
-			dropdownEl.appendChild(glabel);
-			for (const gname of Object.keys(config.groups).sort()) {
-				const item = document.createElement("div");
-				item.className = "item";
-				item.innerHTML = `<span class="item-dot gray"></span>${gname}`;
-				item.onclick = () => switchGroup(gname);
-				dropdownEl.appendChild(item);
+		const localGroups = buildLocalGroups(data);
+		const groupNames = Object.keys(localGroups).filter((g) => g !== "").sort();
+		const ungrouped = localGroups[""] || [];
+
+		for (const gname of groupNames) {
+			const members = localGroups[gname];
+			const groupActive = members.some((m) => m.name === activeName);
+			const item = document.createElement("div");
+			item.className = "item";
+			item.innerHTML = `<span class="item-dot ${groupActive ? "green" : "gray"}"></span>${gname}`;
+			item.onclick = () => switchGroup(gname);
+			dropdownEl.appendChild(item);
+			for (const svc of members.sort((a, b) => a.name.localeCompare(b.name))) {
+				const isActive = svc.name === activeName;
+				const sub = document.createElement("div");
+				sub.className = "sub-item";
+				sub.innerHTML = `<span class="item-dot ${isActive ? "green" : "gray"}"></span>${svc.repo} / ${svc.branch}`;
+				dropdownEl.appendChild(sub);
 			}
-			const div = document.createElement("div");
-			div.className = "section-divider";
-			dropdownEl.appendChild(div);
 		}
 
-		for (const repo of Object.keys(data).sort()) {
+		if (ungrouped.length > 0) {
+			if (groupNames.length > 0) {
+				const div = document.createElement("div");
+				div.className = "section-divider";
+				dropdownEl.appendChild(div);
+			}
 			const label = document.createElement("div");
 			label.className = "group-label";
-			label.textContent = repo;
+			label.textContent = "ungrouped";
 			dropdownEl.appendChild(label);
-			for (const fullName of Object.keys(data[repo]).sort()) {
-				const isActive = fullName === activeName;
-				const item = document.createElement("div");
-				item.className = `item${isActive ? " active" : ""}`;
-				item.innerHTML = `<span class="item-dot ${isActive ? "green" : "gray"}"></span>${fullName.split("/").pop()}`;
-				if (!isActive) {
-					const info = data[repo][fullName];
-					const targetScheme = (info && info.scheme === "https") ? "https" : "http";
-					const targetBase = `${targetScheme}://${location.hostname}:${location.port}`;
-					item.onclick = async () => {
-						setCookie(fullName);
-						try {
-							const resp = await fetch(`/__mdp/last-path/${encodeURIComponent(fullName)}`);
-							if (resp.ok) {
-								const lpData = await resp.json();
-								if (lpData.path) {
-									window.location.href = `${targetBase}${lpData.path}`;
-									return;
-								}
-							}
-						} catch { /* ignore */ }
-						window.location.href = `${targetBase}/`;
-					};
-				}
-				dropdownEl.appendChild(item);
-			}
-		}
-
-		if (config && config.siblings && config.siblings.length > 0) {
-			const div = document.createElement("div");
-			div.className = "section-divider";
-			dropdownEl.appendChild(div);
-			for (const sib of config.siblings) {
-				const slabel = document.createElement("div");
-				slabel.className = "sibling-label";
-				slabel.textContent = `${sib.label || "proxy"} :${sib.port}`;
-				dropdownEl.appendChild(slabel);
+			for (const svc of ungrouped.sort((a, b) => a.name.localeCompare(b.name))) {
+				const isActive = svc.name === activeName;
+				const sub = document.createElement("div");
+				sub.className = "sub-item";
+				sub.innerHTML = `<span class="item-dot ${isActive ? "green" : "gray"}"></span>${svc.repo} / ${svc.branch}`;
+				dropdownEl.appendChild(sub);
 			}
 		}
 
@@ -209,14 +207,11 @@
 
 	async function switchGroup(name) {
 		try {
-			await fetch(`/__mdp/groups/${name}/switch`, { method: "POST" });
-			const members = (config && config.groups && config.groups[name]) || [];
-			const localNames = Object.keys(servers).flatMap((r) =>
-				Object.keys(servers[r]),
-			);
-			const localMember = members.find((m) => localNames.includes(m));
-			if (localMember) {
-				setCookie(localMember);
+			await fetch(`/__mdp/groups/${encodeURIComponent(name)}/switch`, { method: "POST" });
+			const localGroups = buildLocalGroups(servers);
+			const members = localGroups[name] || [];
+			if (members.length > 0) {
+				setCookie(members[0].name);
 			}
 			window.location.reload();
 		} catch { /* ignore */ }
