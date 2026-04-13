@@ -97,6 +97,8 @@ func runDaemonProcess(cmd *cobra.Command, controlPort int) error {
 	ctx, cancel := context.WithCancel(context.Background())
 	defer cancel()
 
+	orch.StartSessionPruner(ctx, 10*time.Second, 30*time.Second)
+
 	ctrlSrv, err := orchestrator.StartControlServer(orch, controlPort, cancel)
 	if err != nil {
 		return fmt.Errorf("start control API: %w", err)

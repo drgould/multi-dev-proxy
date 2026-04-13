@@ -20,7 +20,7 @@ func TestRenderSwitchPageEmpty(t *testing.T) {
 }
 
 func TestRenderSwitchPageSingleServer(t *testing.T) {
-	servers := []*registry.ServerEntry{
+	servers := []registry.ServerEntry{
 		{Name: "myrepo/main", Repo: "myrepo", Port: 3000, PID: 1234},
 	}
 	html := RenderSwitchPage(servers)
@@ -39,7 +39,7 @@ func TestRenderSwitchPageSingleServer(t *testing.T) {
 }
 
 func TestRenderSwitchPageGrouped(t *testing.T) {
-	servers := []*registry.ServerEntry{
+	servers := []registry.ServerEntry{
 		{Name: "alpha/feat-1", Repo: "alpha", Port: 3001, PID: 100},
 		{Name: "beta/feat-2", Repo: "beta", Port: 3002, PID: 200},
 	}
@@ -62,7 +62,7 @@ func TestRenderSwitchPageGrouped(t *testing.T) {
 }
 
 func TestRenderSwitchPageAllHaveSwitchButton(t *testing.T) {
-	servers := []*registry.ServerEntry{
+	servers := []registry.ServerEntry{
 		{Name: "repo/branch-a", Repo: "repo", Port: 3001, PID: 100},
 		{Name: "repo/branch-b", Repo: "repo", Port: 3002, PID: 200},
 	}
@@ -75,7 +75,7 @@ func TestRenderSwitchPageAllHaveSwitchButton(t *testing.T) {
 }
 
 func TestRenderSwitchPageEntriesSorted(t *testing.T) {
-	servers := []*registry.ServerEntry{
+	servers := []registry.ServerEntry{
 		{Name: "repo/zebra", Repo: "repo", Port: 3001, PID: 100},
 		{Name: "repo/alpha", Repo: "repo", Port: 3002, PID: 200},
 	}

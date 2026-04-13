@@ -62,7 +62,7 @@ func ResolveUpstream(reg *registry.Registry, cookieHeader, cookieName, defaultSe
 	}
 	entries := reg.List()
 	if count == 1 {
-		return ResolveResult{Entry: entries[0]}
+		return ResolveResult{Entry: &entries[0]}
 	}
 
 	cookies := ParseCookies(cookieHeader)

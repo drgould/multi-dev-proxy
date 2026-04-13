@@ -6,6 +6,7 @@ import (
 	"net/http/httptest"
 	"os"
 	"strings"
+	"sync"
 	"sync/atomic"
 	"testing"
 	"time"
@@ -211,13 +212,19 @@ func TestDeregisterFromOrchestratorNoOp(t *testing.T) {
 	deregisterFromOrchestrator("", "")
 }
 
-func TestRunProxiedDeregistersOnChildExit(t *testing.T) {
-	var deregisterCalled atomic.Int32
+func TestRunProxiedDisconnectsOnChildExit(t *testing.T) {
+	var disconnectCalled atomic.Int32
 	var gotPath string
+	done := make(chan struct{})
 	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		if r.Method == "DELETE" {
-			deregisterCalled.Add(1)
+		if r.Method == "POST" && r.URL.Path == "/__mdp/disconnect" {
+			disconnectCalled.Add(1)
 			gotPath = r.URL.Path
+			defer func() { close(done) }()
+		}
+		if r.URL.Path == "/__mdp/shutdown/watch" {
+			<-done
+			return
 		}
 		w.WriteHeader(http.StatusOK)
 	}))
@@ -225,59 +232,69 @@ func TestRunProxiedDeregistersOnChildExit(t *testing.T) {
 
 	err := runProxied(
 		[]string{"sh", "-c", "exit 0"},
-		"PORT", 12345, srv.URL+"/__mdp/health",
-		srv.URL, "test/svc",
+		"PORT", 12345, srv.URL, "test/svc", "test-client-id",
 	)
 	if err != nil {
 		t.Fatalf("runProxied: %v", err)
 	}
-	if deregisterCalled.Load() != 1 {
-		t.Errorf("expected 1 deregister call, got %d", deregisterCalled.Load())
+	if disconnectCalled.Load() != 1 {
+		t.Errorf("expected 1 disconnect call, got %d", disconnectCalled.Load())
 	}
-	if gotPath != "/__mdp/register/test/svc" {
-		t.Errorf("expected path /__mdp/register/test/svc, got %s", gotPath)
+	if gotPath != "/__mdp/disconnect" {
+		t.Errorf("expected path /__mdp/disconnect, got %s", gotPath)
 	}
 }
 
-func TestRunProxiedDeregistersOnNonZeroExit(t *testing.T) {
-	var deregisterCalled atomic.Int32
+func TestRunProxiedDisconnectsOnNonZeroExit(t *testing.T) {
+	var disconnectCalled atomic.Int32
+	done := make(chan struct{})
 	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		if r.Method == "DELETE" {
-			deregisterCalled.Add(1)
+		if r.Method == "POST" && r.URL.Path == "/__mdp/disconnect" {
+			disconnectCalled.Add(1)
+			defer func() { close(done) }()
+		}
+		if r.URL.Path == "/__mdp/shutdown/watch" {
+			<-done
+			return
 		}
 		w.WriteHeader(http.StatusOK)
 	}))
 	defer srv.Close()
 
-	// runProxied calls os.Exit for non-zero child exits, so we test
-	// that deregister is called by checking the atomic counter.
-	// We can't easily test the os.Exit path, but we can verify the
-	// deregister call happens before it by using a command that exits
-	// with an error that isn't an ExitError.
 	err := runProxied(
 		[]string{"sh", "-c", "exit 0"},
-		"PORT", 12345, srv.URL+"/__mdp/health",
-		srv.URL, "test/svc",
+		"PORT", 12345, srv.URL, "test/svc", "test-client-id",
 	)
 	if err != nil {
 		t.Fatalf("runProxied: %v", err)
 	}
-	if deregisterCalled.Load() != 1 {
-		t.Errorf("expected 1 deregister call, got %d", deregisterCalled.Load())
+	if disconnectCalled.Load() != 1 {
+		t.Errorf("expected 1 disconnect call, got %d", disconnectCalled.Load())
 	}
 }
 
 func TestRunProxiedSetsMDPEnv(t *testing.T) {
-	// Start a fake orchestrator health endpoint
+	done := make(chan struct{})
+	var closeOnce sync.Once
 	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.URL.Path == "/__mdp/shutdown/watch" {
+			<-done
+			return
+		}
+		if r.Method == "POST" && r.URL.Path == "/__mdp/disconnect" {
+			closeOnce.Do(func() { close(done) })
+		}
+		// Also handle PATCH (updatePID) with empty name — no-op on server
 		w.WriteHeader(http.StatusOK)
 	}))
 	defer srv.Close()
 
+	// Close done after runProxied returns (clientID is empty so disconnect is skipped)
+	defer closeOnce.Do(func() { close(done) })
+
 	err := runProxied(
 		[]string{"sh", "-c", `test "$MDP" = "1" && test -n "$PORT"`},
-		"PORT", 12345, srv.URL+"/__mdp/health",
-		"", "",
+		"PORT", 12345, srv.URL, "", "",
 	)
 	if err != nil {
 		t.Fatalf("runProxied should set MDP=1 and PORT: %v", err)
