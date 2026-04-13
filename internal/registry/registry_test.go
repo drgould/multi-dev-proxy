@@ -426,3 +426,107 @@ func TestConcurrent(t *testing.T) {
 		wg.Wait()
 	})
 }
+
+func TestUpdatePID(t *testing.T) {
+	t.Run("updates existing entry", func(t *testing.T) {
+		r := New()
+		r.Register(&ServerEntry{Name: "repo/main", Repo: "repo", Port: 3000, PID: 0})
+		if !r.UpdatePID("repo/main", 1234) {
+			t.Error("UpdatePID() returned false for existing entry")
+		}
+		if got := r.Get("repo/main"); got.PID != 1234 {
+			t.Errorf("PID = %d, want 1234", got.PID)
+		}
+	})
+
+	t.Run("returns false for missing entry", func(t *testing.T) {
+		r := New()
+		if r.UpdatePID("nonexistent", 1234) {
+			t.Error("UpdatePID() returned true for missing entry")
+		}
+	})
+}
+
+func TestIncrementAndResetFailures(t *testing.T) {
+	t.Run("increments consecutively", func(t *testing.T) {
+		r := New()
+		r.Register(&ServerEntry{Name: "repo/main", Repo: "repo", Port: 3000})
+		if got := r.IncrementFailures("repo/main"); got != 1 {
+			t.Errorf("IncrementFailures() = %d, want 1", got)
+		}
+		if got := r.IncrementFailures("repo/main"); got != 2 {
+			t.Errorf("IncrementFailures() = %d, want 2", got)
+		}
+	})
+
+	t.Run("returns 0 for missing entry", func(t *testing.T) {
+		r := New()
+		if got := r.IncrementFailures("nonexistent"); got != 0 {
+			t.Errorf("IncrementFailures() = %d, want 0", got)
+		}
+	})
+
+	t.Run("reset clears counter", func(t *testing.T) {
+		r := New()
+		r.Register(&ServerEntry{Name: "repo/main", Repo: "repo", Port: 3000})
+		r.IncrementFailures("repo/main")
+		r.IncrementFailures("repo/main")
+		r.ResetFailures("repo/main")
+		if got := r.IncrementFailures("repo/main"); got != 1 {
+			t.Errorf("IncrementFailures() after reset = %d, want 1", got)
+		}
+	})
+}
+
+func TestDeregisterByClientID(t *testing.T) {
+	t.Run("removes matching entries", func(t *testing.T) {
+		r := New()
+		r.Register(&ServerEntry{Name: "app/web", Repo: "app", Port: 3000, ClientID: "abc"})
+		r.Register(&ServerEntry{Name: "app/api", Repo: "app", Port: 3001, ClientID: "abc"})
+		r.Register(&ServerEntry{Name: "other/svc", Repo: "other", Port: 3002, ClientID: "xyz"})
+
+		removed := r.DeregisterByClientID("abc")
+		if len(removed) != 2 {
+			t.Errorf("DeregisterByClientID() removed %d, want 2", len(removed))
+		}
+		if r.Count() != 1 {
+			t.Errorf("Count() = %d, want 1", r.Count())
+		}
+		if r.Get("other/svc") == nil {
+			t.Error("other/svc should remain")
+		}
+	})
+
+	t.Run("clears default if removed", func(t *testing.T) {
+		r := New()
+		r.Register(&ServerEntry{Name: "app/web", Repo: "app", Port: 3000, ClientID: "abc"})
+		r.Register(&ServerEntry{Name: "app/api", Repo: "app", Port: 3001, ClientID: "xyz"})
+		r.SetDefault("app/web")
+
+		r.DeregisterByClientID("abc")
+		if got := r.GetDefault(); got != "" {
+			t.Errorf("GetDefault() = %q, want empty after removing default's client", got)
+		}
+	})
+
+	t.Run("empty clientID returns nil", func(t *testing.T) {
+		r := New()
+		r.Register(&ServerEntry{Name: "app/web", Repo: "app", Port: 3000, ClientID: "abc"})
+		removed := r.DeregisterByClientID("")
+		if removed != nil {
+			t.Errorf("DeregisterByClientID('') = %v, want nil", removed)
+		}
+		if r.Count() != 1 {
+			t.Errorf("Count() = %d, want 1", r.Count())
+		}
+	})
+
+	t.Run("no match returns empty", func(t *testing.T) {
+		r := New()
+		r.Register(&ServerEntry{Name: "app/web", Repo: "app", Port: 3000, ClientID: "abc"})
+		removed := r.DeregisterByClientID("nonexistent")
+		if len(removed) != 0 {
+			t.Errorf("DeregisterByClientID('nonexistent') removed %d, want 0", len(removed))
+		}
+	})
+}

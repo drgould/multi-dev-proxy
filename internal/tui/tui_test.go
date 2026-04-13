@@ -44,7 +44,7 @@ func testSnapshot() orchestrator.Snapshot {
 				Port:    3000,
 				Label:   "frontend",
 				Default: "app/dev",
-				Servers: []*registry.ServerEntry{
+				Servers: []registry.ServerEntry{
 					{Name: "app/dev", Port: 4001, PID: 100, Group: "dev"},
 					{Name: "app/staging", Port: 4002, PID: 200, Group: "staging"},
 				},
@@ -53,7 +53,7 @@ func testSnapshot() orchestrator.Snapshot {
 				Port:    3001,
 				Label:   "backend",
 				Default: "api/dev",
-				Servers: []*registry.ServerEntry{
+				Servers: []registry.ServerEntry{
 					{Name: "api/dev", Port: 5001, PID: 300, Group: "dev"},
 					{Name: "api/staging", Port: 5002, PID: 400, Group: "staging"},
 				},
@@ -108,7 +108,7 @@ func TestBuildServersByGroupSkipsUngrouped(t *testing.T) {
 		Proxies: []orchestrator.ProxySnapshot{
 			{
 				Port: 3000,
-				Servers: []*registry.ServerEntry{
+				Servers: []registry.ServerEntry{
 					{Name: "app/main", Port: 4001, Group: ""},
 					{Name: "app/dev", Port: 4002, Group: "dev"},
 				},
@@ -174,7 +174,7 @@ func TestModelRebuildTabsMultiProxy(t *testing.T) {
 func TestModelRebuildTabsSingleProxy(t *testing.T) {
 	snap := orchestrator.Snapshot{
 		Proxies: []orchestrator.ProxySnapshot{
-			{Port: 3000, Servers: []*registry.ServerEntry{
+			{Port: 3000, Servers: []registry.ServerEntry{
 				{Name: "app/dev", Port: 4001, Group: "dev"},
 			}},
 		},

@@ -3,7 +3,9 @@ package main
 import (
 	"bytes"
 	"context"
+	"crypto/rand"
 	"crypto/tls"
+	"encoding/hex"
 	"encoding/json"
 	"fmt"
 	"log/slog"
@@ -99,6 +101,7 @@ func runBatchMode(cmd *cobra.Command, controlPort int, groupFlag string) error {
 
 	client := &http.Client{Timeout: 5 * time.Second}
 	controlURL := fmt.Sprintf("http://127.0.0.1:%d", controlPort)
+	clientID := generateClientID()
 
 	portRange, err := ports.ParseRange(cfg.PortRange)
 	if err != nil {
@@ -106,7 +109,6 @@ func runBatchMode(cmd *cobra.Command, controlPort int, groupFlag string) error {
 	}
 
 	bt := &batchTracker{}
-	var registeredNames []string
 
 	for name, svc := range cfg.Services {
 		if svc.Command == "" && svc.Port == 0 {
@@ -119,11 +121,9 @@ func runBatchMode(cmd *cobra.Command, controlPort int, groupFlag string) error {
 		}
 
 		if len(svc.Ports) > 0 {
-			names, err := registerMultiPortBatch(client, controlURL, name, svc, svcGroup, portRange, bt)
-			if err != nil {
+			if _, err := registerMultiPortBatch(client, controlURL, name, svc, svcGroup, portRange, bt, clientID); err != nil {
 				return fmt.Errorf("register multi-port service %q: %w", name, err)
 			}
-			registeredNames = append(registeredNames, names...)
 			continue
 		}
 
@@ -142,6 +142,7 @@ func runBatchMode(cmd *cobra.Command, controlPort int, groupFlag string) error {
 				"port":      assignedPort,
 				"proxyPort": svc.Proxy,
 				"group":     svcGroup,
+				"clientID":  clientID,
 			}
 			if svc.Scheme != "" {
 				regPayload["scheme"] = svc.Scheme
@@ -159,7 +160,6 @@ func runBatchMode(cmd *cobra.Command, controlPort int, groupFlag string) error {
 			if resp.StatusCode != http.StatusOK {
 				return fmt.Errorf("register %q failed (status %d)", serverName, resp.StatusCode)
 			}
-			registeredNames = append(registeredNames, serverName)
 		}
 
 		if svc.Command != "" {
@@ -170,24 +170,29 @@ func runBatchMode(cmd *cobra.Command, controlPort int, groupFlag string) error {
 				}
 			}
 			bt.wg.Add(1)
-			go runServiceProcess(bt, name, svc.Command, svc.Dir, env)
+			go runServiceProcess(bt, name, svc.Command, svc.Dir, env, controlURL, serverName)
 		}
 	}
 
 	slog.Info("batch services started", "group", group)
 
+	hbCtx, hbCancel := context.WithCancel(context.Background())
+	defer hbCancel()
+	startHeartbeat(hbCtx, controlURL, clientID)
+
 	sigCh := make(chan os.Signal, 1)
 	signal.Notify(sigCh, syscall.SIGINT, syscall.SIGTERM)
 	defer signal.Stop(sigCh)
 
-	healthURL := fmt.Sprintf("http://127.0.0.1:%d/__mdp/health", controlPort)
-	gone := watchHealth(healthURL)
+	gone := watchShutdown(controlURL)
 
 	select {
 	case <-sigCh:
 	case <-gone:
-		slog.Warn("orchestrator is no longer reachable, shutting down")
+		slog.Warn("orchestrator is shutting down")
 	}
+
+	hbCancel()
 
 	bt.signalAll()
 	waitDone := make(chan struct{})
@@ -199,13 +204,11 @@ func runBatchMode(cmd *cobra.Command, controlPort int, groupFlag string) error {
 		<-waitDone
 	}
 
-	for _, name := range registeredNames {
-		deregisterFromOrchestrator(controlURL, name)
-	}
+	disconnectFromOrchestrator(controlURL, clientID)
 	return nil
 }
 
-func registerMultiPortBatch(client *http.Client, controlURL, name string, svc config.ServiceConfig, group string, portRange ports.PortRange, bt *batchTracker) ([]string, error) {
+func registerMultiPortBatch(client *http.Client, controlURL, name string, svc config.ServiceConfig, group string, portRange ports.PortRange, bt *batchTracker, clientID string) ([]string, error) {
 	var registered []string
 	portAssignments := make(map[string]int)
 	for envName, value := range svc.Env {
@@ -233,6 +236,7 @@ func registerMultiPortBatch(client *http.Client, controlURL, name string, svc co
 			"port":      port,
 			"proxyPort": pm.Proxy,
 			"group":     group,
+			"clientID":  clientID,
 		}
 		if svc.Scheme != "" {
 			regPayload["scheme"] = svc.Scheme
@@ -264,8 +268,11 @@ func registerMultiPortBatch(client *http.Client, controlURL, name string, svc co
 				env = append(env, k+"="+v)
 			}
 		}
+		// All registered names map to this single process
+		namesCopy := make([]string, len(registered))
+		copy(namesCopy, registered)
 		bt.wg.Add(1)
-		go runServiceProcess(bt, name, svc.Command, svc.Dir, env)
+		go runServiceProcess(bt, name, svc.Command, svc.Dir, env, controlURL, namesCopy...)
 	}
 
 	return registered, nil
@@ -377,7 +384,7 @@ func (bt *batchTracker) killAll() {
 	}
 }
 
-func runServiceProcess(bt *batchTracker, name, command, dir string, env []string) {
+func runServiceProcess(bt *batchTracker, name, command, dir string, env []string, controlURL string, serverNames ...string) {
 	defer bt.wg.Done()
 	color := nextColor()
 	pw := newPrefixWriter(name, color, os.Stdout)
@@ -397,7 +404,14 @@ func runServiceProcess(bt *batchTracker, name, command, dir string, env []string
 	cmd.Stderr = pwErr
 
 	bt.add(cmd)
-	if err := cmd.Run(); err != nil {
+	if err := cmd.Start(); err != nil {
+		slog.Error("service process failed to start", "name", name, "command", command, "err", err)
+		return
+	}
+	for _, sn := range serverNames {
+		updatePIDWithOrchestrator(controlURL, sn, cmd.Process.Pid)
+	}
+	if err := cmd.Wait(); err != nil {
 		slog.Error("service process exited", "name", name, "command", command, "err", err)
 	}
 	pw.Flush()
@@ -450,6 +464,7 @@ func runSingleMode(cmd *cobra.Command, args []string, controlPort int, groupFlag
 	}
 
 	if isOrchestratorRunning(controlPort) {
+		clientID := generateClientID()
 		client := &http.Client{Timeout: 5 * time.Second}
 		regPayload := map[string]any{
 			"name":      serverName,
@@ -457,6 +472,7 @@ func runSingleMode(cmd *cobra.Command, args []string, controlPort int, groupFlag
 			"proxyPort": proxyPort,
 			"group":     group,
 			"scheme":    scheme,
+			"clientID":  clientID,
 		}
 		if tlsCert != "" {
 			regPayload["tlsCertPath"] = tlsCert
@@ -477,8 +493,7 @@ func runSingleMode(cmd *cobra.Command, args []string, controlPort int, groupFlag
 		}
 		slog.Info("registered with orchestrator", "name", serverName, "proxy", proxyPort)
 		controlURL := fmt.Sprintf("http://127.0.0.1:%d", controlPort)
-		healthURL := controlURL + "/__mdp/health"
-		return runProxied(args, envVar, assignedPort, healthURL, controlURL, serverName)
+		return runProxied(args, envVar, assignedPort, controlURL, serverName, clientID)
 	} else {
 		proxyURL, proxyRunning := detectProxy(proxyPort)
 		if !proxyRunning {
@@ -586,7 +601,7 @@ func watchHealth(healthURL string) <-chan struct{} {
 	return gone
 }
 
-func runProxied(args []string, envVar string, port int, healthURL string, controlURL string, serverName string) error {
+func runProxied(args []string, envVar string, port int, controlURL string, serverName string, clientID string) error {
 	cmd := exec.Command(args[0], args[1:]...)
 	cmd.Stdin = os.Stdin
 	cmd.Stdout = os.Stdout
@@ -596,6 +611,11 @@ func runProxied(args []string, envVar string, port int, healthURL string, contro
 	if err := cmd.Start(); err != nil {
 		return fmt.Errorf("start %q: %w", args[0], err)
 	}
+	updatePIDWithOrchestrator(controlURL, serverName, cmd.Process.Pid)
+
+	hbCtx, hbCancel := context.WithCancel(context.Background())
+	defer hbCancel()
+	startHeartbeat(hbCtx, controlURL, clientID)
 
 	sigCh := make(chan os.Signal, 1)
 	signal.Notify(sigCh, syscall.SIGINT, syscall.SIGTERM)
@@ -604,11 +624,12 @@ func runProxied(args []string, envVar string, port int, healthURL string, contro
 	done := make(chan error, 1)
 	go func() { done <- cmd.Wait() }()
 
-	gone := watchHealth(healthURL)
+	gone := watchShutdown(controlURL)
 
 	select {
 	case <-sigCh:
-		deregisterFromOrchestrator(controlURL, serverName)
+		hbCancel()
+		disconnectFromOrchestrator(controlURL, clientID)
 		cmd.Process.Signal(syscall.SIGTERM)
 		select {
 		case <-done:
@@ -617,8 +638,9 @@ func runProxied(args []string, envVar string, port int, healthURL string, contro
 			<-done
 		}
 	case <-gone:
-		slog.Warn("proxy is no longer reachable, shutting down")
-		deregisterFromOrchestrator(controlURL, serverName)
+		slog.Warn("orchestrator is shutting down")
+		hbCancel()
+		disconnectFromOrchestrator(controlURL, clientID)
 		cmd.Process.Signal(syscall.SIGTERM)
 		select {
 		case <-done:
@@ -627,7 +649,8 @@ func runProxied(args []string, envVar string, port int, healthURL string, contro
 			<-done
 		}
 	case err := <-done:
-		deregisterFromOrchestrator(controlURL, serverName)
+		hbCancel()
+		disconnectFromOrchestrator(controlURL, clientID)
 		if err != nil {
 			if ee, ok := err.(*exec.ExitError); ok {
 				os.Exit(ee.ExitCode())
@@ -636,6 +659,117 @@ func runProxied(args []string, envVar string, port int, healthURL string, contro
 		}
 	}
 	return nil
+}
+
+func updatePIDWithOrchestrator(controlURL, serverName string, pid int) {
+	if controlURL == "" || serverName == "" || pid <= 0 {
+		return
+	}
+	client := &http.Client{Timeout: 5 * time.Second}
+	body, _ := json.Marshal(map[string]int{"pid": pid})
+	req, err := http.NewRequest(
+		http.MethodPatch,
+		controlURL+"/__mdp/register/"+url.PathEscape(serverName),
+		bytes.NewReader(body),
+	)
+	if err != nil {
+		slog.Warn("update PID: bad request URL", "err", err)
+		return
+	}
+	req.Header.Set("Content-Type", "application/json")
+	resp, err := client.Do(req)
+	if err != nil {
+		slog.Warn("update PID with orchestrator failed", "err", err)
+		return
+	}
+	resp.Body.Close()
+	slog.Debug("updated PID with orchestrator", "name", serverName, "pid", pid)
+}
+
+func generateClientID() string {
+	b := make([]byte, 16)
+	rand.Read(b)
+	return hex.EncodeToString(b)
+}
+
+func startHeartbeat(ctx context.Context, controlURL, clientID string) {
+	if controlURL == "" || clientID == "" {
+		return
+	}
+	body, _ := json.Marshal(map[string]string{"clientID": clientID})
+	go func() {
+		client := &http.Client{Timeout: 5 * time.Second}
+		ticker := time.NewTicker(10 * time.Second)
+		defer ticker.Stop()
+		for {
+			select {
+			case <-ctx.Done():
+				return
+			case <-ticker.C:
+				req, err := http.NewRequestWithContext(ctx, http.MethodPost,
+					controlURL+"/__mdp/heartbeat", bytes.NewReader(body))
+				if err != nil {
+					continue
+				}
+				req.Header.Set("Content-Type", "application/json")
+				resp, err := client.Do(req)
+				if err != nil {
+					slog.Debug("heartbeat failed", "err", err)
+					continue
+				}
+				resp.Body.Close()
+			}
+		}
+	}()
+}
+
+func watchShutdown(controlURL string) <-chan struct{} {
+	gone := make(chan struct{})
+	go func() {
+		client := &http.Client{Timeout: 0} // no timeout for long-poll
+		failures := 0
+		for {
+			resp, err := client.Get(controlURL + "/__mdp/shutdown/watch")
+			if resp != nil {
+				resp.Body.Close()
+			}
+			if err == nil {
+				// Intentional: any successful HTTP response from the watch endpoint
+				// is treated as a shutdown signal for this client session.
+				close(gone)
+				return
+			}
+			failures++
+			if failures >= 3 {
+				// Orchestrator unreachable
+				close(gone)
+				return
+			}
+			time.Sleep(time.Second)
+		}
+	}()
+	return gone
+}
+
+func disconnectFromOrchestrator(controlURL, clientID string) {
+	if controlURL == "" || clientID == "" {
+		return
+	}
+	client := &http.Client{Timeout: 5 * time.Second}
+	body, _ := json.Marshal(map[string]string{"clientID": clientID})
+	req, err := http.NewRequest(http.MethodPost, controlURL+"/__mdp/disconnect", bytes.NewReader(body))
+	if err != nil {
+		slog.Debug("disconnect: bad request URL", "err", err)
+		return
+	}
+	req.Header.Set("Content-Type", "application/json")
+	resp, err := client.Do(req)
+	if err != nil {
+		slog.Debug("disconnect from orchestrator failed", "err", err)
+		return
+	}
+	resp.Body.Close()
+	slog.Info("disconnected from orchestrator", "clientID", clientID)
 }
 
 func deregisterFromOrchestrator(controlURL, serverName string) {

@@ -34,11 +34,15 @@ func (c *ControlAPI) Handler() http.Handler {
 	mux.HandleFunc("GET /__mdp/proxies", c.handleListProxies)
 	mux.HandleFunc("POST /__mdp/register", c.handleRegister)
 	mux.HandleFunc("DELETE /__mdp/register/{name...}", c.handleDeregister)
+	mux.HandleFunc("PATCH /__mdp/register/{name...}", c.handleUpdatePID)
 	mux.HandleFunc("POST /__mdp/proxies/{port}/default/{name...}", c.handleSetDefault)
 	mux.HandleFunc("DELETE /__mdp/proxies/{port}/default", c.handleClearDefault)
 	mux.HandleFunc("GET /__mdp/groups", c.handleListGroups)
 	mux.HandleFunc("POST /__mdp/groups/{name}/switch", c.handleSwitchGroup)
 	mux.HandleFunc("GET /__mdp/services", c.handleListServices)
+	mux.HandleFunc("POST /__mdp/heartbeat", c.handleHeartbeat)
+	mux.HandleFunc("POST /__mdp/disconnect", c.handleDisconnect)
+	mux.HandleFunc("GET /__mdp/shutdown/watch", c.handleShutdownWatch)
 	mux.HandleFunc("POST /__mdp/shutdown", c.handleShutdown)
 	mux.HandleFunc("GET /__mdp/events", api.SSEHandler(c.orch.Broadcaster()))
 	return corsMiddleware(mux)
@@ -120,6 +124,7 @@ type controlRegisterBody struct {
 	Scheme      string `json:"scheme"`
 	TLSCertPath string `json:"tlsCertPath"`
 	TLSKeyPath  string `json:"tlsKeyPath"`
+	ClientID    string `json:"clientID"`
 }
 
 func (c *ControlAPI) handleRegister(w http.ResponseWriter, r *http.Request) {
@@ -153,10 +158,14 @@ func (c *ControlAPI) handleRegister(w http.ResponseWriter, r *http.Request) {
 		Scheme:      scheme,
 		TLSCertPath: body.TLSCertPath,
 		TLSKeyPath:  body.TLSKeyPath,
+		ClientID:    body.ClientID,
 	}
 	if err := c.orch.Register(body.ProxyPort, entry); err != nil {
 		writeJSON(w, http.StatusInternalServerError, map[string]string{"error": err.Error()})
 		return
+	}
+	if body.ClientID != "" {
+		c.orch.Heartbeat(body.ClientID)
 	}
 	// Dynamically load the service's TLS cert into the proxy cert store.
 	if body.TLSCertPath != "" && body.TLSKeyPath != "" {
@@ -180,6 +189,27 @@ func (c *ControlAPI) handleDeregister(w http.ResponseWriter, r *http.Request) {
 		}
 	}
 	writeJSON(w, http.StatusOK, map[string]any{"ok": true, "deleted": deleted})
+}
+
+func (c *ControlAPI) handleUpdatePID(w http.ResponseWriter, r *http.Request) {
+	name := r.PathValue("name")
+	if name == "" {
+		writeJSON(w, http.StatusBadRequest, map[string]string{"error": "name is required"})
+		return
+	}
+	var body struct {
+		PID int `json:"pid"`
+	}
+	if err := json.NewDecoder(r.Body).Decode(&body); err != nil {
+		writeJSON(w, http.StatusBadRequest, map[string]string{"error": "invalid JSON body"})
+		return
+	}
+	if body.PID <= 0 {
+		writeJSON(w, http.StatusBadRequest, map[string]string{"error": "pid must be positive"})
+		return
+	}
+	updated := c.orch.UpdatePID(name, body.PID)
+	writeJSON(w, http.StatusOK, map[string]any{"ok": true, "updated": updated})
 }
 
 func (c *ControlAPI) handleSetDefault(w http.ResponseWriter, r *http.Request) {
@@ -244,6 +274,47 @@ func (c *ControlAPI) handleListServices(w http.ResponseWriter, r *http.Request) 
 		})
 	}
 	writeJSON(w, http.StatusOK, result)
+}
+
+func (c *ControlAPI) handleHeartbeat(w http.ResponseWriter, r *http.Request) {
+	var body struct {
+		ClientID string `json:"clientID"`
+	}
+	if err := json.NewDecoder(r.Body).Decode(&body); err != nil {
+		writeJSON(w, http.StatusBadRequest, map[string]string{"error": "invalid JSON body"})
+		return
+	}
+	if body.ClientID == "" {
+		writeJSON(w, http.StatusBadRequest, map[string]string{"error": "clientID is required"})
+		return
+	}
+	c.orch.Heartbeat(body.ClientID)
+	writeJSON(w, http.StatusOK, map[string]bool{"ok": true})
+}
+
+func (c *ControlAPI) handleDisconnect(w http.ResponseWriter, r *http.Request) {
+	var body struct {
+		ClientID string `json:"clientID"`
+	}
+	if err := json.NewDecoder(r.Body).Decode(&body); err != nil {
+		writeJSON(w, http.StatusBadRequest, map[string]string{"error": "invalid JSON body"})
+		return
+	}
+	if body.ClientID == "" {
+		writeJSON(w, http.StatusBadRequest, map[string]string{"error": "clientID is required"})
+		return
+	}
+	removed := c.orch.Disconnect(body.ClientID)
+	writeJSON(w, http.StatusOK, map[string]any{"ok": true, "removed": removed})
+}
+
+func (c *ControlAPI) handleShutdownWatch(w http.ResponseWriter, r *http.Request) {
+	select {
+	case <-c.orch.ShutdownCh():
+		writeJSON(w, http.StatusOK, map[string]bool{"shutting_down": true})
+	case <-r.Context().Done():
+		// client disconnected
+	}
 }
 
 func (c *ControlAPI) handleShutdown(w http.ResponseWriter, r *http.Request) {
