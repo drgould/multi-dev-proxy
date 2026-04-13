@@ -166,9 +166,9 @@ func (rb *RemoteBackend) fetchProxies() ([]orchestrator.ProxySnapshot, error) {
 
 	result := make([]orchestrator.ProxySnapshot, 0, len(raw))
 	for _, rp := range raw {
-		servers := make([]*registry.ServerEntry, 0, len(rp.Servers))
+		servers := make([]registry.ServerEntry, 0, len(rp.Servers))
 		for _, rs := range rp.Servers {
-			servers = append(servers, &registry.ServerEntry{
+			servers = append(servers, registry.ServerEntry{
 				Name:  rs.Name,
 				Port:  rs.Port,
 				PID:   rs.PID,

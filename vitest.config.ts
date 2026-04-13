@@ -5,7 +5,7 @@ export default defineConfig({
     testTimeout: 60_000,
     hookTimeout: 30_000,
     retry: 1,
-    include: ['e2e/**/*.spec.ts'],
+    include: ['e2e/**/*.test.ts'],
     fileParallelism: false,
     sequence: { concurrent: false },
   },

@@ -61,6 +61,10 @@ type Orchestrator struct {
 	cfg      *config.Config
 	host     string
 
+	sessions     *SessionTracker
+	shutdownCh   chan struct{}
+	shutdownOnce sync.Once
+
 	certMu sync.RWMutex
 	certs  []tls.Certificate // dynamically loaded certs from services
 }
@@ -71,11 +75,13 @@ func New(cfg *config.Config, host string) *Orchestrator {
 		host = "0.0.0.0"
 	}
 	return &Orchestrator{
-		proxies:  make(map[int]*ProxyInstance),
-		services: make(map[string]*ManagedService),
-		events:   make(chan Event, 256),
-		cfg:      cfg,
-		host:     host,
+		proxies:    make(map[int]*ProxyInstance),
+		services:   make(map[string]*ManagedService),
+		events:     make(chan Event, 256),
+		cfg:        cfg,
+		host:       host,
+		sessions:   NewSessionTracker(),
+		shutdownCh: make(chan struct{}),
 	}
 }
 
@@ -252,7 +258,7 @@ func (o *Orchestrator) createProxyLocked(port int, label string) (*ProxyInstance
 	}
 
 	ctx, cancel := context.WithCancel(context.Background())
-	registry.StartPruner(ctx, reg, 10*time.Second, process.IsProcessAlive)
+	registry.StartPruner(ctx, reg, 10*time.Second, process.IsProcessAlive, registry.TCPCheck)
 
 	ln, listenErr := net.Listen("tcp", addr)
 	if listenErr != nil {
@@ -304,6 +310,65 @@ func (o *Orchestrator) Register(proxyPort int, entry *registry.ServerEntry) erro
 	}
 	o.emit(Event{Type: "registered", Port: proxyPort, Name: entry.Name})
 	return nil
+}
+
+// Heartbeat updates the heartbeat timestamp for a client session.
+func (o *Orchestrator) Heartbeat(clientID string) {
+	o.sessions.Touch(clientID)
+}
+
+// Disconnect removes a client session and deregisters all its servers.
+func (o *Orchestrator) Disconnect(clientID string) int {
+	if clientID == "" {
+		return 0
+	}
+	o.sessions.Remove(clientID)
+	total := 0
+	for _, pi := range o.ListProxies() {
+		removed := pi.Registry.DeregisterByClientID(clientID)
+		for _, name := range removed {
+			o.emit(Event{Type: "deregistered", Port: pi.Port, Name: name})
+		}
+		total += len(removed)
+	}
+	if total > 0 {
+		slog.Info("client disconnected", "clientID", clientID, "removed", total)
+	}
+	return total
+}
+
+// ShutdownCh returns a channel that is closed when the orchestrator shuts down.
+func (o *Orchestrator) ShutdownCh() <-chan struct{} {
+	return o.shutdownCh
+}
+
+// StartSessionPruner launches a goroutine that cleans up stale client sessions.
+func (o *Orchestrator) StartSessionPruner(ctx context.Context, interval, maxAge time.Duration) {
+	go func() {
+		ticker := time.NewTicker(interval)
+		defer ticker.Stop()
+		for {
+			select {
+			case <-ctx.Done():
+				return
+			case <-ticker.C:
+				for _, id := range o.sessions.StaleIDs(maxAge) {
+					o.Disconnect(id)
+				}
+			}
+		}
+	}()
+}
+
+// UpdatePID updates the PID for a named server across all proxies.
+func (o *Orchestrator) UpdatePID(name string, pid int) bool {
+	updated := false
+	for _, pi := range o.ListProxies() {
+		if pi.Registry.UpdatePID(name, pid) {
+			updated = true
+		}
+	}
+	return updated
 }
 
 // SetDefault sets the default upstream on a specific proxy port.
@@ -381,7 +446,7 @@ type ProxySnapshot struct {
 	Label      string
 	CookieName string
 	Default    string
-	Servers    []*registry.ServerEntry
+	Servers    []registry.ServerEntry
 }
 
 // ServiceSnapshot is a snapshot of a managed service.
@@ -480,6 +545,8 @@ func (o *Orchestrator) ListServices() []*ManagedService {
 
 // Shutdown gracefully shuts down all proxies and managed services.
 func (o *Orchestrator) Shutdown(ctx context.Context) {
+	o.shutdownOnce.Do(func() { close(o.shutdownCh) })
+
 	o.mu.Lock()
 	defer o.mu.Unlock()
 

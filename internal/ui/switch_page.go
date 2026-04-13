@@ -13,12 +13,12 @@ import (
 
 // RenderSwitchPage renders the server switcher HTML page.
 // activeServer is the name of the currently active server (from cookie), or "".
-func RenderSwitchPage(servers []*registry.ServerEntry) string {
+func RenderSwitchPage(servers []registry.ServerEntry) string {
 	if len(servers) == 0 {
 		return renderEmpty()
 	}
 
-	groups := make(map[string][]*registry.ServerEntry)
+	groups := make(map[string][]registry.ServerEntry)
 	for _, e := range servers {
 		groups[e.Repo] = append(groups[e.Repo], e)
 	}
@@ -37,7 +37,7 @@ func RenderSwitchPage(servers []*registry.ServerEntry) string {
 	return renderPage(sb.String())
 }
 
-func renderRepoGroup(repo string, entries []*registry.ServerEntry) string {
+func renderRepoGroup(repo string, entries []registry.ServerEntry) string {
 	sort.Slice(entries, func(i, j int) bool { return entries[i].Name < entries[j].Name })
 	var sb strings.Builder
 	sb.WriteString(fmt.Sprintf(`<div class="repo-group"><h2 class="repo-name">%s</h2><table>`, html.EscapeString(repo)))
