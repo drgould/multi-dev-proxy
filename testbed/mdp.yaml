@@ -1,46 +1,68 @@
 services:
-  # === dev environment: Vite frontend + Echo API backend ===
-  vite:
-    command: npm --prefix ./vite-ts run dev
+  # === main branch (TLS frontend + Docker API) ===
+  web-main:
+    command: ./server/server
     proxy: 3000
-    group: dev
+    group: main
+    scheme: https
     tls_cert: .certs/localhost.pem
     tls_key: .certs/localhost-key.pem
+    env:
+      NAME: "web / main"
+      COLOR: "#0f2027,#203a43,#2c5364"
+      API_URL: "http://localhost:3001"
 
-  echo:
-    command: ./echo-api/echo-api
-    proxy: 3001
-    group: dev
-
-  # === staging environment: Next.js frontend + Docker backend ===
-  next:
-    command: npm --prefix ./nextjs run dev
-    proxy: 3000
-    group: staging
-
-  docker:
+  api-main:
     command: docker compose up --build --wait
     dir: ./docker
     proxy: 3001
-    group: staging
+    group: main
     env:
-      NGINX_PORT: auto
+      PORT: auto
+      NAME: "api / main"
+      COLOR: "#1a0a2e,#3d1659,#6b21a8"
+      MODE: api
     ports:
-      - env: NGINX_PORT
+      - env: PORT
         proxy: 3001
-        name: docker
+        name: api-main
 
-  # === ungrouped frontends (manual switch on :3000 only) ===
-  vue:
-    command: npm --prefix ./vue run dev
+  # === feature-a branch ===
+  web-feature-a:
+    command: ./server/server
     proxy: 3000
+    group: feature-a
+    env:
+      NAME: "web / feature-a"
+      COLOR: "#0a2e1a,#16593d,#21a86b"
+      API_URL: "http://localhost:3001"
 
-  svelte:
-    command: npm --prefix ./svelte run dev
-    proxy: 3000
+  api-feature-a:
+    command: ./server/server
+    proxy: 3001
+    group: feature-a
+    env:
+      NAME: "api / feature-a"
+      COLOR: "#2e2a0a,#595216,#a89c21"
+      MODE: api
 
-  go-websocket:
-    command: ./go-websocket/go-websocket
+  # === feature-b branch ===
+  web-feature-b:
+    command: ./server/server
     proxy: 3000
+    group: feature-b
+    env:
+      NAME: "web / feature-b"
+      COLOR: "#2e0a0a,#591616,#a82121"
+      API_URL: "http://localhost:3001"
+
+  api-feature-b:
+    command: ./server/server
+    proxy: 3001
+    group: feature-b
+    env:
+      NAME: "api / feature-b"
+      COLOR: "#0a1a2e,#163d59,#216ba8"
+      MODE: api
 
 port_range: "10000-60000"

@@ -92,8 +92,8 @@ func (p *Proxy) SetModifyResponse(fn func(*http.Response) error) {
 	}
 }
 
-func (p *Proxy) resolve(cookieHeader string) routing.ResolveResult {
-	return routing.ResolveUpstream(p.reg, cookieHeader, p.cookieName, p.reg.GetDefault())
+func (p *Proxy) resolve(cookieHeader, queryUpstream string) routing.ResolveResult {
+	return routing.ResolveUpstream(p.reg, cookieHeader, p.cookieName, p.reg.GetDefault(), queryUpstream)
 }
 
 type contextKey struct{}
@@ -132,7 +132,8 @@ func (p *Proxy) rewrite(r *httputil.ProxyRequest) {
 // ServeHTTP implements http.Handler.
 func (p *Proxy) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 	cookieHeader := r.Header.Get("Cookie")
-	result := p.resolve(cookieHeader)
+	queryUpstream := r.URL.Query().Get(routing.QueryParamName)
+	result := p.resolve(cookieHeader, queryUpstream)
 
 	if result.Redirect || result.Entry == nil {
 		http.Redirect(w, r, switchPagePath, http.StatusFound)

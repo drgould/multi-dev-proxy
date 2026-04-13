@@ -54,12 +54,13 @@ type ManagedService struct {
 
 // Orchestrator manages proxy instances, services, and groups.
 type Orchestrator struct {
-	mu       sync.RWMutex
-	proxies  map[int]*ProxyInstance
-	services map[string]*ManagedService
-	events   chan Event
-	cfg      *config.Config
-	host     string
+	mu          sync.RWMutex
+	proxies     map[int]*ProxyInstance
+	services    map[string]*ManagedService
+	events      chan Event
+	broadcaster *ui.Broadcaster
+	cfg         *config.Config
+	host        string
 
 	sessions     *SessionTracker
 	shutdownCh   chan struct{}
@@ -75,13 +76,14 @@ func New(cfg *config.Config, host string) *Orchestrator {
 		host = "0.0.0.0"
 	}
 	return &Orchestrator{
-		proxies:    make(map[int]*ProxyInstance),
-		services:   make(map[string]*ManagedService),
-		events:     make(chan Event, 256),
-		cfg:        cfg,
-		host:       host,
-		sessions:   NewSessionTracker(),
-		shutdownCh: make(chan struct{}),
+		proxies:     make(map[int]*ProxyInstance),
+		services:    make(map[string]*ManagedService),
+		events:      make(chan Event, 256),
+		broadcaster: ui.NewBroadcaster(),
+		cfg:         cfg,
+		host:        host,
+		sessions:    NewSessionTracker(),
+		shutdownCh:  make(chan struct{}),
 	}
 }
 
@@ -183,6 +185,12 @@ func (o *Orchestrator) emit(e Event) {
 	case o.events <- e:
 	default:
 	}
+	o.broadcaster.Notify()
+}
+
+// Broadcaster returns the SSE event broadcaster for wiring into HTTP handlers.
+func (o *Orchestrator) Broadcaster() *ui.Broadcaster {
+	return o.broadcaster
 }
 
 // EnsureProxy returns an existing proxy instance or creates a new one.
@@ -232,8 +240,10 @@ func (o *Orchestrator) createProxyLocked(port int, label string) (*ProxyInstance
 	mux.HandleFunc("DELETE /__mdp/register/{name...}", api.DeregisterHandler(reg))
 	mux.HandleFunc("POST /__mdp/switch/{name...}", api.SwitchHandler(reg, cookieName, prx, port))
 	mux.HandleFunc("GET /__mdp/last-path/{name...}", api.LastPathHandler(prx))
-	mux.HandleFunc("GET /__mdp/switch", ui.SwitchPageHandler(reg))
+	mux.HandleFunc("GET /__mdp/switch", ui.SwitchPageHandler())
 	mux.HandleFunc("GET /__mdp/widget.js", ui.WidgetHandler())
+	mux.HandleFunc("GET /__mdp/sw.js", ui.ServiceWorkerHandler())
+	mux.HandleFunc("GET /__mdp/events", api.SSEHandler(o.broadcaster))
 	mux.HandleFunc("GET /__mdp/default", api.DefaultHandler(reg))
 	mux.HandleFunc("DELETE /__mdp/default", api.DefaultHandler(reg))
 	mux.HandleFunc("POST /__mdp/default/{name...}", api.DefaultSetHandler(reg))
