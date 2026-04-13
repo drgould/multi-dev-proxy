@@ -109,7 +109,6 @@ func runBatchMode(cmd *cobra.Command, controlPort int, groupFlag string) error {
 	}
 
 	bt := &batchTracker{}
-	var registeredNames []string
 
 	for name, svc := range cfg.Services {
 		if svc.Command == "" && svc.Port == 0 {
@@ -122,11 +121,9 @@ func runBatchMode(cmd *cobra.Command, controlPort int, groupFlag string) error {
 		}
 
 		if len(svc.Ports) > 0 {
-			names, err := registerMultiPortBatch(client, controlURL, name, svc, svcGroup, portRange, bt, clientID)
-			if err != nil {
+			if _, err := registerMultiPortBatch(client, controlURL, name, svc, svcGroup, portRange, bt, clientID); err != nil {
 				return fmt.Errorf("register multi-port service %q: %w", name, err)
 			}
-			registeredNames = append(registeredNames, names...)
 			continue
 		}
 
@@ -163,7 +160,6 @@ func runBatchMode(cmd *cobra.Command, controlPort int, groupFlag string) error {
 			if resp.StatusCode != http.StatusOK {
 				return fmt.Errorf("register %q failed (status %d)", serverName, resp.StatusCode)
 			}
-			registeredNames = append(registeredNames, serverName)
 		}
 
 		if svc.Command != "" {
