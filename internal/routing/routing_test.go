@@ -256,7 +256,7 @@ func TestResolveUpstream(t *testing.T) {
 			if tt.name == "custom cookie name" {
 				cookieName = "__mdp_upstream_4000"
 			}
-			result := ResolveUpstream(reg, tt.cookieHeader, cookieName, tt.defaultServer)
+			result := ResolveUpstream(reg, tt.cookieHeader, cookieName, tt.defaultServer, "")
 
 			if result.Redirect != tt.expectedRedirect {
 				t.Errorf("redirect: got %v, expected %v", result.Redirect, tt.expectedRedirect)

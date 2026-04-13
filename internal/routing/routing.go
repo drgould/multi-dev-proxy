@@ -49,13 +49,18 @@ type ResolveResult struct {
 	Redirect bool                  // true if should redirect to /__mdp/switch
 }
 
-// ResolveUpstream picks the upstream server based on registry state, cookie, and default.
+// QueryParamName is the query parameter that overrides cookie-based routing.
+// This enables per-iframe and per-tab routing without shared cookie conflicts.
+const QueryParamName = "__mdp_upstream"
+
+// ResolveUpstream picks the upstream server based on registry state, query param, cookie, and default.
 //   - 0 servers → {nil, false} (show empty switch page inline)
 //   - 1 server  → {that server, false} (auto-route, no cookie needed)
+//   - query param match → {matched server, false} (highest priority)
 //   - N servers + valid cookie → {matched server, false}
 //   - N servers + valid default → {default server, false}
 //   - N servers + no cookie/default → {nil, true} (redirect to switch page)
-func ResolveUpstream(reg *registry.Registry, cookieHeader, cookieName, defaultServer string) ResolveResult {
+func ResolveUpstream(reg *registry.Registry, cookieHeader, cookieName, defaultServer, queryUpstream string) ResolveResult {
 	count := reg.Count()
 	if count == 0 {
 		return ResolveResult{}
@@ -63,6 +68,13 @@ func ResolveUpstream(reg *registry.Registry, cookieHeader, cookieName, defaultSe
 	entries := reg.List()
 	if count == 1 {
 		return ResolveResult{Entry: entries[0]}
+	}
+
+	// Query param takes highest priority — enables per-iframe routing.
+	if queryUpstream != "" {
+		if entry := reg.Get(queryUpstream); entry != nil {
+			return ResolveResult{Entry: entry}
+		}
 	}
 
 	cookies := ParseCookies(cookieHeader)

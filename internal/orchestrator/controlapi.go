@@ -11,7 +11,9 @@ import (
 	"strconv"
 	"strings"
 
+	"github.com/derekgould/multi-dev-proxy/internal/api"
 	"github.com/derekgould/multi-dev-proxy/internal/registry"
+	"github.com/derekgould/multi-dev-proxy/internal/ui"
 )
 
 // ControlAPI handles the orchestrator HTTP control endpoints.
@@ -38,7 +40,29 @@ func (c *ControlAPI) Handler() http.Handler {
 	mux.HandleFunc("POST /__mdp/groups/{name}/switch", c.handleSwitchGroup)
 	mux.HandleFunc("GET /__mdp/services", c.handleListServices)
 	mux.HandleFunc("POST /__mdp/shutdown", c.handleShutdown)
-	return mux
+	mux.HandleFunc("GET /__mdp/events", api.SSEHandler(c.orch.Broadcaster()))
+	return corsMiddleware(mux)
+}
+
+// corsMiddleware adds CORS headers to allow the dashboard (on a different port)
+// to call the control API.
+func corsMiddleware(next http.Handler) http.Handler {
+	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		origin := r.Header.Get("Origin")
+		if origin != "" {
+			w.Header().Set("Access-Control-Allow-Origin", origin)
+			w.Header().Set("Access-Control-Allow-Credentials", "true")
+		} else {
+			w.Header().Set("Access-Control-Allow-Origin", "*")
+		}
+		w.Header().Set("Access-Control-Allow-Methods", "GET, POST, DELETE, OPTIONS")
+		w.Header().Set("Access-Control-Allow-Headers", "Content-Type")
+		if r.Method == http.MethodOptions {
+			w.WriteHeader(http.StatusNoContent)
+			return
+		}
+		next.ServeHTTP(w, r)
+	})
 }
 
 func writeJSON(w http.ResponseWriter, status int, v any) {
@@ -227,6 +251,30 @@ func (c *ControlAPI) handleShutdown(w http.ResponseWriter, r *http.Request) {
 	if c.shutdownFn != nil {
 		go c.shutdownFn()
 	}
+}
+
+// StartDashboardServer starts the dashboard web UI on the given port.
+// controlPort is the port of the control API that the dashboard JS will call.
+func StartDashboardServer(controlPort, dashboardPort int) (*http.Server, error) {
+	mux := http.NewServeMux()
+	mux.HandleFunc("/", ui.DashboardHandler(controlPort))
+
+	addr := fmt.Sprintf("127.0.0.1:%d", dashboardPort)
+	ln, err := net.Listen("tcp", addr)
+	if err != nil {
+		return nil, fmt.Errorf("dashboard listen on %s: %w", addr, err)
+	}
+	srv := &http.Server{
+		Handler:  mux,
+		ErrorLog: log.New(io.Discard, "", 0),
+	}
+	go func() {
+		if err := srv.Serve(ln); err != nil && err != http.ErrServerClosed {
+			slog.Error("dashboard serve failed", "addr", addr, "err", err)
+		}
+	}()
+	slog.Info("dashboard started", "url", fmt.Sprintf("http://localhost:%d", dashboardPort))
+	return srv, nil
 }
 
 // StartControlServer starts the control API server on the given port.

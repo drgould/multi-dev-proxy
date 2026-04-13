@@ -18,6 +18,103 @@
 		document.cookie = `${COOKIE}=${encodeURIComponent(name)}; path=/; SameSite=Lax`;
 	}
 
+	// --- Service worker routing ---
+	// Provides per-tab/per-iframe routing isolation using clientId.
+
+	const urlParams = new URLSearchParams(location.search);
+	const pinnedUpstream = urlParams.get("__mdp_upstream");
+	const pinnedPortsParam = urlParams.get("__mdp_ports");
+
+	// Parse port map from query param: "3000:web-main,3001:api-main"
+	function parsePortMap(s) {
+		if (!s) return null;
+		const map = {};
+		for (const pair of s.split(",")) {
+			const sep = pair.indexOf(":");
+			if (sep > 0) map[pair.slice(0, sep)] = pair.slice(sep + 1);
+		}
+		return Object.keys(map).length > 0 ? map : null;
+	}
+
+	function registerSW(ports) {
+		if (!("serviceWorker" in navigator) || !ports) return;
+		navigator.serviceWorker
+			.register("/__mdp/sw.js", { scope: "/" })
+			.then((reg) => {
+				function sendPin(sw) {
+					sw.postMessage({ type: "pin", ports });
+				}
+				const sw = reg.active || reg.installing || reg.waiting;
+				if (sw && sw.state === "activated") {
+					sendPin(sw);
+				}
+				// Listen for new or activating workers
+				function onStateChange() {
+					if (this.state === "activated") sendPin(this);
+				}
+				if (reg.installing) reg.installing.addEventListener("statechange", onStateChange);
+				if (reg.waiting) reg.waiting.addEventListener("statechange", onStateChange);
+				reg.addEventListener("updatefound", () => {
+					if (reg.installing) reg.installing.addEventListener("statechange", onStateChange);
+				});
+			});
+	}
+
+	// Build port map from config: find the group the active server belongs to,
+	// then map each sibling proxy port to the group member on that port.
+	function buildPortMap(activeName) {
+		if (!config || !activeName) return null;
+		const groups = config.groups || {};
+		let groupName = null;
+		for (const [gn, members] of Object.entries(groups)) {
+			if (members.includes(activeName)) {
+				groupName = gn;
+				break;
+			}
+		}
+		if (!groupName) return null;
+		const members = groups[groupName];
+		const ports = {};
+		// Current proxy port → active server
+		ports[String(config.port)] = activeName;
+		// Sibling proxy ports → one unique group member per sibling.
+		// Keep assignment stable by iterating members in declared order.
+		const remainingMembers = members.filter((m) => m !== activeName);
+		if (config.siblings) {
+			for (const sib of config.siblings) {
+				const next = remainingMembers.shift();
+				if (!next) break;
+				ports[String(sib.port)] = next;
+			}
+		}
+		return Object.keys(ports).length > 0 ? ports : null;
+	}
+
+	// If we have an explicit port map from query params, register immediately.
+	if (pinnedPortsParam) {
+		registerSW(parsePortMap(pinnedPortsParam));
+	}
+
+	// Click interceptor fallback for pre-SW-activation navigations
+	if (pinnedUpstream) {
+		document.addEventListener(
+			"click",
+			(e) => {
+				const a = e.target.closest ? e.target.closest("a") : null;
+				if (!a || !a.href) return;
+				try {
+					const url = new URL(a.href);
+					if (url.origin === location.origin && !url.searchParams.has("__mdp_upstream")) {
+						url.searchParams.set("__mdp_upstream", pinnedUpstream);
+						if (pinnedPortsParam) url.searchParams.set("__mdp_ports", pinnedPortsParam);
+						a.href = url.toString();
+					}
+				} catch { /* ignore */ }
+			},
+			true,
+		);
+	}
+
 	function getTheme() {
 		const m = document.cookie.match(/(?:^|; )__mdp_theme=([^;]*)/);
 		if (m) return m[1];
@@ -171,6 +268,9 @@
 					const targetBase = `${targetScheme}://${location.hostname}:${location.port}`;
 					item.onclick = async () => {
 						setCookie(fullName);
+						// Update SW with new server's port map
+						const ports = buildPortMap(fullName);
+						if (ports) registerSW(ports);
 						try {
 							const resp = await fetch(`/__mdp/last-path/${encodeURIComponent(fullName)}`);
 							if (resp.ok) {
@@ -232,13 +332,15 @@
 		} catch { /* ignore */ }
 	}
 
+	let swRegistered = !!pinnedPortsParam; // already registered if multiview
+
 	async function poll() {
 		try {
 			await fetchConfig();
 			const resp = await fetch(API_SERVERS, { signal: AbortSignal.timeout(1000) });
 			if (!resp.ok) return;
 			servers = await resp.json();
-			const active = getCookie();
+			const active = pinnedUpstream || getCookie();
 			const allNames = Object.keys(servers).flatMap((r) =>
 				Object.keys(servers[r]),
 			);
@@ -246,12 +348,26 @@
 				active && allNames.includes(active) ? active : allNames[0] || null;
 			host.setAttribute("data-theme", getTheme());
 			render(servers, activeName);
+
+			// Register SW with port map for normal tabs (non-multiview)
+			if (!swRegistered && activeName && config) {
+				const ports = buildPortMap(activeName);
+				if (ports) {
+					registerSW(ports);
+					swRegistered = true;
+				}
+			}
 		} catch {
 			/* proxy not reachable */
 		}
 	}
 
 	poll();
+	// SSE for real-time updates, with polling fallback
+	if (typeof EventSource !== "undefined") {
+		const es = new EventSource("/__mdp/events");
+		es.onmessage = () => poll();
+	}
 	setInterval(poll, POLL_MS);
 
 	document.addEventListener("click", (e) => {

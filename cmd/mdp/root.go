@@ -44,6 +44,7 @@ func init() {
 	rootCmd.Flags().Bool("stop", false, "Stop the background daemon")
 	rootCmd.Flags().String("config", "", "Path to mdp.yaml (auto-detected if not set)")
 	rootCmd.Flags().String("host", "0.0.0.0", "Host for proxy listeners")
+	rootCmd.Flags().Int("dashboard-port", 6370, "Dashboard web UI port")
 }
 
 func runOrchestrator(cmd *cobra.Command, args []string) error {
@@ -102,7 +103,13 @@ func runDaemonProcess(cmd *cobra.Command, controlPort int) error {
 		return fmt.Errorf("start control API: %w", err)
 	}
 
-	slog.Info("mdp orchestrator started (daemon)", "control-port", controlPort)
+	dashboardPort, _ := cmd.Flags().GetInt("dashboard-port")
+	dashSrv, err := orchestrator.StartDashboardServer(controlPort, dashboardPort)
+	if err != nil {
+		slog.Warn("failed to start dashboard", "port", dashboardPort, "err", err)
+	}
+
+	slog.Info("mdp orchestrator started (daemon)", "control-port", controlPort, "dashboard-port", dashboardPort)
 
 	sigCh := make(chan os.Signal, 1)
 	signal.Notify(sigCh, syscall.SIGINT, syscall.SIGTERM)
@@ -119,6 +126,9 @@ func runDaemonProcess(cmd *cobra.Command, controlPort int) error {
 
 	ctrlCtx, ctrlCancel := context.WithTimeout(context.Background(), 2*time.Second)
 	ctrlSrv.Shutdown(ctrlCtx)
+	if dashSrv != nil {
+		dashSrv.Shutdown(ctrlCtx)
+	}
 	ctrlCancel()
 	return nil
 }

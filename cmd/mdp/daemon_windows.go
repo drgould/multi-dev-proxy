@@ -45,7 +45,7 @@ func startDaemon(controlPort int) error {
 	}
 
 	args := []string{exe, "--control-port", strconv.Itoa(controlPort)}
-	for _, flag := range []string{"config", "host"} {
+	for _, flag := range []string{"config", "host", "dashboard-port"} {
 		if f := rootCmd.Flags().Lookup(flag); f != nil && f.Changed {
 			args = append(args, "--"+flag, f.Value.String())
 		}
