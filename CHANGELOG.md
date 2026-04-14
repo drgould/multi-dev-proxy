@@ -1,5 +1,30 @@
 # Changelog
 
+## [1.3.0](https://github.com/drgould/multi-dev-proxy/compare/v1.2.0...v1.3.0) (2026-04-14)
+
+
+### Features
+
+* add API handlers, WS header fix, port detection (Tasks 7, 9, 14) ([09fc0b7](https://github.com/drgould/multi-dev-proxy/commit/09fc0b7e7d7259f788594b2da2d0781b4560716c))
+* add client session lifecycle cleanup ([460598e](https://github.com/drgould/multi-dev-proxy/commit/460598e6886b1e83359a2d4d5d8b3457147739db))
+* add HTML dashboard, service worker routing, and SSE updates ([#4](https://github.com/drgould/multi-dev-proxy/issues/4)) ([740d7e2](https://github.com/drgould/multi-dev-proxy/commit/740d7e27e40a405e7f7507f806cd6b0eca6fcd4d))
+* add proxy core, HTML injection, process manager (Tasks 8, 10, 13) ([4a96bb9](https://github.com/drgould/multi-dev-proxy/commit/4a96bb957933e0d40450b90c11ce570e466e61a7))
+* add Scoop bucket distribution ([99fdfbc](https://github.com/drgould/multi-dev-proxy/commit/99fdfbc552e489f1fbdb65e6f357894f65509de3))
+* add switch page, widget UI (Tasks 11, 12) ([2c798dc](https://github.com/drgould/multi-dev-proxy/commit/2c798dcc981f47c0ca5958a8863404e23f8485e3))
+* add TLS cert forwarding, auto-detect upstream scheme, dynamic HTTPS upgrade ([a1b6195](https://github.com/drgould/multi-dev-proxy/commit/a1b61950d7e4c3be1fe141479160c7fb67e35079))
+* add Wave 1 internal packages (registry, routing, ports, detect, process) ([747b111](https://github.com/drgould/multi-dev-proxy/commit/747b111e70cfe70e5d304067e374e7365bd780ac))
+* implement mdp start, run, register commands and pruner (Tasks 15-19) ([8a833c5](https://github.com/drgould/multi-dev-proxy/commit/8a833c5e300d04dcb1941cc453d8b3cd90927cf8))
+
+
+### Bug Fixes
+
+* correct license references from MIT to GPL-3.0 ([ca244b2](https://github.com/drgould/multi-dev-proxy/commit/ca244b22f3a2a0d1a946fdc38a68f20b86cff3b7))
+* exclude component name from release tags ([#6](https://github.com/drgould/multi-dev-proxy/issues/6)) ([26b5514](https://github.com/drgould/multi-dev-proxy/commit/26b55141df46cfea128cf8c4aaa13ff3a31a7f54))
+* **proxy:** eliminate ModifyResponse race by moving location rewrite to NewProxy ([2756268](https://github.com/drgould/multi-dev-proxy/commit/2756268843f97249488c73a5cf3a745ec37a94da))
+* put replace_existing_artifacts under release (not release.github) ([c4a9533](https://github.com/drgould/multi-dev-proxy/commit/c4a953331583c89f08bcbd685c829aa4c0c1d041))
+* remove unused registeredNames variable ([8ddd130](https://github.com/drgould/multi-dev-proxy/commit/8ddd1309470d1a0e6c7a6104f967e26e2d1ad759))
+* simplify indicator pill to show only groups with member services ([#2](https://github.com/drgould/multi-dev-proxy/issues/2)) ([807ee1b](https://github.com/drgould/multi-dev-proxy/commit/807ee1be789d2b4f32148500692544879db1fc0e))
+
 ## [1.2.0](https://github.com/drgould/multi-dev-proxy/compare/mdp-v1.1.2...mdp-v1.2.0) (2026-04-13)
 
 
