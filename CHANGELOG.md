@@ -1,5 +1,12 @@
 # Changelog
 
+## [1.3.1](https://github.com/drgould/multi-dev-proxy/compare/v1.3.0...v1.3.1) (2026-04-14)
+
+
+### Bug Fixes
+
+* run goreleaser in release-please workflow ([#8](https://github.com/drgould/multi-dev-proxy/issues/8)) ([08b4c3d](https://github.com/drgould/multi-dev-proxy/commit/08b4c3d81acf7ed2da002320cb3cf1e432de246d))
+
 ## [1.3.0](https://github.com/drgould/multi-dev-proxy/compare/v1.2.0...v1.3.0) (2026-04-14)
 
 
