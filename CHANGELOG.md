@@ -1,5 +1,13 @@
 # Changelog
 
+## [1.4.0](https://github.com/drgould/multi-dev-proxy/compare/v1.3.1...v1.4.0) (2026-04-21)
+
+
+### Features
+
+* interpolate ${svc.port} references in service env values ([d50ec99](https://github.com/drgould/multi-dev-proxy/commit/d50ec996d73ce9295e8f26e38bc0efdb3721dbdc))
+* redirect clients to the upstream's declared scheme ([a3eda1b](https://github.com/drgould/multi-dev-proxy/commit/a3eda1b49b181a2c40ae891bc764f687f390e319))
+
 ## [1.3.1](https://github.com/drgould/multi-dev-proxy/compare/v1.3.0...v1.3.1) (2026-04-14)
 
 
