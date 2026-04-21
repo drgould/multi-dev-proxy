@@ -1,5 +1,12 @@
 # Changelog
 
+## [1.4.1](https://github.com/drgould/multi-dev-proxy/compare/v1.4.0...v1.4.1) (2026-04-21)
+
+
+### Bug Fixes
+
+* make proxy optional on multi-port service ports ([#12](https://github.com/drgould/multi-dev-proxy/issues/12)) ([d091aa6](https://github.com/drgould/multi-dev-proxy/commit/d091aa6df1b50398efcdcc173f0a201a7be182a9))
+
 ## [1.4.0](https://github.com/drgould/multi-dev-proxy/compare/v1.3.1...v1.4.0) (2026-04-21)
 
 
