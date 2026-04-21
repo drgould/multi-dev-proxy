@@ -200,6 +200,31 @@ services:
 
 When you run `mdp run`, mdp assigns free ports, sets them as environment variables, and registers each port mapping with the appropriate proxy.
 
+### Referencing another service's port
+
+Use `${service.port}` inside any `env` value to inject the assigned port of another service. `mdp` resolves these before launching, so every worktree can allocate truly random ports and still wire services together:
+
+```yaml
+services:
+  db:
+    command: docker compose up db --wait
+    # no proxy; internal only
+
+  api:
+    command: ./api
+    proxy: 4000
+    env:
+      DATABASE_URL: "postgres://app:app@localhost:${db.port}/app"
+
+  web:
+    command: npm run dev
+    proxy: 3000
+    env:
+      API_URL: "http://localhost:${api.port}"
+```
+
+For multi-port services, reference the specific env key: `${infra.API_PORT}`.
+
 ## Service groups
 
 Services are automatically grouped by their git branch name (or an explicit `--group` flag). All services sharing the same group name form a switchable group. Switching to a group sets the default upstream on every proxy at once.

@@ -24,6 +24,7 @@ import (
 
 	"github.com/derekgould/multi-dev-proxy/internal/config"
 	"github.com/derekgould/multi-dev-proxy/internal/detect"
+	"github.com/derekgould/multi-dev-proxy/internal/envexpand"
 	"github.com/derekgould/multi-dev-proxy/internal/orchestrator"
 	"github.com/derekgould/multi-dev-proxy/internal/ports"
 	"github.com/derekgould/multi-dev-proxy/internal/process"
@@ -110,46 +111,87 @@ func runBatchMode(cmd *cobra.Command, controlPort int, groupFlag string) error {
 
 	bt := &batchTracker{}
 
+	type alloc struct {
+		name            string
+		svc             config.ServiceConfig
+		svcGroup        string
+		assignedPort    int            // single-port only
+		portAssignments map[string]int // multi-port only
+	}
+	var allocations []alloc
+	portMap := envexpand.PortMap{}
+	var assignedPorts []int
+	for _, svc := range cfg.Services {
+		if svc.Port > 0 {
+			assignedPorts = append(assignedPorts, svc.Port)
+		}
+	}
+
 	for name, svc := range cfg.Services {
 		if svc.Command == "" && svc.Port == 0 {
 			continue
 		}
-
 		svcGroup := svc.Group
 		if svcGroup == "" {
 			svcGroup = group
 		}
 
 		if len(svc.Ports) > 0 {
-			if _, err := registerMultiPortBatch(client, controlURL, name, svc, svcGroup, portRange, bt, clientID); err != nil {
-				return fmt.Errorf("register multi-port service %q: %w", name, err)
+			portAssignments := make(map[string]int)
+			for envName, value := range svc.Env {
+				if value == "auto" {
+					port, err := ports.FindFreePort(portRange, assignedPorts)
+					if err != nil {
+						return fmt.Errorf("find free port for %q.%s: %w", name, envName, err)
+					}
+					portAssignments[envName] = port
+					assignedPorts = append(assignedPorts, port)
+				}
+			}
+			svcPorts := make(map[string]int, len(portAssignments))
+			for k, v := range portAssignments {
+				svcPorts[k] = v
+			}
+			portMap[name] = svcPorts
+			allocations = append(allocations, alloc{name, svc, svcGroup, 0, portAssignments})
+			continue
+		}
+
+		assignedPort := svc.Port
+		if assignedPort == 0 {
+			assignedPort, err = ports.FindFreePort(portRange, assignedPorts)
+			if err != nil {
+				return fmt.Errorf("find free port for %q: %w", name, err)
+			}
+			assignedPorts = append(assignedPorts, assignedPort)
+		}
+		portMap[name] = map[string]int{"port": assignedPort, "PORT": assignedPort}
+		allocations = append(allocations, alloc{name, svc, svcGroup, assignedPort, nil})
+	}
+
+	for _, a := range allocations {
+		if len(a.svc.Ports) > 0 {
+			if err := launchMultiPortBatch(client, controlURL, a.name, a.svc, a.svcGroup, a.portAssignments, portMap, bt, clientID); err != nil {
+				return fmt.Errorf("launch multi-port service %q: %w", a.name, err)
 			}
 			continue
 		}
 
-		serverName := fmt.Sprintf("%s/%s", svcGroup, name)
-		assignedPort := svc.Port
-		if assignedPort == 0 {
-			assignedPort, err = ports.FindFreePort(portRange, nil)
-			if err != nil {
-				return fmt.Errorf("find free port for %q: %w", name, err)
-			}
-		}
-
-		if svc.Proxy > 0 {
+		serverName := fmt.Sprintf("%s/%s", a.svcGroup, a.name)
+		if a.svc.Proxy > 0 {
 			regPayload := map[string]any{
 				"name":      serverName,
-				"port":      assignedPort,
-				"proxyPort": svc.Proxy,
-				"group":     svcGroup,
+				"port":      a.assignedPort,
+				"proxyPort": a.svc.Proxy,
+				"group":     a.svcGroup,
 				"clientID":  clientID,
 			}
-			if svc.Scheme != "" {
-				regPayload["scheme"] = svc.Scheme
+			if a.svc.Scheme != "" {
+				regPayload["scheme"] = a.svc.Scheme
 			}
-			if svc.TLSCert != "" {
-				regPayload["tlsCertPath"] = svc.TLSCert
-				regPayload["tlsKeyPath"] = svc.TLSKey
+			if a.svc.TLSCert != "" {
+				regPayload["tlsCertPath"] = a.svc.TLSCert
+				regPayload["tlsKeyPath"] = a.svc.TLSKey
 			}
 			body, _ := json.Marshal(regPayload)
 			resp, err := client.Post(controlURL+"/__mdp/register", "application/json", bytes.NewReader(body))
@@ -162,15 +204,20 @@ func runBatchMode(cmd *cobra.Command, controlPort int, groupFlag string) error {
 			}
 		}
 
-		if svc.Command != "" {
-			env := []string{fmt.Sprintf("PORT=%d", assignedPort), "MDP=1"}
-			for k, v := range svc.Env {
-				if v != "auto" {
-					env = append(env, k+"="+v)
+		if a.svc.Command != "" {
+			env := []string{fmt.Sprintf("PORT=%d", a.assignedPort), "MDP=1"}
+			for k, v := range a.svc.Env {
+				if v == "auto" {
+					continue
 				}
+				expanded, err := envexpand.Expand(v, portMap)
+				if err != nil {
+					return fmt.Errorf("service %q env %q: %w", a.name, k, err)
+				}
+				env = append(env, k+"="+expanded)
 			}
 			bt.wg.Add(1)
-			go runServiceProcess(bt, name, svc.Command, svc.Dir, env, controlURL, serverName)
+			go runServiceProcess(bt, a.name, a.svc.Command, a.svc.Dir, env, controlURL, serverName)
 		}
 	}
 
@@ -208,19 +255,8 @@ func runBatchMode(cmd *cobra.Command, controlPort int, groupFlag string) error {
 	return nil
 }
 
-func registerMultiPortBatch(client *http.Client, controlURL, name string, svc config.ServiceConfig, group string, portRange ports.PortRange, bt *batchTracker, clientID string) ([]string, error) {
+func launchMultiPortBatch(client *http.Client, controlURL, name string, svc config.ServiceConfig, group string, portAssignments map[string]int, portMap envexpand.PortMap, bt *batchTracker, clientID string) error {
 	var registered []string
-	portAssignments := make(map[string]int)
-	for envName, value := range svc.Env {
-		if value == "auto" {
-			port, err := ports.FindFreePort(portRange, nil)
-			if err != nil {
-				return nil, err
-			}
-			portAssignments[envName] = port
-		}
-	}
-
 	for _, pm := range svc.Ports {
 		port, ok := portAssignments[pm.Env]
 		if !ok {
@@ -248,11 +284,11 @@ func registerMultiPortBatch(client *http.Client, controlURL, name string, svc co
 		body, _ := json.Marshal(regPayload)
 		resp, err := client.Post(controlURL+"/__mdp/register", "application/json", bytes.NewReader(body))
 		if err != nil {
-			return registered, err
+			return err
 		}
 		resp.Body.Close()
 		if resp.StatusCode != http.StatusOK {
-			return registered, fmt.Errorf("register %q failed (status %d)", serverName, resp.StatusCode)
+			return fmt.Errorf("register %q failed (status %d)", serverName, resp.StatusCode)
 		}
 		registered = append(registered, serverName)
 	}
@@ -264,18 +300,21 @@ func registerMultiPortBatch(client *http.Client, controlURL, name string, svc co
 				if port, ok := portAssignments[k]; ok {
 					env = append(env, fmt.Sprintf("%s=%d", k, port))
 				}
-			} else {
-				env = append(env, k+"="+v)
+				continue
 			}
+			expanded, err := envexpand.Expand(v, portMap)
+			if err != nil {
+				return fmt.Errorf("service %q env %q: %w", name, k, err)
+			}
+			env = append(env, k+"="+expanded)
 		}
-		// All registered names map to this single process
 		namesCopy := make([]string, len(registered))
 		copy(namesCopy, registered)
 		bt.wg.Add(1)
 		go runServiceProcess(bt, name, svc.Command, svc.Dir, env, controlURL, namesCopy...)
 	}
 
-	return registered, nil
+	return nil
 }
 
 var serviceColors = []string{
