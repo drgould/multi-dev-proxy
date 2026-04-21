@@ -262,6 +262,10 @@ func launchMultiPortBatch(client *http.Client, controlURL, name string, svc conf
 		if !ok {
 			continue
 		}
+		if pm.Proxy <= 0 {
+			// Non-HTTP port: allocated for env interpolation only.
+			continue
+		}
 		serviceName := pm.Name
 		if serviceName == "" {
 			serviceName = pm.Env

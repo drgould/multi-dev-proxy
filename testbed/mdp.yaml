@@ -1,5 +1,5 @@
 services:
-  # === main branch (TLS frontend + Docker API) ===
+  # === main branch (TLS frontend + Docker API + proxy-less fake DB) ===
   web-main:
     command: ./server/server
     proxy: 3000
@@ -11,8 +11,20 @@ services:
       NAME: "web / main"
       COLOR: "#0f2027,#203a43,#2c5364"
       API_URL: "http://localhost:${api-main.PORT}"
+      DB_URL: "postgres://localhost:${db-main.DB_PORT}/app"
       TLS_CERT: .certs/localhost.pem
       TLS_KEY: .certs/localhost-key.pem
+
+  # Fake DB: demonstrates a non-HTTP port declared without a proxy.
+  # DB_PORT gets an allocated free port for ${db-main.DB_PORT} interpolation
+  # (see web-main's DB_URL), but no proxy listener is registered.
+  db-main:
+    command: sh -c 'echo "fake-db listening on $DB_PORT"; exec tail -f /dev/null'
+    group: main
+    env:
+      DB_PORT: auto
+    ports:
+      - env: DB_PORT
 
   api-main:
     command: docker compose up --build --wait

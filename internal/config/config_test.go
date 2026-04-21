@@ -78,6 +78,39 @@ services:
 	}
 }
 
+func TestLoadMultiPortWithoutProxy(t *testing.T) {
+	dir := t.TempDir()
+	path := filepath.Join(dir, "mdp.yaml")
+	os.WriteFile(path, []byte(`
+services:
+  postgres:
+    command: ./run-pg.sh
+    env:
+      DB_PORT: auto
+      REPL_PORT: auto
+    ports:
+      - env: DB_PORT
+      - env: REPL_PORT
+`), 0644)
+
+	cfg, err := Load(path)
+	if err != nil {
+		t.Fatalf("Load() error = %v", err)
+	}
+	pg := cfg.Services["postgres"]
+	if len(pg.Ports) != 2 {
+		t.Fatalf("expected 2 port mappings, got %d", len(pg.Ports))
+	}
+	for i, pm := range pg.Ports {
+		if pm.Proxy != 0 {
+			t.Errorf("ports[%d].Proxy = %d, want 0", i, pm.Proxy)
+		}
+	}
+	if pg.Ports[0].Env != "DB_PORT" || pg.Ports[1].Env != "REPL_PORT" {
+		t.Errorf("ports envs = %q, %q", pg.Ports[0].Env, pg.Ports[1].Env)
+	}
+}
+
 func TestLoadDefaultPortRange(t *testing.T) {
 	dir := t.TempDir()
 	path := filepath.Join(dir, "mdp.yaml")
