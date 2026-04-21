@@ -29,6 +29,9 @@ type ServiceConfig struct {
 }
 
 // PortMapping maps an auto-assigned port env var to a proxy and service name.
+// Proxy is optional: omit it for non-HTTP ports (databases, caches, etc.) that
+// need a free port allocated for ${svc.env} interpolation but should not be
+// registered with an HTTP reverse-proxy listener.
 type PortMapping struct {
 	Env   string `yaml:"env"`
 	Proxy int    `yaml:"proxy"`

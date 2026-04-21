@@ -2,6 +2,8 @@ package main
 
 import (
 	"bytes"
+	"encoding/json"
+	"io"
 	"net/http"
 	"net/http/httptest"
 	"os"
@@ -10,6 +12,9 @@ import (
 	"sync/atomic"
 	"testing"
 	"time"
+
+	"github.com/derekgould/multi-dev-proxy/internal/config"
+	"github.com/derekgould/multi-dev-proxy/internal/envexpand"
 )
 
 func TestPrefixWriter(t *testing.T) {
@@ -177,6 +182,63 @@ func TestWatchHealthStaysOpenWhenHealthy(t *testing.T) {
 	case <-gone:
 		t.Fatal("watchHealth should not close while healthy")
 	case <-time.After(5 * time.Second):
+	}
+}
+
+func TestLaunchMultiPortBatchSkipsProxylessPorts(t *testing.T) {
+	var registerMu sync.Mutex
+	var registerBodies []map[string]any
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.Method == "POST" && r.URL.Path == "/__mdp/register" {
+			b, _ := io.ReadAll(r.Body)
+			var body map[string]any
+			json.Unmarshal(b, &body)
+			registerMu.Lock()
+			registerBodies = append(registerBodies, body)
+			registerMu.Unlock()
+			w.WriteHeader(http.StatusOK)
+			return
+		}
+		w.WriteHeader(http.StatusOK)
+	}))
+	defer srv.Close()
+
+	svc := config.ServiceConfig{
+		// Command empty → no process launched by the test.
+		Env: map[string]string{
+			"API_PORT": "auto",
+			"DB_PORT":  "auto",
+		},
+		Ports: []config.PortMapping{
+			{Env: "API_PORT", Proxy: 4000, Name: "api"},
+			{Env: "DB_PORT"}, // no proxy — should be skipped
+		},
+	}
+	portAssignments := map[string]int{"API_PORT": 40001, "DB_PORT": 54321}
+	portMap := envexpand.PortMap{
+		"infra": {"API_PORT": 40001, "DB_PORT": 54321},
+	}
+
+	bt := &batchTracker{}
+	err := launchMultiPortBatch(http.DefaultClient, srv.URL, "infra", svc, "main", portAssignments, portMap, bt, "client-1")
+	if err != nil {
+		t.Fatalf("launchMultiPortBatch: %v", err)
+	}
+
+	registerMu.Lock()
+	defer registerMu.Unlock()
+	if len(registerBodies) != 1 {
+		t.Fatalf("expected 1 register call, got %d", len(registerBodies))
+	}
+	body := registerBodies[0]
+	if got, _ := body["proxyPort"].(float64); int(got) != 4000 {
+		t.Errorf("proxyPort = %v, want 4000", body["proxyPort"])
+	}
+	if got, _ := body["port"].(float64); int(got) != 40001 {
+		t.Errorf("port = %v, want 40001", body["port"])
+	}
+	if got, _ := body["name"].(string); got != "main/api" {
+		t.Errorf("name = %v, want main/api", body["name"])
 	}
 }
 
