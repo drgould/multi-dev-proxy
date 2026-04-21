@@ -40,6 +40,16 @@ func main() {
 	}
 
 	addr := ":" + port
+	tlsCert := os.Getenv("TLS_CERT")
+	tlsKey := os.Getenv("TLS_KEY")
+	if tlsCert != "" && tlsKey != "" {
+		fmt.Printf("%s listening on https://localhost:%s\n", name, port)
+		if err := http.ListenAndServeTLS(addr, tlsCert, tlsKey, mux); err != nil {
+			fmt.Fprintf(os.Stderr, "error: %v\n", err)
+			os.Exit(1)
+		}
+		return
+	}
 	fmt.Printf("%s listening on http://localhost:%s\n", name, port)
 	if err := http.ListenAndServe(addr, mux); err != nil {
 		fmt.Fprintf(os.Stderr, "error: %v\n", err)

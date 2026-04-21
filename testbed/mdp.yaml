@@ -10,7 +10,9 @@ services:
     env:
       NAME: "web / main"
       COLOR: "#0f2027,#203a43,#2c5364"
-      API_URL: "http://localhost:3001"
+      API_URL: "http://localhost:${api-main.PORT}"
+      TLS_CERT: .certs/localhost.pem
+      TLS_KEY: .certs/localhost-key.pem
 
   api-main:
     command: docker compose up --build --wait
