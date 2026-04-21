@@ -140,6 +140,26 @@ func (p *Proxy) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
+	// Enforce upstream scheme: if the request's scheme doesn't match the
+	// upstream's declared scheme, redirect to the correct scheme so each
+	// service is only reachable over its own scheme. /__mdp/* paths are
+	// exempt so switching groups still works across scheme changes.
+	if !strings.HasPrefix(r.URL.Path, "/__mdp/") {
+		upstreamScheme := result.Entry.Scheme
+		if upstreamScheme == "" {
+			upstreamScheme = "http"
+		}
+		reqScheme := "http"
+		if r.TLS != nil {
+			reqScheme = "https"
+		}
+		if reqScheme != upstreamScheme {
+			target := upstreamScheme + "://" + r.Host + r.URL.RequestURI()
+			http.Redirect(w, r, target, http.StatusTemporaryRedirect)
+			return
+		}
+	}
+
 	// Track last visited page for this service. Only track browser navigation
 	// requests (Accept: text/html), skip assets, API calls, and /__mdp/ paths.
 	if isNavigationRequest(r) {

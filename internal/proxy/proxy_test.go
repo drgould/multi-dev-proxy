@@ -1,6 +1,7 @@
 package proxy
 
 import (
+	"crypto/tls"
 	"io"
 	"net"
 	"net/http"
@@ -239,6 +240,129 @@ func TestProxyGetLastPathEmpty(t *testing.T) {
 
 	if got := p.GetLastPath("nonexistent"); got != "" {
 		t.Errorf("last path for unknown service = %q, want empty", got)
+	}
+}
+
+func TestProxyRedirectsHTTPToHTTPSWhenUpstreamIsHTTPS(t *testing.T) {
+	p, reg := newTestProxy(t)
+	if err := reg.Register(&registry.ServerEntry{
+		Name:   "app/main",
+		Repo:   "app",
+		Port:   19998,
+		PID:    1,
+		Scheme: "https",
+	}); err != nil {
+		t.Fatal(err)
+	}
+
+	req := httptest.NewRequest("GET", "http://localhost:3000/some/path?q=1", nil)
+	req.Host = "localhost:3000"
+	req.TLS = nil
+	rr := httptest.NewRecorder()
+	p.ServeHTTP(rr, req)
+
+	if rr.Code != http.StatusTemporaryRedirect {
+		t.Fatalf("expected 307, got %d", rr.Code)
+	}
+	loc := rr.Header().Get("Location")
+	if loc != "https://localhost:3000/some/path?q=1" {
+		t.Errorf("expected redirect to https with path+query, got %q", loc)
+	}
+}
+
+func TestProxySchemeRedirectPreservesPOST(t *testing.T) {
+	p, reg := newTestProxy(t)
+	if err := reg.Register(&registry.ServerEntry{
+		Name:   "app/main",
+		Repo:   "app",
+		Port:   19998,
+		PID:    1,
+		Scheme: "https",
+	}); err != nil {
+		t.Fatal(err)
+	}
+
+	req := httptest.NewRequest("POST", "http://localhost:3000/submit", nil)
+	req.Host = "localhost:3000"
+	rr := httptest.NewRecorder()
+	p.ServeHTTP(rr, req)
+
+	// 307 preserves method and body; 302 would let clients downgrade POST to GET.
+	if rr.Code != http.StatusTemporaryRedirect {
+		t.Fatalf("expected 307 so POST is preserved, got %d", rr.Code)
+	}
+}
+
+func TestProxyRedirectsHTTPSToHTTPWhenUpstreamIsHTTP(t *testing.T) {
+	upstream := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Write([]byte("ok"))
+	}))
+	defer upstream.Close()
+
+	p, reg := newTestProxy(t)
+	registerUpstream(t, reg, upstream, "app/feature", "app")
+
+	req := httptest.NewRequest("GET", "https://localhost:3000/foo", nil)
+	req.Host = "localhost:3000"
+	req.TLS = &tls.ConnectionState{}
+	rr := httptest.NewRecorder()
+	p.ServeHTTP(rr, req)
+
+	if rr.Code != http.StatusTemporaryRedirect {
+		t.Fatalf("expected 307, got %d", rr.Code)
+	}
+	if loc := rr.Header().Get("Location"); loc != "http://localhost:3000/foo" {
+		t.Errorf("expected redirect to http, got %q", loc)
+	}
+}
+
+func TestProxyDoesNotRedirectMdpPaths(t *testing.T) {
+	upstream := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Write([]byte("ok"))
+	}))
+	defer upstream.Close()
+
+	p, reg := newTestProxy(t)
+	if err := reg.Register(&registry.ServerEntry{
+		Name:   "app/main",
+		Repo:   "app",
+		Port:   serverPort(upstream),
+		PID:    1,
+		Scheme: "https",
+	}); err != nil {
+		t.Fatal(err)
+	}
+
+	// Plain HTTP request to /__mdp/* with an HTTPS upstream should NOT be
+	// redirected — those paths must stay accessible on both schemes so that
+	// group switching works across scheme changes.
+	req := httptest.NewRequest("GET", "http://localhost:3000/__mdp/health", nil)
+	req.Host = "localhost:3000"
+	rr := httptest.NewRecorder()
+	p.ServeHTTP(rr, req)
+
+	if rr.Code == http.StatusTemporaryRedirect {
+		t.Fatalf("/__mdp/* path was unexpectedly redirected (got %d, Location=%q)", rr.Code, rr.Header().Get("Location"))
+	}
+}
+
+func TestProxyNoRedirectWhenSchemeMatches(t *testing.T) {
+	upstream := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Write([]byte("ok"))
+	}))
+	defer upstream.Close()
+
+	p, reg := newTestProxy(t)
+	// http upstream, http request — should not redirect.
+	registerUpstream(t, reg, upstream, "app/main", "app")
+
+	req := httptest.NewRequest("GET", "http://localhost:3000/", nil)
+	req.Host = "localhost:3000"
+	rr := httptest.NewRecorder()
+	p.ServeHTTP(rr, req)
+
+	if rr.Code == http.StatusTemporaryRedirect {
+		t.Fatalf("unexpected redirect (Location=%q)", rr.Header().Get("Location"))
 	}
 }
 
