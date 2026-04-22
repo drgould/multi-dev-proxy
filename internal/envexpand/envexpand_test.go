@@ -152,6 +152,123 @@ func TestExpandServiceNameUnderscores(t *testing.T) {
 	}
 }
 
+func TestExpandAllEnvVar(t *testing.T) {
+	pm := PortMap{"api": {"PORT": 8080}}
+	em := EnvMap{
+		"api":     {"PORT": "8080", "NAME": "api / main"},
+		"web":     {"API_URL": "http://localhost:8080", "NAME": "web"},
+		"db-main": {"DB_PORT": "5432"},
+	}
+	tests := []struct {
+		name string
+		in   string
+		want string
+	}{
+		{"simple env ref", "${api.env.NAME}", "api / main"},
+		{"embedded", "URL=${web.env.API_URL}", "URL=http://localhost:8080"},
+		{"hyphenated svc", "${db-main.env.DB_PORT}", "5432"},
+		{"mixed port and env", "${api.PORT} / ${api.env.NAME}", "8080 / api / main"},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			got, err := ExpandAll(tt.in, pm, em)
+			if err != nil {
+				t.Fatalf("unexpected error: %v", err)
+			}
+			if got != tt.want {
+				t.Errorf("got %q, want %q", got, tt.want)
+			}
+		})
+	}
+}
+
+func TestExpandAllEnvVarUnknownService(t *testing.T) {
+	_, err := ExpandAll("${nope.env.FOO}", PortMap{}, EnvMap{})
+	if err == nil {
+		t.Fatal("expected error")
+	}
+	if !strings.Contains(err.Error(), "no such service") {
+		t.Errorf("unexpected error: %v", err)
+	}
+}
+
+func TestExpandAllEnvVarUnknownKey(t *testing.T) {
+	_, err := ExpandAll("${api.env.MISSING}", PortMap{}, EnvMap{"api": {"PORT": "8080"}})
+	if err == nil {
+		t.Fatal("expected error")
+	}
+	if !strings.Contains(err.Error(), "MISSING") {
+		t.Errorf("unexpected error: %v", err)
+	}
+}
+
+func TestExpandRejectsEnvRefWhenEnvMapNil(t *testing.T) {
+	// Expand is the port-only wrapper — env refs must error.
+	_, err := Expand("${api.env.PORT}", PortMap{"api": {"PORT": 8080}})
+	if err == nil {
+		t.Fatal("expected error")
+	}
+	if !strings.Contains(err.Error(), "env-var references are not allowed") {
+		t.Errorf("unexpected error: %v", err)
+	}
+}
+
+func TestLookupRef(t *testing.T) {
+	pm := PortMap{"api": {"PORT": 8080}}
+	em := EnvMap{"api": {"PORT": "8080", "NAME": "api"}}
+	tests := []struct {
+		ref  string
+		want string
+	}{
+		{"api.PORT", "8080"},
+		{"api.env.NAME", "api"},
+		{"api.env.PORT", "8080"},
+	}
+	for _, tt := range tests {
+		t.Run(tt.ref, func(t *testing.T) {
+			got, err := LookupRef(tt.ref, pm, em)
+			if err != nil {
+				t.Fatalf("unexpected error: %v", err)
+			}
+			if got != tt.want {
+				t.Errorf("got %q, want %q", got, tt.want)
+			}
+		})
+	}
+}
+
+func TestLookupRefPreservesDollarBracesInValue(t *testing.T) {
+	// A resolved env var may legitimately contain "${...}" text meant for
+	// later shell/app expansion. LookupRef must not treat that as an error.
+	em := EnvMap{"api": {"TEMPLATE": "${HOME}/bin", "MIXED": "pre ${X} post"}}
+	cases := map[string]string{
+		"api.env.TEMPLATE": "${HOME}/bin",
+		"api.env.MIXED":    "pre ${X} post",
+	}
+	for ref, want := range cases {
+		t.Run(ref, func(t *testing.T) {
+			got, err := LookupRef(ref, PortMap{}, em)
+			if err != nil {
+				t.Fatalf("unexpected error: %v", err)
+			}
+			if got != want {
+				t.Errorf("got %q, want %q", got, want)
+			}
+		})
+	}
+}
+
+func TestLookupRefInvalid(t *testing.T) {
+	cases := []string{"", "not-a-ref", "api", "api.env"}
+	for _, in := range cases {
+		t.Run(in, func(t *testing.T) {
+			if _, err := LookupRef(in, PortMap{"api": {"PORT": 8080}}, EnvMap{"api": {"PORT": "8080"}}); err == nil {
+				t.Errorf("expected error for %q", in)
+			}
+		})
+	}
+}
+
 func TestExpandFirstUnresolvedReferenceWins(t *testing.T) {
 	_, err := Expand("${a.port} and ${b.port}", PortMap{})
 	if err == nil {
