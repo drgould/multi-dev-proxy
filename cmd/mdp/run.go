@@ -111,6 +111,9 @@ func runBatchMode(cmd *cobra.Command, controlPort int, groupFlag string) error {
 
 	bt := &batchTracker{}
 
+	svcCtx, svcCancel := context.WithCancel(context.Background())
+	defer svcCancel()
+
 	type alloc struct {
 		name            string
 		svc             config.ServiceConfig
@@ -171,7 +174,7 @@ func runBatchMode(cmd *cobra.Command, controlPort int, groupFlag string) error {
 
 	for _, a := range allocations {
 		if len(a.svc.Ports) > 0 {
-			if err := launchMultiPortBatch(client, controlURL, a.name, a.svc, a.svcGroup, a.portAssignments, portMap, bt, clientID); err != nil {
+			if err := launchMultiPortBatch(svcCtx, client, controlURL, a.name, a.svc, a.svcGroup, a.portAssignments, portMap, bt, clientID); err != nil {
 				return fmt.Errorf("launch multi-port service %q: %w", a.name, err)
 			}
 			continue
@@ -217,7 +220,7 @@ func runBatchMode(cmd *cobra.Command, controlPort int, groupFlag string) error {
 				env = append(env, k+"="+expanded)
 			}
 			bt.wg.Add(1)
-			go runServiceProcess(bt, a.name, a.svc, env, controlURL, serverName)
+			go runServiceProcess(svcCtx, bt, a.name, a.svc, env, controlURL, serverName)
 		}
 	}
 
@@ -240,6 +243,7 @@ func runBatchMode(cmd *cobra.Command, controlPort int, groupFlag string) error {
 	}
 
 	hbCancel()
+	svcCancel()
 
 	bt.signalAll()
 	waitDone := make(chan struct{})
@@ -255,7 +259,7 @@ func runBatchMode(cmd *cobra.Command, controlPort int, groupFlag string) error {
 	return nil
 }
 
-func launchMultiPortBatch(client *http.Client, controlURL, name string, svc config.ServiceConfig, group string, portAssignments map[string]int, portMap envexpand.PortMap, bt *batchTracker, clientID string) error {
+func launchMultiPortBatch(ctx context.Context, client *http.Client, controlURL, name string, svc config.ServiceConfig, group string, portAssignments map[string]int, portMap envexpand.PortMap, bt *batchTracker, clientID string) error {
 	var registered []string
 	for _, pm := range svc.Ports {
 		port, ok := portAssignments[pm.Env]
@@ -315,7 +319,7 @@ func launchMultiPortBatch(client *http.Client, controlURL, name string, svc conf
 		namesCopy := make([]string, len(registered))
 		copy(namesCopy, registered)
 		bt.wg.Add(1)
-		go runServiceProcess(bt, name, svc, env, controlURL, namesCopy...)
+		go runServiceProcess(ctx, bt, name, svc, env, controlURL, namesCopy...)
 	}
 
 	return nil
@@ -429,13 +433,22 @@ func (bt *batchTracker) killAll() {
 
 const shutdownHookTimeout = 30 * time.Second
 
-func runServiceProcess(bt *batchTracker, name string, svc config.ServiceConfig, env []string, controlURL string, serverNames ...string) {
+func runServiceProcess(ctx context.Context, bt *batchTracker, name string, svc config.ServiceConfig, env []string, controlURL string, serverNames ...string) {
 	defer bt.wg.Done()
 	color := nextColor()
 	pw := newPrefixWriter(name, color, os.Stdout)
 	pwErr := newPrefixWriter(name, color, os.Stderr)
 	defer pw.Flush()
 	defer pwErr.Flush()
+
+	mainStarted := false
+	defer func() {
+		if !mainStarted {
+			for _, sn := range serverNames {
+				deregisterFromOrchestrator(controlURL, sn)
+			}
+		}
+	}()
 
 	for i, raw := range svc.Setup {
 		parts, err := orchestrator.SplitHookArgs(raw)
@@ -447,7 +460,7 @@ func runServiceProcess(bt *batchTracker, name string, svc config.ServiceConfig, 
 			continue
 		}
 		slog.Info("service hook", "name", name, "phase", "setup", "step", i+1, "cmd", raw)
-		h := exec.Command(parts[0], parts[1:]...)
+		h := exec.CommandContext(ctx, parts[0], parts[1:]...)
 		h.Env = append(os.Environ(), env...)
 		if svc.Dir != "" {
 			h.Dir = svc.Dir
@@ -478,6 +491,7 @@ func runServiceProcess(bt *batchTracker, name string, svc config.ServiceConfig, 
 		slog.Error("service process failed to start", "name", name, "command", svc.Command, "err", err)
 		return
 	}
+	mainStarted = true
 	for _, sn := range serverNames {
 		updatePIDWithOrchestrator(controlURL, sn, cmd.Process.Pid)
 	}

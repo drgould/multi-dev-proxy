@@ -2,6 +2,7 @@ package main
 
 import (
 	"bytes"
+	"context"
 	"encoding/json"
 	"io"
 	"net/http"
@@ -220,7 +221,7 @@ func TestLaunchMultiPortBatchSkipsProxylessPorts(t *testing.T) {
 	}
 
 	bt := &batchTracker{}
-	err := launchMultiPortBatch(http.DefaultClient, srv.URL, "infra", svc, "main", portAssignments, portMap, bt, "client-1")
+	err := launchMultiPortBatch(context.Background(), http.DefaultClient, srv.URL, "infra", svc, "main", portAssignments, portMap, bt, "client-1")
 	if err != nil {
 		t.Fatalf("launchMultiPortBatch: %v", err)
 	}
