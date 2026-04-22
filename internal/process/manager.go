@@ -57,8 +57,15 @@ func (m *Manager) Run(ctx context.Context, args []string, opts RunOpts) (int, er
 	pid := cmd.Process.Pid
 	slog.Info("started process", "pid", pid, "port", opts.AssignedPort, "name", opts.ServerName)
 
+	// registerDone closes once the stdout-reading goroutine has finished:
+	// port detection + (attempted) registration are done. Deregistration and
+	// Run's return must both wait on this so registration/deregistration are
+	// strictly ordered and callers see the final state.
+	registerDone := make(chan struct{})
+
 	if opts.ProxyURL != "" && opts.ServerName != "" {
 		go func() {
+			defer close(registerDone)
 			detected, err := detect.TeeAndDetect(stdout, os.Stdout, 30*time.Second)
 			regPort := opts.AssignedPort
 			if err == nil && detected.Port > 0 {
@@ -80,7 +87,10 @@ func (m *Manager) Run(ctx context.Context, args []string, opts RunOpts) (int, er
 			}
 		}()
 	} else {
-		go func() { io.Copy(os.Stdout, stdout) }()
+		go func() {
+			defer close(registerDone)
+			io.Copy(os.Stdout, stdout)
+		}()
 	}
 
 	sigCh := make(chan os.Signal, 1)
@@ -94,15 +104,20 @@ func (m *Manager) Run(ctx context.Context, args []string, opts RunOpts) (int, er
 	select {
 	case sig := <-sigCh:
 		slog.Info("received signal, stopping child", "signal", sig)
-		deregisterFromProxy(opts.ProxyURL, opts.ServerName, opts.ProxyTimeout)
+		// Kill first so stdout closes, then registerDone fires quickly even if
+		// the child was a long-running server that never emitted a port line.
 		KillProcessGroup(pid, 5*time.Second)
+		<-registerDone
+		deregisterFromProxy(opts.ProxyURL, opts.ServerName, opts.ProxyTimeout)
 		exitErr = <-done
 	case exitErr = <-done:
 		slog.Info("child exited", "pid", pid)
+		<-registerDone
 		deregisterFromProxy(opts.ProxyURL, opts.ServerName, opts.ProxyTimeout)
 	case <-ctx.Done():
-		deregisterFromProxy(opts.ProxyURL, opts.ServerName, opts.ProxyTimeout)
 		KillProcessGroup(pid, 5*time.Second)
+		<-registerDone
+		deregisterFromProxy(opts.ProxyURL, opts.ServerName, opts.ProxyTimeout)
 		exitErr = <-done
 	}
 
