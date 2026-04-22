@@ -191,9 +191,11 @@ func TestWatchHealthStaysOpenWhenHealthy(t *testing.T) {
 func TestLaunchBatchServiceSkipsProxylessPorts(t *testing.T) {
 	// Commandless services still get TCP-probed; stub the check so the test
 	// doesn't block on unbound ports.
-	origCheck := batchTCPCheck
-	batchTCPCheck = func(int) bool { return true }
-	t.Cleanup(func() { batchTCPCheck = origCheck })
+	rt := batchRuntime{
+		readyTimeout: time.Second,
+		readyPoll:    10 * time.Millisecond,
+		tcpCheck:     func(int) bool { return true },
+	}
 
 	var registerMu sync.Mutex
 	var registerBodies []map[string]any
@@ -235,7 +237,7 @@ func TestLaunchBatchServiceSkipsProxylessPorts(t *testing.T) {
 	bt := &batchTracker{}
 	bt.wg.Add(1)
 	states := depwait.NewStates([]string{"infra"})
-	launchBatchService(context.Background(), bt, http.DefaultClient, srv.URL, "client-1", a, portMap, states)
+	launchBatchService(context.Background(), bt, http.DefaultClient, srv.URL, "client-1", a, portMap, states, rt)
 
 	registerMu.Lock()
 	defer registerMu.Unlock()
@@ -255,24 +257,22 @@ func TestLaunchBatchServiceSkipsProxylessPorts(t *testing.T) {
 }
 
 func TestLaunchBatchServiceWaitsForDependencies(t *testing.T) {
-	origTimeout, origPoll := batchReadyTimeout, batchReadyPoll
-	batchReadyTimeout, batchReadyPoll = 5*time.Second, 10*time.Millisecond
-	t.Cleanup(func() { batchReadyTimeout, batchReadyPoll = origTimeout, origPoll })
-
 	gateA := make(chan struct{})
-	origCheck := batchTCPCheck
-	batchTCPCheck = func(p int) bool {
-		if p == 19001 {
-			select {
-			case <-gateA:
-				return true
-			default:
-				return false
+	rt := batchRuntime{
+		readyTimeout: 5 * time.Second,
+		readyPoll:    10 * time.Millisecond,
+		tcpCheck: func(p int) bool {
+			if p == 19001 {
+				select {
+				case <-gateA:
+					return true
+				default:
+					return false
+				}
 			}
-		}
-		return true
+			return true
+		},
 	}
-	t.Cleanup(func() { batchTCPCheck = origCheck })
 
 	type regCall struct {
 		name string
@@ -301,20 +301,15 @@ func TestLaunchBatchServiceWaitsForDependencies(t *testing.T) {
 	bt := &batchTracker{}
 	states := depwait.NewStates([]string{"a", "b"})
 	ctx, cancel := context.WithCancel(context.Background())
-	t.Cleanup(cancel)
 	t.Cleanup(func() {
+		cancel()
 		bt.killAll()
-		doneCh := make(chan struct{})
-		go func() { bt.wg.Wait(); close(doneCh) }()
-		select {
-		case <-doneCh:
-		case <-time.After(3 * time.Second):
-		}
+		bt.wg.Wait()
 	})
 
 	for _, a := range allocs {
 		bt.wg.Add(1)
-		go launchBatchService(ctx, bt, http.DefaultClient, srv.URL, "c1", a, envexpand.PortMap{}, states)
+		go launchBatchService(ctx, bt, http.DefaultClient, srv.URL, "c1", a, envexpand.PortMap{}, states, rt)
 	}
 
 	waitFor := func(name string, dur time.Duration) bool {
@@ -358,9 +353,11 @@ func TestLaunchBatchServiceWaitsForDependencies(t *testing.T) {
 func TestLaunchBatchServiceReturnsOnContextCancel(t *testing.T) {
 	// Regression: on SIGINT, batchCancel() must unblock goroutines still
 	// waiting on deps so shutdown isn't held up by the full readiness timeout.
-	origTimeout, origPoll := batchReadyTimeout, batchReadyPoll
-	batchReadyTimeout, batchReadyPoll = 30*time.Second, 10*time.Millisecond
-	t.Cleanup(func() { batchReadyTimeout, batchReadyPoll = origTimeout, origPoll })
+	rt := batchRuntime{
+		readyTimeout: 30 * time.Second,
+		readyPoll:    10 * time.Millisecond,
+		tcpCheck:     func(int) bool { return true },
+	}
 
 	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		w.WriteHeader(http.StatusOK)
@@ -382,7 +379,7 @@ func TestLaunchBatchServiceReturnsOnContextCancel(t *testing.T) {
 	bt.wg.Add(1)
 	done := make(chan struct{})
 	go func() {
-		launchBatchService(ctx, bt, http.DefaultClient, srv.URL, "c1", a, envexpand.PortMap{}, states)
+		launchBatchService(ctx, bt, http.DefaultClient, srv.URL, "c1", a, envexpand.PortMap{}, states, rt)
 		close(done)
 	}()
 
@@ -399,9 +396,11 @@ func TestLaunchBatchServiceReturnsOnContextCancel(t *testing.T) {
 func TestLaunchBatchServiceHookOrdering(t *testing.T) {
 	// Stub TCP readiness so the probe against our no-op main command's
 	// unbound port doesn't block the test.
-	origCheck := batchTCPCheck
-	batchTCPCheck = func(int) bool { return true }
-	t.Cleanup(func() { batchTCPCheck = origCheck })
+	rt := batchRuntime{
+		readyTimeout: time.Second,
+		readyPoll:    10 * time.Millisecond,
+		tcpCheck:     func(int) bool { return true },
+	}
 
 	dir := t.TempDir()
 	logPath := filepath.Join(dir, "events.log")
@@ -437,7 +436,7 @@ func TestLaunchBatchServiceHookOrdering(t *testing.T) {
 	bt := &batchTracker{}
 	bt.wg.Add(1)
 	states := depwait.NewStates([]string{"web"})
-	launchBatchService(context.Background(), bt, http.DefaultClient, srv.URL, "c1", a, envexpand.PortMap{}, states)
+	launchBatchService(context.Background(), bt, http.DefaultClient, srv.URL, "c1", a, envexpand.PortMap{}, states, rt)
 
 	data, err := os.ReadFile(logPath)
 	if err != nil {
@@ -451,9 +450,11 @@ func TestLaunchBatchServiceHookOrdering(t *testing.T) {
 }
 
 func TestLaunchBatchServiceSetupFailureSkipsRegistration(t *testing.T) {
-	origCheck := batchTCPCheck
-	batchTCPCheck = func(int) bool { return true }
-	t.Cleanup(func() { batchTCPCheck = origCheck })
+	rt := batchRuntime{
+		readyTimeout: time.Second,
+		readyPoll:    10 * time.Millisecond,
+		tcpCheck:     func(int) bool { return true },
+	}
 
 	dir := t.TempDir()
 	mainSentinel := filepath.Join(dir, "main-ran")
@@ -488,7 +489,7 @@ func TestLaunchBatchServiceSetupFailureSkipsRegistration(t *testing.T) {
 	bt := &batchTracker{}
 	bt.wg.Add(1)
 	states := depwait.NewStates([]string{"web"})
-	launchBatchService(context.Background(), bt, http.DefaultClient, srv.URL, "c1", a, envexpand.PortMap{}, states)
+	launchBatchService(context.Background(), bt, http.DefaultClient, srv.URL, "c1", a, envexpand.PortMap{}, states, rt)
 
 	regMu.Lock()
 	defer regMu.Unlock()
