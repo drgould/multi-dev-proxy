@@ -8,14 +8,35 @@ import (
 	"os/exec"
 	"strconv"
 	"strings"
+	"sync"
+	"time"
 
 	"github.com/derekgould/multi-dev-proxy/internal/config"
+	"github.com/derekgould/multi-dev-proxy/internal/depwait"
 	"github.com/derekgould/multi-dev-proxy/internal/detect"
 	"github.com/derekgould/multi-dev-proxy/internal/envexpand"
 	"github.com/derekgould/multi-dev-proxy/internal/envexport"
 	"github.com/derekgould/multi-dev-proxy/internal/ports"
 	"github.com/derekgould/multi-dev-proxy/internal/registry"
 )
+
+// readyTimeout and readyPoll are package-level vars (not consts) so tests can
+// shorten them.
+var (
+	readyTimeout = 60 * time.Second
+	readyPoll    = 200 * time.Millisecond
+)
+
+// tcpCheck is overridable in tests.
+var tcpCheck = registry.TCPCheck
+
+type serviceAlloc struct {
+	name            string
+	svc             config.ServiceConfig
+	assignedPort    int
+	portAssignments map[string]int // multi-port only
+	env             []string       // populated in the env-build phase
+}
 
 // StartConfigServices starts all services from the config under the given group name.
 func (o *Orchestrator) StartConfigServices(ctx context.Context, group string) error {
@@ -27,14 +48,7 @@ func (o *Orchestrator) StartConfigServices(ctx context.Context, group string) er
 		return fmt.Errorf("invalid port_range: %w", err)
 	}
 
-	type alloc struct {
-		name            string
-		svc             config.ServiceConfig
-		assignedPort    int
-		portAssignments map[string]int // multi-port only
-		env             []string       // populated in the env-build phase below
-	}
-	var allocations []alloc
+	var allocations []serviceAlloc
 	portMap := envexpand.PortMap{}
 	var assignedPorts []int
 	for _, svc := range o.cfg.Services {
@@ -64,7 +78,7 @@ func (o *Orchestrator) StartConfigServices(ctx context.Context, group string) er
 				svcPorts[k] = v
 			}
 			portMap[name] = svcPorts
-			allocations = append(allocations, alloc{name: name, svc: svc, portAssignments: portAssignments})
+			allocations = append(allocations, serviceAlloc{name: name, svc: svc, portAssignments: portAssignments})
 			continue
 		}
 		assignedPort := svc.Port
@@ -77,7 +91,7 @@ func (o *Orchestrator) StartConfigServices(ctx context.Context, group string) er
 			assignedPorts = append(assignedPorts, assignedPort)
 		}
 		portMap[name] = map[string]int{"port": assignedPort, "PORT": assignedPort}
-		allocations = append(allocations, alloc{name: name, svc: svc, assignedPort: assignedPort})
+		allocations = append(allocations, serviceAlloc{name: name, svc: svc, assignedPort: assignedPort})
 	}
 
 	// Build every service's env up front so we can write .env export files
@@ -113,17 +127,73 @@ func (o *Orchestrator) StartConfigServices(ctx context.Context, group string) er
 		}
 	}
 
+	names := make([]string, 0, len(allocations))
 	for _, a := range allocations {
-		if len(a.svc.Ports) > 0 {
-			if err := o.startMultiPortService(ctx, a.name, a.svc, group, a.portAssignments, a.env); err != nil {
-				slog.Error("failed to start service", "name", a.name, "err", err)
-			}
-			continue
-		}
-		if err := o.startSingleService(ctx, a.name, a.svc, group, a.assignedPort, a.env); err != nil {
-			slog.Error("failed to start service", "name", a.name, "err", err)
-		}
+		names = append(names, a.name)
 	}
+	states := depwait.NewStates(names)
+
+	var wg sync.WaitGroup
+	for _, a := range allocations {
+		wg.Add(1)
+		go func(a serviceAlloc, state *depwait.State) {
+			defer wg.Done()
+			defer close(state.Done)
+
+			serverName := fmt.Sprintf("%s/%s", group, a.name)
+			tracked := len(a.svc.DependsOn) > 0 && a.svc.Command != ""
+
+			if tracked {
+				o.SetService(serverName, &ManagedService{
+					Name:   serverName,
+					Config: a.svc,
+					Group:  group,
+					Port:   a.assignedPort,
+					Status: "waiting",
+				})
+			}
+
+			if err := depwait.Wait(ctx, states, a.svc.DependsOn, readyTimeout); err != nil {
+				slog.Error("service aborted waiting on deps", "name", a.name, "err", err)
+				state.Err = err
+				if tracked {
+					o.UpdateServiceStatus(serverName, "failed")
+				}
+				return
+			}
+
+			var err error
+			if len(a.svc.Ports) > 0 {
+				err = o.startMultiPortService(ctx, a.name, a.svc, group, a.portAssignments, a.env)
+			} else {
+				err = o.startSingleService(ctx, a.name, a.svc, group, a.assignedPort, a.env)
+			}
+			if err != nil {
+				slog.Error("failed to start service", "name", a.name, "err", err)
+				state.Err = err
+				if tracked {
+					o.UpdateServiceStatus(serverName, "failed")
+				}
+				return
+			}
+
+			probePorts := probePortsFor(a)
+			if len(probePorts) == 0 {
+				if a.svc.Command != "" {
+					o.UpdateServiceStatus(serverName, "running")
+				}
+				return
+			}
+			if err := o.waitForReady(ctx, serverName, probePorts, readyTimeout); err != nil {
+				slog.Error("service not ready", "name", a.name, "err", err)
+				state.Err = err
+				o.UpdateServiceStatus(serverName, "failed")
+				return
+			}
+			o.UpdateServiceStatus(serverName, "running")
+		}(a, states[a.name])
+	}
+	wg.Wait()
 	return nil
 }
 
@@ -136,6 +206,56 @@ func envSliceToMap(env []string) map[string]string {
 		}
 	}
 	return m
+}
+
+// probePortsFor returns the TCP ports that should be polled to decide whether
+// a service has become ready. External services (no command) are probed too
+// so dependents only unblock once the externally-managed service is actually
+// reachable.
+func probePortsFor(a serviceAlloc) []int {
+	if len(a.portAssignments) > 0 {
+		result := make([]int, 0, len(a.portAssignments))
+		for _, p := range a.portAssignments {
+			result = append(result, p)
+		}
+		return result
+	}
+	if a.assignedPort > 0 {
+		return []int{a.assignedPort}
+	}
+	return nil
+}
+
+// waitForReady polls TCP reachability on the given ports until all respond or
+// the timeout elapses. Returns early with an error if the service's status
+// becomes terminal (the process exited) before any port responds.
+func (o *Orchestrator) waitForReady(ctx context.Context, serverName string, probePorts []int, timeout time.Duration) error {
+	deadline := time.Now().Add(timeout)
+	ticker := time.NewTicker(readyPoll)
+	defer ticker.Stop()
+	for {
+		if status, ok := o.ServiceStatus(serverName); ok && (status == "stopped" || status == "failed") {
+			return fmt.Errorf("service exited before becoming ready (status=%s)", status)
+		}
+		allReady := true
+		for _, p := range probePorts {
+			if !tcpCheck(p) {
+				allReady = false
+				break
+			}
+		}
+		if allReady {
+			return nil
+		}
+		if time.Now().After(deadline) {
+			return fmt.Errorf("not ready on ports %v after %s", probePorts, timeout)
+		}
+		select {
+		case <-ctx.Done():
+			return ctx.Err()
+		case <-ticker.C:
+		}
+	}
 }
 
 func (o *Orchestrator) startSingleService(ctx context.Context, name string, svc config.ServiceConfig, group string, assignedPort int, env []string) error {
@@ -229,7 +349,7 @@ func (o *Orchestrator) launchProcess(ctx context.Context, name string, svc confi
 		Group:  group,
 		PID:    cmd.Process.Pid,
 		Port:   port,
-		Status: "running",
+		Status: "starting",
 	}
 	o.SetService(serverName, ms)
 

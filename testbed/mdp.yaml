@@ -21,6 +21,8 @@ services:
     scheme: https
     tls_cert: .certs/localhost.pem
     tls_key: .certs/localhost-key.pem
+    depends_on:
+      - api-main
     # Per-service export — contains exactly what web-main's process sees.
     env_file: ./.mdp.web-main.env
     env:

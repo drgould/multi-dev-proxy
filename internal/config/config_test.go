@@ -3,6 +3,7 @@ package config
 import (
 	"os"
 	"path/filepath"
+	"strings"
 	"testing"
 )
 
@@ -143,6 +144,123 @@ func TestFindNotFound(t *testing.T) {
 	found := Find(dir)
 	if found != "" {
 		t.Errorf("Find() = %q, want empty", found)
+	}
+}
+
+func TestLoadWithValidDependencies(t *testing.T) {
+	dir := t.TempDir()
+	path := filepath.Join(dir, "mdp.yaml")
+	os.WriteFile(path, []byte(`
+services:
+  db:
+    command: ./db
+  api:
+    command: ./api
+    depends_on:
+      - db
+  web:
+    command: ./web
+    depends_on:
+      - api
+      - db
+`), 0644)
+
+	cfg, err := Load(path)
+	if err != nil {
+		t.Fatalf("Load() error = %v", err)
+	}
+	if got := cfg.Services["api"].DependsOn; len(got) != 1 || got[0] != "db" {
+		t.Errorf("api.DependsOn = %v, want [db]", got)
+	}
+	if got := cfg.Services["web"].DependsOn; len(got) != 2 {
+		t.Errorf("web.DependsOn = %v, want 2 entries", got)
+	}
+}
+
+func TestLoadWithUnknownDependency(t *testing.T) {
+	dir := t.TempDir()
+	path := filepath.Join(dir, "mdp.yaml")
+	os.WriteFile(path, []byte(`
+services:
+  api:
+    command: ./api
+    depends_on:
+      - ghost
+`), 0644)
+
+	_, err := Load(path)
+	if err == nil {
+		t.Fatal("expected error for unknown dependency, got nil")
+	}
+	if !strings.Contains(err.Error(), "ghost") {
+		t.Errorf("error = %v; want mention of ghost", err)
+	}
+}
+
+func TestLoadWithSelfDependency(t *testing.T) {
+	dir := t.TempDir()
+	path := filepath.Join(dir, "mdp.yaml")
+	os.WriteFile(path, []byte(`
+services:
+  api:
+    command: ./api
+    depends_on:
+      - api
+`), 0644)
+
+	_, err := Load(path)
+	if err == nil {
+		t.Fatal("expected cycle error for self-dependency, got nil")
+	}
+	if !strings.Contains(err.Error(), "cycle") {
+		t.Errorf("error = %v; want mention of cycle", err)
+	}
+}
+
+func TestLoadWithTwoNodeCycle(t *testing.T) {
+	dir := t.TempDir()
+	path := filepath.Join(dir, "mdp.yaml")
+	os.WriteFile(path, []byte(`
+services:
+  a:
+    command: ./a
+    depends_on: [b]
+  b:
+    command: ./b
+    depends_on: [a]
+`), 0644)
+
+	_, err := Load(path)
+	if err == nil {
+		t.Fatal("expected cycle error, got nil")
+	}
+	if !strings.Contains(err.Error(), "cycle") {
+		t.Errorf("error = %v; want cycle", err)
+	}
+}
+
+func TestLoadWithThreeNodeCycle(t *testing.T) {
+	dir := t.TempDir()
+	path := filepath.Join(dir, "mdp.yaml")
+	os.WriteFile(path, []byte(`
+services:
+  a:
+    command: ./a
+    depends_on: [b]
+  b:
+    command: ./b
+    depends_on: [c]
+  c:
+    command: ./c
+    depends_on: [a]
+`), 0644)
+
+	_, err := Load(path)
+	if err == nil {
+		t.Fatal("expected cycle error, got nil")
+	}
+	if !strings.Contains(err.Error(), "cycle") {
+		t.Errorf("error = %v; want cycle", err)
 	}
 }
 
