@@ -198,6 +198,24 @@ global:
 	}
 }
 
+func TestLoadGlobalEnvRejectsEmptyRef(t *testing.T) {
+	cases := map[string]string{
+		"bare ref":   "global:\n  env:\n    FOO:\n      ref:\n",
+		"empty str":  "global:\n  env:\n    FOO:\n      ref: \"\"\n",
+		"null value": "global:\n  env:\n    FOO:\n      ref: ~\n",
+	}
+	for name, body := range cases {
+		t.Run(name, func(t *testing.T) {
+			dir := t.TempDir()
+			path := filepath.Join(dir, "mdp.yaml")
+			os.WriteFile(path, []byte(body), 0644)
+			if _, err := Load(path); err == nil {
+				t.Fatal("expected error for empty ref, got nil")
+			}
+		})
+	}
+}
+
 func TestLoadGlobalEnvRejectsExtraKeys(t *testing.T) {
 	dir := t.TempDir()
 	path := filepath.Join(dir, "mdp.yaml")

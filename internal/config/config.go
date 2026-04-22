@@ -51,10 +51,14 @@ func (g *GlobalEnvValue) UnmarshalYAML(node *yaml.Node) error {
 			return fmt.Errorf("line %d: unknown key %q in global env entry (only `ref` is supported)", node.Line, key)
 		}
 		val := node.Content[1]
-		if val.Kind != yaml.ScalarNode {
-			return fmt.Errorf("line %d: `ref:` value must be a scalar", val.Line)
+		var refStr string
+		if err := val.Decode(&refStr); err != nil {
+			return fmt.Errorf("line %d: `ref:` value must be a string: %w", val.Line, err)
 		}
-		g.Ref = val.Value
+		if refStr == "" {
+			return fmt.Errorf("line %d: `ref:` value must not be empty", val.Line)
+		}
+		g.Ref = refStr
 		return nil
 	default:
 		return fmt.Errorf("line %d: global env entry must be a string or mapping with `ref:`", node.Line)
