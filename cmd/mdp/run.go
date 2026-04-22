@@ -217,7 +217,7 @@ func runBatchMode(cmd *cobra.Command, controlPort int, groupFlag string) error {
 				env = append(env, k+"="+expanded)
 			}
 			bt.wg.Add(1)
-			go runServiceProcess(bt, a.name, a.svc.Command, a.svc.Dir, env, controlURL, serverName)
+			go runServiceProcess(bt, a.name, a.svc, env, controlURL, serverName)
 		}
 	}
 
@@ -315,7 +315,7 @@ func launchMultiPortBatch(client *http.Client, controlURL, name string, svc conf
 		namesCopy := make([]string, len(registered))
 		copy(namesCopy, registered)
 		bt.wg.Add(1)
-		go runServiceProcess(bt, name, svc.Command, svc.Dir, env, controlURL, namesCopy...)
+		go runServiceProcess(bt, name, svc, env, controlURL, namesCopy...)
 	}
 
 	return nil
@@ -427,38 +427,87 @@ func (bt *batchTracker) killAll() {
 	}
 }
 
-func runServiceProcess(bt *batchTracker, name, command, dir string, env []string, controlURL string, serverNames ...string) {
+const shutdownHookTimeout = 30 * time.Second
+
+func runServiceProcess(bt *batchTracker, name string, svc config.ServiceConfig, env []string, controlURL string, serverNames ...string) {
 	defer bt.wg.Done()
 	color := nextColor()
 	pw := newPrefixWriter(name, color, os.Stdout)
 	pwErr := newPrefixWriter(name, color, os.Stderr)
+	defer pw.Flush()
+	defer pwErr.Flush()
 
-	parts := strings.Fields(command)
+	for i, raw := range svc.Setup {
+		parts, err := orchestrator.SplitHookArgs(raw)
+		if err != nil {
+			slog.Error("setup hook parse failed", "name", name, "step", i+1, "cmd", raw, "err", err)
+			return
+		}
+		if len(parts) == 0 {
+			continue
+		}
+		slog.Info("service hook", "name", name, "phase", "setup", "step", i+1, "cmd", raw)
+		h := exec.Command(parts[0], parts[1:]...)
+		h.Env = append(os.Environ(), env...)
+		if svc.Dir != "" {
+			h.Dir = svc.Dir
+		}
+		h.Stdout = pw
+		h.Stderr = pwErr
+		if err := h.Run(); err != nil {
+			slog.Error("setup hook failed", "name", name, "step", i+1, "cmd", raw, "err", err)
+			return
+		}
+	}
+
+	parts := strings.Fields(svc.Command)
 	if len(parts) == 0 {
 		slog.Error("empty command", "name", name)
 		return
 	}
 	cmd := exec.Command(parts[0], parts[1:]...)
 	cmd.Env = append(os.Environ(), env...)
-	if dir != "" {
-		cmd.Dir = dir
+	if svc.Dir != "" {
+		cmd.Dir = svc.Dir
 	}
 	cmd.Stdout = pw
 	cmd.Stderr = pwErr
 
 	bt.add(cmd)
 	if err := cmd.Start(); err != nil {
-		slog.Error("service process failed to start", "name", name, "command", command, "err", err)
+		slog.Error("service process failed to start", "name", name, "command", svc.Command, "err", err)
 		return
 	}
 	for _, sn := range serverNames {
 		updatePIDWithOrchestrator(controlURL, sn, cmd.Process.Pid)
 	}
 	if err := cmd.Wait(); err != nil {
-		slog.Error("service process exited", "name", name, "command", command, "err", err)
+		slog.Error("service process exited", "name", name, "command", svc.Command, "err", err)
 	}
-	pw.Flush()
-	pwErr.Flush()
+
+	for i, raw := range svc.Shutdown {
+		parts, err := orchestrator.SplitHookArgs(raw)
+		if err != nil {
+			slog.Warn("shutdown hook parse failed", "name", name, "step", i+1, "cmd", raw, "err", err)
+			continue
+		}
+		if len(parts) == 0 {
+			continue
+		}
+		slog.Info("service hook", "name", name, "phase", "shutdown", "step", i+1, "cmd", raw)
+		ctx, cancel := context.WithTimeout(context.Background(), shutdownHookTimeout)
+		h := exec.CommandContext(ctx, parts[0], parts[1:]...)
+		h.Env = append(os.Environ(), env...)
+		if svc.Dir != "" {
+			h.Dir = svc.Dir
+		}
+		h.Stdout = pw
+		h.Stderr = pwErr
+		if err := h.Run(); err != nil {
+			slog.Warn("shutdown hook failed", "name", name, "step", i+1, "cmd", raw, "err", err)
+		}
+		cancel()
+	}
 }
 
 func runSingleMode(cmd *cobra.Command, args []string, controlPort int, groupFlag, tlsCert, tlsKey string) error {

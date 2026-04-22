@@ -27,19 +27,19 @@ func TestSplitHookArgs(t *testing.T) {
 		{`"unterminated`, nil, true},
 	}
 	for _, tc := range tests {
-		got, err := splitHookArgs(tc.in)
+		got, err := SplitHookArgs(tc.in)
 		if tc.wantErr {
 			if err == nil {
-				t.Errorf("splitHookArgs(%q): want error, got %v", tc.in, got)
+				t.Errorf("SplitHookArgs(%q): want error, got %v", tc.in, got)
 			}
 			continue
 		}
 		if err != nil {
-			t.Errorf("splitHookArgs(%q): unexpected err %v", tc.in, err)
+			t.Errorf("SplitHookArgs(%q): unexpected err %v", tc.in, err)
 			continue
 		}
 		if !reflect.DeepEqual(got, tc.want) {
-			t.Errorf("splitHookArgs(%q) = %#v, want %#v", tc.in, got, tc.want)
+			t.Errorf("SplitHookArgs(%q) = %#v, want %#v", tc.in, got, tc.want)
 		}
 	}
 }
