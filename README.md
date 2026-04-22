@@ -138,7 +138,11 @@ Place an `mdp.yaml` in your project root to declaratively define services. When 
 ```yaml
 services:
   frontend:
-    command: npm run dev
+    setup:
+      - bun install
+    command: bun dev
+    shutdown:
+      - rm -rf .cache/dev
     dir: ./frontend
     proxy: 3000
     env:
@@ -157,6 +161,8 @@ services:
 
 port_range: "10000-60000"  # optional
 ```
+
+**Hooks:** `setup` commands run sequentially before `command` — if any exits non-zero the service is marked failed and `command` is not started. `shutdown` commands run sequentially after `command` exits (for any reason), best-effort with a 30s per-step timeout. Both share the same `dir` and `env` as `command`.
 
 ### Docker Compose
 

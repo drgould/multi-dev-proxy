@@ -1,10 +1,48 @@
 package orchestrator
 
 import (
+	"reflect"
 	"testing"
 
 	"github.com/derekgould/multi-dev-proxy/internal/envexpand"
 )
+
+func TestSplitHookArgs(t *testing.T) {
+	tests := []struct {
+		in      string
+		want    []string
+		wantErr bool
+	}{
+		{"", nil, false},
+		{"   ", nil, false},
+		{"echo hello", []string{"echo", "hello"}, false},
+		{"  echo   hello  ", []string{"echo", "hello"}, false},
+		{`sh -c 'echo "[setup] preparing"; sleep 1'`,
+			[]string{"sh", "-c", `echo "[setup] preparing"; sleep 1`}, false},
+		{`sh -c "echo 'hi there'"`,
+			[]string{"sh", "-c", "echo 'hi there'"}, false},
+		{"rm -rf .cache/dev", []string{"rm", "-rf", ".cache/dev"}, false},
+		{`echo ""`, []string{"echo", ""}, false},
+		{`'unterminated`, nil, true},
+		{`"unterminated`, nil, true},
+	}
+	for _, tc := range tests {
+		got, err := splitHookArgs(tc.in)
+		if tc.wantErr {
+			if err == nil {
+				t.Errorf("splitHookArgs(%q): want error, got %v", tc.in, got)
+			}
+			continue
+		}
+		if err != nil {
+			t.Errorf("splitHookArgs(%q): unexpected err %v", tc.in, err)
+			continue
+		}
+		if !reflect.DeepEqual(got, tc.want) {
+			t.Errorf("splitHookArgs(%q) = %#v, want %#v", tc.in, got, tc.want)
+		}
+	}
+}
 
 func TestBuildEnv(t *testing.T) {
 	tests := []struct {

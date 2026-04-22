@@ -8,6 +8,7 @@ import (
 	"os/exec"
 	"strconv"
 	"strings"
+	"time"
 
 	"github.com/derekgould/multi-dev-proxy/internal/config"
 	"github.com/derekgould/multi-dev-proxy/internal/detect"
@@ -15,6 +16,8 @@ import (
 	"github.com/derekgould/multi-dev-proxy/internal/ports"
 	"github.com/derekgould/multi-dev-proxy/internal/registry"
 )
+
+const shutdownHookTimeout = 30 * time.Second
 
 // StartConfigServices starts all services from the config under the given group name.
 func (o *Orchestrator) StartConfigServices(ctx context.Context, group string) error {
@@ -168,8 +171,44 @@ func (o *Orchestrator) startMultiPortService(ctx context.Context, name string, s
 }
 
 func (o *Orchestrator) launchProcess(ctx context.Context, name string, svc config.ServiceConfig, serverName, group string, port int, env []string) error {
+	ms := &ManagedService{
+		Name:   serverName,
+		Config: svc,
+		Group:  group,
+		Port:   port,
+		Status: "setup",
+	}
+	o.SetService(serverName, ms)
+
+	runHook := func(phase, raw string, hookCtx context.Context) error {
+		parts, err := splitHookArgs(raw)
+		if err != nil {
+			return err
+		}
+		if len(parts) == 0 {
+			return nil
+		}
+		slog.Info("service hook", "name", serverName, "phase", phase, "cmd", raw)
+		h := exec.CommandContext(hookCtx, parts[0], parts[1:]...)
+		h.Env = append(os.Environ(), env...)
+		if svc.Dir != "" {
+			h.Dir = svc.Dir
+		}
+		h.Stdout = os.Stdout
+		h.Stderr = os.Stderr
+		return h.Run()
+	}
+
+	for i, raw := range svc.Setup {
+		if err := runHook("setup", raw, ctx); err != nil {
+			o.UpdateServiceStatus(serverName, "failed")
+			return fmt.Errorf("setup step %d for %s (%q): %w", i+1, name, raw, err)
+		}
+	}
+
 	parts := strings.Fields(svc.Command)
 	if len(parts) == 0 {
+		o.UpdateServiceStatus(serverName, "failed")
 		return fmt.Errorf("empty command for service %s", name)
 	}
 
@@ -182,29 +221,34 @@ func (o *Orchestrator) launchProcess(ctx context.Context, name string, svc confi
 	cmd.Stderr = os.Stderr
 
 	if err := cmd.Start(); err != nil {
+		o.UpdateServiceStatus(serverName, "failed")
 		return fmt.Errorf("start %s: %w", name, err)
 	}
 
-	ms := &ManagedService{
-		Name:   serverName,
-		Config: svc,
-		Group:  group,
-		PID:    cmd.Process.Pid,
-		Port:   port,
-		Status: "running",
-	}
-	o.SetService(serverName, ms)
+	o.SetServicePID(serverName, cmd.Process.Pid)
+	o.UpdateServiceStatus(serverName, "running")
 
 	go func() {
 		err := cmd.Wait()
-		status := "stopped"
+		exitStatus := "stopped"
 		if err != nil {
-			status = "failed"
+			exitStatus = "failed"
 			slog.Error("service exited", "name", serverName, "err", err)
 		} else {
 			slog.Info("service exited", "name", serverName)
 		}
-		o.UpdateServiceStatus(serverName, status)
+
+		if len(svc.Shutdown) > 0 {
+			o.UpdateServiceStatus(serverName, "stopping")
+			for i, raw := range svc.Shutdown {
+				hookCtx, cancel := context.WithTimeout(context.Background(), shutdownHookTimeout)
+				if herr := runHook("shutdown", raw, hookCtx); herr != nil {
+					slog.Warn("shutdown hook failed", "name", serverName, "step", i+1, "cmd", raw, "err", herr)
+				}
+				cancel()
+			}
+		}
+		o.UpdateServiceStatus(serverName, exitStatus)
 	}()
 
 	slog.Info("service started", "name", serverName, "pid", cmd.Process.Pid, "port", port)
@@ -241,4 +285,53 @@ func DetectGroup(dir string) string {
 		return "default"
 	}
 	return branch
+}
+
+// splitHookArgs tokenizes a hook command honoring single and double quotes.
+// Quotes group whitespace-containing arguments; they are stripped from output.
+// Backslash escaping is not supported — users who need it can invoke their
+// own shell, e.g. `sh -c '...'`.
+func splitHookArgs(s string) ([]string, error) {
+	var args []string
+	var cur strings.Builder
+	var inSingle, inDouble, hasTok bool
+	for i := 0; i < len(s); i++ {
+		c := s[i]
+		switch {
+		case inSingle:
+			if c == '\'' {
+				inSingle = false
+			} else {
+				cur.WriteByte(c)
+			}
+		case inDouble:
+			if c == '"' {
+				inDouble = false
+			} else {
+				cur.WriteByte(c)
+			}
+		case c == '\'':
+			inSingle = true
+			hasTok = true
+		case c == '"':
+			inDouble = true
+			hasTok = true
+		case c == ' ' || c == '\t':
+			if hasTok {
+				args = append(args, cur.String())
+				cur.Reset()
+				hasTok = false
+			}
+		default:
+			cur.WriteByte(c)
+			hasTok = true
+		}
+	}
+	if inSingle || inDouble {
+		return nil, fmt.Errorf("unterminated quote in %q", s)
+	}
+	if hasTok {
+		args = append(args, cur.String())
+	}
+	return args, nil
 }

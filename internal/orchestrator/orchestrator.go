@@ -44,12 +44,12 @@ type ProxyInstance struct {
 
 // ManagedService tracks a service process started by the orchestrator.
 type ManagedService struct {
-	Name    string
-	Config  config.ServiceConfig
-	Group   string
-	PID     int
-	Port    int
-	Status  string // "starting", "running", "stopped", "failed"
+	Name   string
+	Config config.ServiceConfig
+	Group  string
+	PID    int
+	Port   int
+	Status string // "setup", "starting", "running", "stopping", "stopped", "failed"
 }
 
 // Orchestrator manages proxy instances, services, and groups.
@@ -539,6 +539,15 @@ func (o *Orchestrator) UpdateServiceStatus(name, status string) {
 		if status == "stopped" || status == "failed" {
 			o.emit(Event{Type: "service_stopped", Name: name})
 		}
+	}
+}
+
+// SetServicePID updates a managed service's PID.
+func (o *Orchestrator) SetServicePID(name string, pid int) {
+	o.mu.Lock()
+	defer o.mu.Unlock()
+	if svc, ok := o.services[name]; ok {
+		svc.PID = pid
 	}
 }
 

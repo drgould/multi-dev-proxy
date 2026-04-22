@@ -52,7 +52,11 @@ services:
       API_URL: "http://localhost:3001"
 
   api-feature-a:
+    setup:
+      - sh -c 'echo "[setup] preparing api-feature-a"; sleep 1'
     command: ./server/server
+    shutdown:
+      - sh -c 'echo "[shutdown] cleaning up api-feature-a"'
     proxy: 3001
     group: feature-a
     env:
