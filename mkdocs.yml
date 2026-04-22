@@ -1,0 +1,32 @@
+site_name: mdp
+site_url: https://drgould.github.io/multi-dev-proxy/
+repo_url: https://github.com/drgould/multi-dev-proxy
+repo_name: drgould/multi-dev-proxy
+edit_uri: edit/main/docs/
+
+theme:
+  name: shadcn
+
+plugins:
+  - search
+
+nav:
+  - Home: index.md
+  - Quick start: quick-start.md
+  - Installation: installation.md
+  - Concepts: concepts.md
+  - CLI reference: cli.md
+  - Config: config.md
+  - Recipes: recipes.md
+  - API reference: api.md
+  - Testbed: testbed.md
+  - Contributing: contributing.md
+
+markdown_extensions:
+  - admonition
+  - codehilite
+  - fenced_code
+  - footnotes
+  - pymdownx.tabbed:
+      alternate_style: true
+  - pymdownx.blocks.details
