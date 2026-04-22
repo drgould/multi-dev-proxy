@@ -32,16 +32,22 @@ import (
 	"github.com/derekgould/multi-dev-proxy/internal/registry"
 )
 
-// batchReadyTimeout and batchReadyPoll control how long the client-side batch
-// launcher waits for each service to become TCP-reachable before marking its
-// dep-graph entry as failed. Vars (not consts) so tests can shorten them.
-var (
-	batchReadyTimeout = 60 * time.Second
-	batchReadyPoll    = 200 * time.Millisecond
-)
+// batchRuntime bundles the readiness knobs threaded through launchBatchService.
+// Keeping these per-call (not package-level) avoids data races between test
+// cleanups and in-flight launch goroutines.
+type batchRuntime struct {
+	readyTimeout time.Duration
+	readyPoll    time.Duration
+	tcpCheck     func(int) bool
+}
 
-// batchTCPCheck is overridable in tests.
-var batchTCPCheck = registry.TCPCheck
+func defaultBatchRuntime() batchRuntime {
+	return batchRuntime{
+		readyTimeout: 60 * time.Second,
+		readyPoll:    200 * time.Millisecond,
+		tcpCheck:     registry.TCPCheck,
+	}
+}
 
 var runCmd = &cobra.Command{
 	Use:   "run",
@@ -184,9 +190,10 @@ func runBatchMode(cmd *cobra.Command, controlPort int, groupFlag string) error {
 	}
 	states := depwait.NewStates(names)
 
+	rt := defaultBatchRuntime()
 	for _, a := range allocations {
 		bt.wg.Add(1)
-		go launchBatchService(batchCtx, bt, client, controlURL, clientID, a, portMap, states)
+		go launchBatchService(batchCtx, bt, client, controlURL, clientID, a, portMap, states, rt)
 	}
 
 	slog.Info("batch services started", "group", group)
@@ -248,6 +255,7 @@ func launchBatchService(
 	a batchAlloc,
 	portMap envexpand.PortMap,
 	states map[string]*depwait.State,
+	rt batchRuntime,
 ) {
 	defer bt.wg.Done()
 	state := states[a.name]
@@ -257,7 +265,7 @@ func launchBatchService(
 	signalReady := func() { readyOnce.Do(func() { close(state.Done) }) }
 	defer signalReady()
 
-	if err := depwait.Wait(ctx, states, a.svc.DependsOn, batchReadyTimeout); err != nil {
+	if err := depwait.Wait(ctx, states, a.svc.DependsOn, rt.readyTimeout); err != nil {
 		slog.Error("service aborted waiting on deps", "name", a.name, "err", err)
 		state.Err = err
 		return
@@ -351,7 +359,7 @@ func launchBatchService(
 			return
 		}
 		if len(probePorts) > 0 {
-			if err := depwait.TCPReady(ctx, probePorts, batchReadyTimeout, batchReadyPoll, batchTCPCheck); err != nil {
+			if err := depwait.TCPReady(ctx, probePorts, rt.readyTimeout, rt.readyPoll, rt.tcpCheck); err != nil {
 				slog.Error("external service not ready", "name", a.name, "err", err)
 				state.Err = err
 			}
@@ -419,7 +427,7 @@ func launchBatchService(
 	// Poll TCP readiness so dependents only unblock once this service is
 	// actually accepting connections.
 	if len(probePorts) > 0 {
-		if err := depwait.TCPReady(ctx, probePorts, batchReadyTimeout, batchReadyPoll, batchTCPCheck); err != nil {
+		if err := depwait.TCPReady(ctx, probePorts, rt.readyTimeout, rt.readyPoll, rt.tcpCheck); err != nil {
 			slog.Error("service not ready", "name", a.name, "err", err)
 			state.Err = err
 			// Fall through to wait for the cmd — leave it running so logs
