@@ -68,12 +68,16 @@ npm install -g mdp
 
 ### `mdp`
 
-Starts the orchestrator with an interactive TUI. Manages all proxy instances and shows their registered services. The TUI lets you navigate with arrow keys and switch active servers with Enter.
+Starts the orchestrator with an interactive TUI. Manages all proxy instances and shows their registered services.
+
+Keys: `↑`/`↓` (or `j`/`k`) navigate, `Enter` switch active server, `Tab` / `h` / `l` switch tabs, `d` detach (leave daemon running), `q` quit (stop daemon). Mouse clicks are supported.
 
 ```sh
 mdp
 mdp --control-port 13100
 ```
+
+A web dashboard is also served on `--dashboard-port` (default `6370`) — open `http://localhost:6370` if you prefer a browser UI to the TUI.
 
 ### `mdp --daemon` / `mdp -d`
 
@@ -164,6 +168,51 @@ port_range: "10000-60000"  # optional
 
 **Hooks:** `setup` commands run sequentially before `command` — if any exits non-zero the service is marked failed and `command` is not started. `shutdown` commands run sequentially after `command` exits (for any reason), best-effort with a 30s per-step timeout. Both share the same `dir` and `env` as `command`.
 
+**Other service fields:**
+
+- `scheme:` — `http` (default) or `https`. Auto-inferred as `https` when `tls_cert` is set.
+- `tls_cert:` / `tls_key:` — Paths to a TLS cert and key. The proxy serves HTTPS on this port using them. See [HTTPS](#https) below.
+- `env_file:` — Optional path for writing the service's resolved env vars as a `.env` file. See [Exporting env vars](#exporting-env-vars-to-env-files) below.
+- `depends_on:` — See [Startup dependencies](#startup-dependencies) below.
+- `ports:` — See [Docker Compose](#docker-compose) below.
+
+### Exporting env vars to `.env` files
+
+`mdp` generates free ports and resolves `${svc.port}` refs at startup, so the final env vars aren't known until the orchestrator is up. To make those values visible to tools that run outside of `mdp` (your editor's run config, `psql`, `curl`, a standalone shell), export them to `.env` files.
+
+**Per-service** — `env_file:` writes exactly what that service's process sees:
+
+```yaml
+services:
+  api:
+    command: ./api
+    proxy: 4000
+    env_file: ./.mdp.api.env   # relative to the service's dir
+    env:
+      DATABASE_URL: "postgres://localhost:${db.port}/app"
+```
+
+**Project-wide** — a top-level `global:` block writes an aggregate file with any keys you pick:
+
+```yaml
+global:
+  env_file: ./.mdp.env          # relative to the mdp.yaml dir
+  env:
+    # Scalar form — any string, with ${svc.key} / ${svc.env.VAR} interpolation.
+    API_URL: "http://localhost:${api.port}"
+    DB_URL:  "postgres://localhost:${db.env.DB_PORT}/app"
+    # Mapping form — pass through another service's port or env var as-is.
+    API_PORT:
+      ref: api.env.PORT
+    DB_PORT:
+      ref: db.env.DB_PORT
+
+services:
+  # ...
+```
+
+Files are written after port resolution, before any service `command` runs. Per-service paths resolve against the service's `dir`; `global.env_file` resolves against the `mdp.yaml` directory.
+
 ### Docker Compose
 
 For projects using Docker Compose where multiple services need their own proxy ports, use the `ports` mapping with `auto` port assignment:
@@ -205,6 +254,17 @@ services:
 ```
 
 When you run `mdp run`, mdp assigns free ports, sets them as environment variables, and registers each port mapping with the appropriate proxy.
+
+**Non-HTTP ports (no proxy):** omit `proxy:` (and optionally `name:`) on a `ports:` entry to allocate a free port for `${svc.env.VAR}` interpolation without starting a reverse-proxy listener for it. Useful for databases, caches, and other non-HTTP services other services just need to connect to directly.
+
+```yaml
+db:
+  command: docker compose up db --wait
+  env:
+    DB_PORT: auto
+  ports:
+    - env: DB_PORT    # allocated & interpolatable, no proxy
+```
 
 ### Referencing another service's port
 
@@ -336,13 +396,14 @@ mdp run --tls-cert localhost.pem --tls-key localhost-key.pem -- npm run dev
 `**mdp` flags:**
 
 
-| Flag             | Default   | Description                                 |
-| ---------------- | --------- | ------------------------------------------- |
-| `--control-port` | `13100`   | Control API port                            |
-| `-d, --daemon`   |           | Run as background daemon (no TUI)           |
-| `--stop`         |           | Stop the background daemon                  |
-| `--config`       |           | Path to mdp.yaml (auto-detected if not set) |
-| `--host`         | `0.0.0.0` | Host for proxy listeners                    |
+| Flag               | Default   | Description                                 |
+| ------------------ | --------- | ------------------------------------------- |
+| `--control-port`   | `13100`   | Control API port                            |
+| `--dashboard-port` | `6370`    | Dashboard web UI port                       |
+| `-d, --daemon`     |           | Run as background daemon (no TUI)           |
+| `--stop`           |           | Stop the background daemon                  |
+| `--config`         |           | Path to mdp.yaml (auto-detected if not set) |
+| `--host`           | `0.0.0.0` | Host for proxy listeners                    |
 
 
 `**mdp run` flags:**
