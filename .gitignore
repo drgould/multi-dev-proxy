@@ -54,5 +54,8 @@ playwright-report/
 # GoReleaser dist
 dist/
 
+# MkDocs build output
+/site/
+
 # Coding Agents
 .sisyphus/
