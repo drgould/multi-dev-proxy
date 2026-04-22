@@ -236,7 +236,7 @@ func (o *Orchestrator) createProxyLocked(port int, label string) (*ProxyInstance
 	mux := http.NewServeMux()
 	mux.HandleFunc("GET /__mdp/health", api.HealthHandler(reg))
 	mux.HandleFunc("GET /__mdp/servers", api.ServersHandler(reg))
-	mux.HandleFunc("POST /__mdp/register", api.RegisterHandler(reg))
+	mux.HandleFunc("POST /__mdp/register", api.RegisterHandler(reg, o.AddCert))
 	mux.HandleFunc("DELETE /__mdp/register/{name...}", api.DeregisterHandler(reg))
 	mux.HandleFunc("POST /__mdp/switch/{name...}", api.SwitchHandler(reg, cookieName, prx, port))
 	mux.HandleFunc("GET /__mdp/last-path/{name...}", api.LastPathHandler(prx))

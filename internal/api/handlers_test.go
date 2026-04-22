@@ -2,6 +2,7 @@ package api
 
 import (
 	"encoding/json"
+	"errors"
 	"net/http"
 	"net/http/httptest"
 	"net/url"
@@ -11,6 +12,8 @@ import (
 	"github.com/derekgould/multi-dev-proxy/internal/registry"
 	"github.com/derekgould/multi-dev-proxy/internal/routing"
 )
+
+var errAddCert = errors.New("bad cert")
 
 func newTestRegistry(entries ...*registry.ServerEntry) *registry.Registry {
 	reg := registry.New()
@@ -203,7 +206,7 @@ func TestRegisterHandler(t *testing.T) {
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
 			reg := registry.New()
-			handler := RegisterHandler(reg)
+			handler := RegisterHandler(reg, nil)
 
 			req := httptest.NewRequest(tt.method, "/__mdp/register", strings.NewReader(tt.body))
 			req.Header.Set("Content-Type", "application/json")
@@ -572,7 +575,7 @@ func TestCORSMiddleware(t *testing.T) {
 
 func TestRegisterHandlerInfersRepo(t *testing.T) {
 	reg := registry.New()
-	handler := RegisterHandler(reg)
+	handler := RegisterHandler(reg, nil)
 
 	body := `{"name":"myrepo/feature","port":3000,"pid":100}`
 	req := httptest.NewRequest(http.MethodPost, "/__mdp/register", strings.NewReader(body))
@@ -594,7 +597,7 @@ func TestRegisterHandlerInfersRepo(t *testing.T) {
 
 func TestRegisterHandlerDefaultScheme(t *testing.T) {
 	reg := registry.New()
-	handler := RegisterHandler(reg)
+	handler := RegisterHandler(reg, nil)
 
 	body := `{"name":"app/main","port":3000,"pid":100}`
 	req := httptest.NewRequest(http.MethodPost, "/__mdp/register", strings.NewReader(body))
@@ -605,6 +608,70 @@ func TestRegisterHandlerDefaultScheme(t *testing.T) {
 	entry := reg.Get("app/main")
 	if entry.Scheme != "http" {
 		t.Errorf("scheme = %q, want http (default)", entry.Scheme)
+	}
+}
+
+func TestRegisterHandlerLoadsTLSCert(t *testing.T) {
+	reg := registry.New()
+	var gotCert, gotKey string
+	addCert := func(certPath, keyPath string) error {
+		gotCert, gotKey = certPath, keyPath
+		return nil
+	}
+	handler := RegisterHandler(reg, addCert)
+
+	body := `{"name":"app/main","port":3000,"scheme":"https","tlsCertPath":"/tmp/c.pem","tlsKeyPath":"/tmp/k.pem"}`
+	req := httptest.NewRequest(http.MethodPost, "/__mdp/register", strings.NewReader(body))
+	rec := httptest.NewRecorder()
+	handler.ServeHTTP(rec, req)
+
+	if rec.Code != http.StatusOK {
+		t.Fatalf("status = %d, want 200", rec.Code)
+	}
+	if gotCert != "/tmp/c.pem" || gotKey != "/tmp/k.pem" {
+		t.Errorf("addCert called with (%q,%q), want (/tmp/c.pem,/tmp/k.pem)", gotCert, gotKey)
+	}
+}
+
+func TestRegisterHandlerAtomicOnTLSFailure(t *testing.T) {
+	reg := registry.New()
+	addCert := func(certPath, keyPath string) error {
+		return errAddCert
+	}
+	handler := RegisterHandler(reg, addCert)
+
+	body := `{"name":"app/main","port":3000,"scheme":"https","tlsCertPath":"/tmp/c.pem","tlsKeyPath":"/tmp/k.pem"}`
+	req := httptest.NewRequest(http.MethodPost, "/__mdp/register", strings.NewReader(body))
+	rec := httptest.NewRecorder()
+	handler.ServeHTTP(rec, req)
+
+	if rec.Code != http.StatusBadRequest {
+		t.Fatalf("status = %d, want 400", rec.Code)
+	}
+	if reg.Get("app/main") != nil {
+		t.Error("service should not be registered when cert load fails")
+	}
+}
+
+func TestRegisterHandlerSkipsTLSWhenPathsMissing(t *testing.T) {
+	reg := registry.New()
+	called := false
+	addCert := func(certPath, keyPath string) error {
+		called = true
+		return nil
+	}
+	handler := RegisterHandler(reg, addCert)
+
+	body := `{"name":"app/main","port":3000}`
+	req := httptest.NewRequest(http.MethodPost, "/__mdp/register", strings.NewReader(body))
+	rec := httptest.NewRecorder()
+	handler.ServeHTTP(rec, req)
+
+	if rec.Code != http.StatusOK {
+		t.Fatalf("status = %d, want 200", rec.Code)
+	}
+	if called {
+		t.Error("addCert should not be called when cert paths are absent")
 	}
 }
 

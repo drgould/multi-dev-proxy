@@ -86,8 +86,15 @@ func ServersHandler(reg *registry.Registry) http.HandlerFunc {
 	}
 }
 
-// RegisterHandler handles POST /__mdp/register
-func RegisterHandler(reg *registry.Registry) http.HandlerFunc {
+// CertLoader loads a TLS keypair into the proxy's cert store. Optional
+// dependency for RegisterHandler — when nil, cert paths in the request are
+// stored on the registry entry but not loaded.
+type CertLoader func(certPath, keyPath string) error
+
+// RegisterHandler handles POST /__mdp/register. If addCert is non-nil and the
+// request includes both tlsCertPath and tlsKeyPath, the cert is loaded into
+// the proxy's TLS store so the listener can serve HTTPS for the new service.
+func RegisterHandler(reg *registry.Registry, addCert CertLoader) http.HandlerFunc {
 	return func(w http.ResponseWriter, r *http.Request) {
 		if r.Method != http.MethodPost {
 			writeJSON(w, http.StatusMethodNotAllowed, map[string]string{"error": "method not allowed"})
@@ -113,6 +120,14 @@ func RegisterHandler(reg *registry.Registry) http.HandlerFunc {
 		scheme := body.Scheme
 		if scheme == "" {
 			scheme = "http"
+		}
+		// Load TLS cert before registering so a bad cert doesn't leave the
+		// service half-registered with scheme=https but no listener cert.
+		if addCert != nil && body.TLSCertPath != "" && body.TLSKeyPath != "" {
+			if err := addCert(body.TLSCertPath, body.TLSKeyPath); err != nil {
+				writeJSON(w, http.StatusBadRequest, map[string]string{"error": "load TLS cert: " + err.Error()})
+				return
+			}
 		}
 		entry := &registry.ServerEntry{
 			Name:        body.Name,

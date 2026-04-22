@@ -18,6 +18,8 @@ func newRegisterCmd(controlPort int, flags map[string]string, args []string) *co
 	cmd.Flags().BoolP("list", "l", false, "")
 	cmd.Flags().String("group", "", "")
 	cmd.Flags().Int("control-port", controlPort, "")
+	cmd.Flags().String("tls-cert", "", "")
+	cmd.Flags().String("tls-key", "", "")
 	for k, v := range flags {
 		cmd.Flags().Set(k, v)
 	}
@@ -58,6 +60,51 @@ func TestRegisterViaOrchestratorSuccess(t *testing.T) {
 	}
 	if gotBody["name"] != "app/main" {
 		t.Errorf("expected name app/main, got %v", gotBody["name"])
+	}
+}
+
+func TestRegisterViaOrchestratorForwardsTLS(t *testing.T) {
+	var gotBody map[string]any
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.URL.Path == "/__mdp/health" {
+			json.NewEncoder(w).Encode(map[string]any{"ok": true})
+			return
+		}
+		json.NewDecoder(r.Body).Decode(&gotBody)
+		json.NewEncoder(w).Encode(map[string]bool{"ok": true})
+	}))
+	defer srv.Close()
+
+	port := testPort(t, srv.URL)
+	cmd := newRegisterCmd(port, map[string]string{
+		"port":       "4001",
+		"proxy-port": "3000",
+		"tls-cert":   "/tmp/c.pem",
+		"tls-key":    "/tmp/k.pem",
+	}, []string{"app/main"})
+	if err := cmd.Execute(); err != nil {
+		t.Fatalf("register: %v", err)
+	}
+	if gotBody["tlsCertPath"] != "/tmp/c.pem" {
+		t.Errorf("tlsCertPath = %v, want /tmp/c.pem", gotBody["tlsCertPath"])
+	}
+	if gotBody["tlsKeyPath"] != "/tmp/k.pem" {
+		t.Errorf("tlsKeyPath = %v, want /tmp/k.pem", gotBody["tlsKeyPath"])
+	}
+	if gotBody["scheme"] != "https" {
+		t.Errorf("scheme = %v, want https", gotBody["scheme"])
+	}
+}
+
+func TestRegisterTLSFlagsRequiredTogether(t *testing.T) {
+	port := 1
+	cmd := newRegisterCmd(port, map[string]string{
+		"port":     "4001",
+		"tls-cert": "/tmp/c.pem",
+	}, []string{"app/main"})
+	err := cmd.Execute()
+	if err == nil || !strings.Contains(err.Error(), "both --tls-cert and --tls-key") {
+		t.Fatalf("expected paired-flag error, got: %v", err)
 	}
 }
 
