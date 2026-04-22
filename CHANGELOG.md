@@ -1,5 +1,14 @@
 # Changelog
 
+## [1.5.0](https://github.com/drgould/multi-dev-proxy/compare/v1.4.1...v1.5.0) (2026-04-22)
+
+
+### Features
+
+* add setup and shutdown hooks per service ([#14](https://github.com/drgould/multi-dev-proxy/issues/14)) ([d4cb083](https://github.com/drgould/multi-dev-proxy/commit/d4cb083d59c74b795aa27f97758a4c81536025d7))
+* export generated env vars to .env files ([#16](https://github.com/drgould/multi-dev-proxy/issues/16)) ([0b8bd14](https://github.com/drgould/multi-dev-proxy/commit/0b8bd1494a5f3dd489cdcc7ad8018696a1aae06c))
+* service dependencies via depends_on in mdp.yaml ([#15](https://github.com/drgould/multi-dev-proxy/issues/15)) ([cce87bc](https://github.com/drgould/multi-dev-proxy/commit/cce87bc72bdf0b7fff4e9d345dc2dd54365f4d41))
+
 ## [1.4.1](https://github.com/drgould/multi-dev-proxy/compare/v1.4.0...v1.4.1) (2026-04-21)
 
 
