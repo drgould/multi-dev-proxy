@@ -8,6 +8,7 @@ import (
 	"net/http"
 	"net/http/httptest"
 	"os"
+	"path/filepath"
 	"strings"
 	"sync"
 	"sync/atomic"
@@ -392,6 +393,126 @@ func TestLaunchBatchServiceReturnsOnContextCancel(t *testing.T) {
 	case <-done:
 	case <-time.After(time.Second):
 		t.Fatal("launchBatchService did not return promptly after ctx cancel")
+	}
+}
+
+func TestLaunchBatchServiceHookOrdering(t *testing.T) {
+	// Stub TCP readiness so the probe against our no-op main command's
+	// unbound port doesn't block the test.
+	origCheck := batchTCPCheck
+	batchTCPCheck = func(int) bool { return true }
+	t.Cleanup(func() { batchTCPCheck = origCheck })
+
+	dir := t.TempDir()
+	logPath := filepath.Join(dir, "events.log")
+	// Write a helper script per phase rather than inlining shell — the main
+	// command path in launchBatchService tokenizes with strings.Fields, which
+	// doesn't preserve quotes, so we need argv-style invocations.
+	writeScript := func(name, tag string) string {
+		p := filepath.Join(dir, name+".sh")
+		body := "#!/bin/sh\necho " + tag + " >> " + logPath + "\n"
+		if err := os.WriteFile(p, []byte(body), 0755); err != nil {
+			t.Fatalf("write script: %v", err)
+		}
+		return "sh " + p
+	}
+
+	var regMu sync.Mutex
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.Method == "POST" && r.URL.Path == "/__mdp/register" {
+			regMu.Lock()
+			f, _ := os.OpenFile(logPath, os.O_APPEND|os.O_CREATE|os.O_WRONLY, 0644)
+			f.WriteString("register\n")
+			f.Close()
+			regMu.Unlock()
+		}
+		w.WriteHeader(http.StatusOK)
+	}))
+	defer srv.Close()
+
+	a := batchAlloc{
+		name:         "web",
+		svcGroup:     "main",
+		assignedPort: 40101,
+		svc: config.ServiceConfig{
+			Setup:    []string{writeScript("setup", "setup")},
+			Command:  writeScript("main", "main"),
+			Shutdown: []string{writeScript("shutdown", "shutdown")},
+			Proxy:    3000,
+		},
+	}
+
+	bt := &batchTracker{}
+	bt.wg.Add(1)
+	states := depwait.NewStates([]string{"web"})
+	launchBatchService(context.Background(), bt, http.DefaultClient, srv.URL, "c1", a, envexpand.PortMap{}, states)
+
+	data, err := os.ReadFile(logPath)
+	if err != nil {
+		t.Fatalf("read log: %v", err)
+	}
+	got := strings.TrimSpace(string(data))
+	want := "setup\nregister\nmain\nshutdown"
+	if got != want {
+		t.Errorf("hook ordering:\n got:\n%s\nwant:\n%s", got, want)
+	}
+}
+
+func TestLaunchBatchServiceSetupFailureSkipsRegistration(t *testing.T) {
+	origCheck := batchTCPCheck
+	batchTCPCheck = func(int) bool { return true }
+	t.Cleanup(func() { batchTCPCheck = origCheck })
+
+	dir := t.TempDir()
+	mainSentinel := filepath.Join(dir, "main-ran")
+
+	var regMu sync.Mutex
+	var regCount int
+	var deregCount int
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		regMu.Lock()
+		defer regMu.Unlock()
+		switch {
+		case r.Method == "POST" && r.URL.Path == "/__mdp/register":
+			regCount++
+		case r.Method == "DELETE" && strings.HasPrefix(r.URL.Path, "/__mdp/register/"):
+			deregCount++
+		}
+		w.WriteHeader(http.StatusOK)
+	}))
+	defer srv.Close()
+
+	a := batchAlloc{
+		name:         "web",
+		svcGroup:     "main",
+		assignedPort: 40102,
+		svc: config.ServiceConfig{
+			// SplitHookArgs handles quoted shell; fine for setup.
+			Setup: []string{"sh -c 'exit 1'"},
+			// Main uses strings.Fields — avoid quotes; touch is argv-friendly.
+			Command: "touch " + mainSentinel,
+			Proxy:   3000,
+		},
+	}
+
+	bt := &batchTracker{}
+	bt.wg.Add(1)
+	states := depwait.NewStates([]string{"web"})
+	launchBatchService(context.Background(), bt, http.DefaultClient, srv.URL, "c1", a, envexpand.PortMap{}, states)
+
+	regMu.Lock()
+	defer regMu.Unlock()
+	if regCount != 0 {
+		t.Errorf("expected no register calls, got %d", regCount)
+	}
+	if deregCount != 0 {
+		t.Errorf("expected no deregister calls (nothing was registered), got %d", deregCount)
+	}
+	if _, err := os.Stat(mainSentinel); err == nil {
+		t.Error("main command ran but should not have after setup failure")
+	}
+	if states["web"].Err == nil {
+		t.Error("expected state.Err to be set after setup failure")
 	}
 }
 
