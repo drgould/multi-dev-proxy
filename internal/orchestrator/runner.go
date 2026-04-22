@@ -326,7 +326,10 @@ func (o *Orchestrator) startMultiPortService(ctx context.Context, name string, s
 }
 
 func (o *Orchestrator) launchProcess(ctx context.Context, name string, svc config.ServiceConfig, serverName, group string, port int, env []string) error {
-	parts := strings.Fields(svc.Command)
+	parts, err := SplitHookArgs(svc.Command)
+	if err != nil {
+		return fmt.Errorf("parse command for %s: %w", name, err)
+	}
 	if len(parts) == 0 {
 		return fmt.Errorf("empty command for service %s", name)
 	}

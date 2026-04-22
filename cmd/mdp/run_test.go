@@ -405,16 +405,8 @@ func TestLaunchBatchServiceHookOrdering(t *testing.T) {
 
 	dir := t.TempDir()
 	logPath := filepath.Join(dir, "events.log")
-	// Write a helper script per phase rather than inlining shell — the main
-	// command path in launchBatchService tokenizes with strings.Fields, which
-	// doesn't preserve quotes, so we need argv-style invocations.
-	writeScript := func(name, tag string) string {
-		p := filepath.Join(dir, name+".sh")
-		body := "#!/bin/sh\necho " + tag + " >> " + logPath + "\n"
-		if err := os.WriteFile(p, []byte(body), 0755); err != nil {
-			t.Fatalf("write script: %v", err)
-		}
-		return "sh " + p
+	appendCmd := func(tag string) string {
+		return "sh -c 'echo " + tag + " >> " + logPath + "'"
 	}
 
 	var regMu sync.Mutex
@@ -435,9 +427,9 @@ func TestLaunchBatchServiceHookOrdering(t *testing.T) {
 		svcGroup:     "main",
 		assignedPort: 40101,
 		svc: config.ServiceConfig{
-			Setup:    []string{writeScript("setup", "setup")},
-			Command:  writeScript("main", "main"),
-			Shutdown: []string{writeScript("shutdown", "shutdown")},
+			Setup:    []string{appendCmd("setup")},
+			Command:  appendCmd("main"),
+			Shutdown: []string{appendCmd("shutdown")},
 			Proxy:    3000,
 		},
 	}
@@ -487,10 +479,8 @@ func TestLaunchBatchServiceSetupFailureSkipsRegistration(t *testing.T) {
 		svcGroup:     "main",
 		assignedPort: 40102,
 		svc: config.ServiceConfig{
-			// SplitHookArgs handles quoted shell; fine for setup.
-			Setup: []string{"sh -c 'exit 1'"},
-			// Main uses strings.Fields — avoid quotes; touch is argv-friendly.
-			Command: "touch " + mainSentinel,
+			Setup:   []string{"sh -c 'exit 1'"},
+			Command: "sh -c 'touch " + mainSentinel + "'",
 			Proxy:   3000,
 		},
 	}

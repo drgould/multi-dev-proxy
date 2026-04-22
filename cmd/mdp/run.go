@@ -491,7 +491,10 @@ func buildBatchEnv(a batchAlloc, portMap envexpand.PortMap) []string {
 // startBatchCommand starts the service process and registers it with bt.
 // Returns the started *exec.Cmd; the caller is responsible for cmd.Wait().
 func startBatchCommand(bt *batchTracker, command, dir string, env []string, stdout, stderr *prefixWriter) (*exec.Cmd, error) {
-	parts := strings.Fields(command)
+	parts, err := orchestrator.SplitHookArgs(command)
+	if err != nil {
+		return nil, err
+	}
 	if len(parts) == 0 {
 		return nil, fmt.Errorf("empty command")
 	}
