@@ -28,6 +28,8 @@ func init() {
 	registerCmd.Flags().BoolP("list", "l", false, "List registered services")
 	registerCmd.Flags().String("group", "", "Group name override (default: git branch)")
 	registerCmd.Flags().Int("control-port", 13100, "Orchestrator control port")
+	registerCmd.Flags().String("tls-cert", "", "TLS certificate file (forwarded to proxy for HTTPS)")
+	registerCmd.Flags().String("tls-key", "", "TLS key file (forwarded to proxy for HTTPS)")
 }
 
 func runRegister(cmd *cobra.Command, args []string) error {
@@ -35,13 +37,19 @@ func runRegister(cmd *cobra.Command, args []string) error {
 	listFlag, _ := cmd.Flags().GetBool("list")
 	controlPort, _ := cmd.Flags().GetInt("control-port")
 	groupFlag, _ := cmd.Flags().GetString("group")
+	tlsCert, _ := cmd.Flags().GetString("tls-cert")
+	tlsKey, _ := cmd.Flags().GetString("tls-key")
 
 	if envPort := os.Getenv("MDP_PROXY_PORT"); envPort != "" && !cmd.Flags().Changed("proxy-port") {
 		fmt.Sscanf(envPort, "%d", &proxyPort)
 	}
 
+	if (tlsCert != "") != (tlsKey != "") {
+		return fmt.Errorf("both --tls-cert and --tls-key are required")
+	}
+
 	if isOrchestratorRunning(controlPort) {
-		return runRegisterViaOrchestrator(cmd, args, controlPort, proxyPort, groupFlag, listFlag)
+		return runRegisterViaOrchestrator(cmd, args, controlPort, proxyPort, groupFlag, listFlag, tlsCert, tlsKey)
 	}
 
 	proxyURL := discoverProxyURL(proxyPort)
@@ -61,7 +69,13 @@ func runRegister(cmd *cobra.Command, args []string) error {
 	}
 	pid, _ := cmd.Flags().GetInt("pid")
 
-	body, _ := json.Marshal(map[string]any{"name": name, "port": port, "pid": pid, "group": groupFlag})
+	payload := map[string]any{"name": name, "port": port, "pid": pid, "group": groupFlag}
+	if tlsCert != "" {
+		payload["scheme"] = "https"
+		payload["tlsCertPath"] = tlsCert
+		payload["tlsKeyPath"] = tlsKey
+	}
+	body, _ := json.Marshal(payload)
 	req, _ := http.NewRequest(http.MethodPost, proxyURL+"/__mdp/register", bytes.NewReader(body))
 	req.Header.Set("Content-Type", "application/json")
 	resp, err := tlsSkipClient().Do(req)
@@ -77,7 +91,7 @@ func runRegister(cmd *cobra.Command, args []string) error {
 	return nil
 }
 
-func runRegisterViaOrchestrator(cmd *cobra.Command, args []string, controlPort, proxyPort int, groupFlag string, listFlag bool) error {
+func runRegisterViaOrchestrator(cmd *cobra.Command, args []string, controlPort, proxyPort int, groupFlag string, listFlag bool, tlsCert, tlsKey string) error {
 	controlURL := fmt.Sprintf("http://127.0.0.1:%d", controlPort)
 	client := &http.Client{Timeout: 5 * time.Second}
 
@@ -113,13 +127,19 @@ func runRegisterViaOrchestrator(cmd *cobra.Command, args []string, controlPort, 
 	}
 	pid, _ := cmd.Flags().GetInt("pid")
 
-	body, _ := json.Marshal(map[string]any{
+	payload := map[string]any{
 		"name":      name,
 		"port":      port,
 		"pid":       pid,
 		"proxyPort": proxyPort,
 		"group":     groupFlag,
-	})
+	}
+	if tlsCert != "" {
+		payload["scheme"] = "https"
+		payload["tlsCertPath"] = tlsCert
+		payload["tlsKeyPath"] = tlsKey
+	}
+	body, _ := json.Marshal(payload)
 	resp, err := client.Post(controlURL+"/__mdp/register", "application/json", bytes.NewReader(body))
 	if err != nil {
 		return fmt.Errorf("orchestrator not reachable: %w", err)

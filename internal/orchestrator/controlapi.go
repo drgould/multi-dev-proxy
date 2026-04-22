@@ -149,6 +149,20 @@ func (c *ControlAPI) handleRegister(w http.ResponseWriter, r *http.Request) {
 	if scheme == "" {
 		scheme = "http"
 	}
+	// Bind the proxy port up front so a port-bind failure doesn't leave the
+	// cert store mutated by a subsequent AddCert call.
+	if _, err := c.orch.EnsureProxy(body.ProxyPort); err != nil {
+		writeJSON(w, http.StatusInternalServerError, map[string]string{"error": err.Error()})
+		return
+	}
+	// Load TLS cert before registering so a bad cert doesn't leave the
+	// service half-registered with scheme=https but no listener cert.
+	if body.TLSCertPath != "" && body.TLSKeyPath != "" {
+		if err := c.orch.AddCert(body.TLSCertPath, body.TLSKeyPath); err != nil {
+			writeJSON(w, http.StatusBadRequest, map[string]string{"error": "load TLS cert: " + err.Error()})
+			return
+		}
+	}
 	entry := &registry.ServerEntry{
 		Name:        body.Name,
 		Repo:        repo,
@@ -166,12 +180,6 @@ func (c *ControlAPI) handleRegister(w http.ResponseWriter, r *http.Request) {
 	}
 	if body.ClientID != "" {
 		c.orch.Heartbeat(body.ClientID)
-	}
-	// Dynamically load the service's TLS cert into the proxy cert store.
-	if body.TLSCertPath != "" && body.TLSKeyPath != "" {
-		if err := c.orch.AddCert(body.TLSCertPath, body.TLSKeyPath); err != nil {
-			slog.Warn("failed to load service TLS cert", "name", body.Name, "err", err)
-		}
 	}
 	writeJSON(w, http.StatusOK, map[string]bool{"ok": true})
 }

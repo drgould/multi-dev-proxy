@@ -3,6 +3,7 @@ package orchestrator
 import (
 	"bytes"
 	"encoding/json"
+	"net"
 	"net/http"
 	"net/http/httptest"
 	"testing"
@@ -82,6 +83,72 @@ func TestControlAPIRegister(t *testing.T) {
 	pi := o.GetProxy(3000)
 	if pi.Registry.Get("api/main") == nil {
 		t.Error("expected api/main to be registered")
+	}
+}
+
+// TestControlAPIRegisterDoesNotLoadCertWhenProxyBindFails verifies that a
+// failure to bind the proxy port aborts the request before AddCert mutates
+// the orchestrator-wide cert store. Otherwise a busy port could leak certs.
+func TestControlAPIRegisterDoesNotLoadCertWhenProxyBindFails(t *testing.T) {
+	// Hold a port so EnsureProxy(busyPort) fails on bind.
+	busyLn, err := net.Listen("tcp", "127.0.0.1:0")
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer busyLn.Close()
+	busyPort := busyLn.Addr().(*net.TCPAddr).Port
+
+	o := New(&config.Config{}, "127.0.0.1")
+	capi := NewControlAPI(o, nil)
+
+	// Use real cert paths so AddCert *would* succeed if it were called.
+	certPath, keyPath, _ := writeSelfSignedCert(t)
+
+	payload := map[string]any{
+		"name":        "app/main",
+		"port":        9999,
+		"proxyPort":   busyPort,
+		"scheme":      "https",
+		"tlsCertPath": certPath,
+		"tlsKeyPath":  keyPath,
+	}
+	body, _ := json.Marshal(payload)
+	req := httptest.NewRequest(http.MethodPost, "/__mdp/register", bytes.NewReader(body))
+	rec := httptest.NewRecorder()
+	capi.Handler().ServeHTTP(rec, req)
+
+	if rec.Code == http.StatusOK {
+		t.Fatalf("expected non-200 when port bind fails, got 200")
+	}
+	if o.HasCerts() {
+		t.Error("cert store should be empty when proxy bind fails")
+	}
+}
+
+func TestControlAPIRegisterAtomicOnTLSFailure(t *testing.T) {
+	o, handler := setupControlAPI(t)
+
+	payload := map[string]any{
+		"name":         "api/main",
+		"port":         5001,
+		"pid":          300,
+		"proxyPort":    3000,
+		"group":        "dev",
+		"scheme":       "https",
+		"tlsCertPath":  "/nonexistent/cert.pem",
+		"tlsKeyPath":   "/nonexistent/key.pem",
+	}
+	body, _ := json.Marshal(payload)
+	req := httptest.NewRequest("POST", "/__mdp/register", bytes.NewReader(body))
+	rec := httptest.NewRecorder()
+	handler.ServeHTTP(rec, req)
+
+	if rec.Code != http.StatusBadRequest {
+		t.Fatalf("expected 400, got %d; body: %s", rec.Code, rec.Body.String())
+	}
+	pi := o.GetProxy(3000)
+	if pi.Registry.Get("api/main") != nil {
+		t.Error("service should not be registered when cert load fails")
 	}
 }
 
