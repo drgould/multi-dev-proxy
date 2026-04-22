@@ -163,12 +163,10 @@ func (o *Orchestrator) StartConfigServices(ctx context.Context, group string) er
 }
 
 // probePortsFor returns the TCP ports that should be polled to decide whether
-// a service has become ready. External services (no command) are not probed
-// because mdp is not managing their lifecycle.
+// a service has become ready. External services (no command) are probed too
+// so dependents only unblock once the externally-managed service is actually
+// reachable.
 func probePortsFor(a serviceAlloc) []int {
-	if a.svc.Command == "" {
-		return nil
-	}
 	if len(a.portAssignments) > 0 {
 		result := make([]int, 0, len(a.portAssignments))
 		for _, p := range a.portAssignments {

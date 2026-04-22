@@ -298,7 +298,7 @@ func launchBatchService(
 				proxyPort:  a.svc.Proxy,
 			})
 		}
-		if a.svc.Command != "" && a.assignedPort > 0 {
+		if a.assignedPort > 0 {
 			probePorts = append(probePorts, a.assignedPort)
 		}
 	}
@@ -336,7 +336,15 @@ func launchBatchService(
 	}
 
 	if a.svc.Command == "" {
-		// External upstream (registered only). Nothing to start or probe.
+		// External upstream (mdp isn't starting a process). Still probe TCP
+		// so dependents only unblock once the externally-managed service is
+		// actually reachable.
+		if len(probePorts) > 0 {
+			if err := depwait.TCPReady(ctx, probePorts, batchReadyTimeout, batchReadyPoll, batchTCPCheck); err != nil {
+				slog.Error("external service not ready", "name", a.name, "err", err)
+				state.Err = err
+			}
+		}
 		return
 	}
 

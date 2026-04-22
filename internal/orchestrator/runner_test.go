@@ -251,6 +251,41 @@ func TestStartConfigServicesParallelForIndependentServices(t *testing.T) {
 	}
 }
 
+func TestStartConfigServicesProbesExternalDependency(t *testing.T) {
+	// An external (commandless) service with a fixed port must be TCP-probed
+	// before dependents start. Here external "ext" is registered on port 9951
+	// but never becomes reachable → dep "d" must fail instead of racing ahead.
+	swapTimeouts(t, 200*time.Millisecond, 10*time.Millisecond)
+	swapTCPCheck(t, func(p int) bool { return p != 9951 })
+
+	cfg := &config.Config{
+		PortRange: "10000-60000",
+		Services: map[string]config.ServiceConfig{
+			"ext": {Port: 9951, Proxy: 3005},
+			"d":   {Command: "sleep 30", Port: 9952, DependsOn: []string{"ext"}},
+		},
+	}
+	o := New(cfg, "")
+	ctx, cancel := context.WithCancel(context.Background())
+	t.Cleanup(cancel)
+
+	done := make(chan struct{})
+	go func() {
+		_ = o.StartConfigServices(ctx, "test")
+		close(done)
+	}()
+
+	select {
+	case <-done:
+	case <-time.After(3 * time.Second):
+		t.Fatal("StartConfigServices should return after timeout")
+	}
+
+	if status, _ := o.ServiceStatus("test/d"); status != "failed" {
+		t.Errorf("d status = %q, want 'failed' because ext never became reachable", status)
+	}
+}
+
 func TestStartConfigServicesMarksDependentFailedOnLaunchError(t *testing.T) {
 	// Regression: if a dependent service's own launch fails (e.g., bad
 	// command), it was pre-registered as "waiting" and the launch error path

@@ -188,6 +188,12 @@ func TestWatchHealthStaysOpenWhenHealthy(t *testing.T) {
 }
 
 func TestLaunchBatchServiceSkipsProxylessPorts(t *testing.T) {
+	// Commandless services still get TCP-probed; stub the check so the test
+	// doesn't block on unbound ports.
+	origCheck := batchTCPCheck
+	batchTCPCheck = func(int) bool { return true }
+	t.Cleanup(func() { batchTCPCheck = origCheck })
+
 	var registerMu sync.Mutex
 	var registerBodies []map[string]any
 	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
