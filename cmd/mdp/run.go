@@ -303,42 +303,53 @@ func launchBatchService(
 		}
 	}
 
-	registered := make([]string, 0, len(registrations))
-	for _, r := range registrations {
-		payload := map[string]any{
-			"name":      r.serverName,
-			"port":      r.port,
-			"proxyPort": r.proxyPort,
-			"group":     a.svcGroup,
-			"clientID":  clientID,
+	registerAll := func() ([]string, error) {
+		registered := make([]string, 0, len(registrations))
+		for _, r := range registrations {
+			payload := map[string]any{
+				"name":      r.serverName,
+				"port":      r.port,
+				"proxyPort": r.proxyPort,
+				"group":     a.svcGroup,
+				"clientID":  clientID,
+			}
+			if a.svc.Scheme != "" {
+				payload["scheme"] = a.svc.Scheme
+			}
+			if a.svc.TLSCert != "" {
+				payload["tlsCertPath"] = a.svc.TLSCert
+				payload["tlsKeyPath"] = a.svc.TLSKey
+			}
+			body, _ := json.Marshal(payload)
+			resp, err := client.Post(controlURL+"/__mdp/register", "application/json", bytes.NewReader(body))
+			if err != nil {
+				return registered, err
+			}
+			resp.Body.Close()
+			if resp.StatusCode != http.StatusOK {
+				return registered, fmt.Errorf("register %q failed (status %d)", r.serverName, resp.StatusCode)
+			}
+			registered = append(registered, r.serverName)
 		}
-		if a.svc.Scheme != "" {
-			payload["scheme"] = a.svc.Scheme
+		return registered, nil
+	}
+	deregisterAll := func(names []string) {
+		for _, sn := range names {
+			deregisterFromOrchestrator(controlURL, sn)
 		}
-		if a.svc.TLSCert != "" {
-			payload["tlsCertPath"] = a.svc.TLSCert
-			payload["tlsKeyPath"] = a.svc.TLSKey
-		}
-		body, _ := json.Marshal(payload)
-		resp, err := client.Post(controlURL+"/__mdp/register", "application/json", bytes.NewReader(body))
-		if err != nil {
-			slog.Error("register failed", "name", r.serverName, "err", err)
-			state.Err = err
-			return
-		}
-		resp.Body.Close()
-		if resp.StatusCode != http.StatusOK {
-			state.Err = fmt.Errorf("register %q failed (status %d)", r.serverName, resp.StatusCode)
-			slog.Error("register failed", "name", r.serverName, "status", resp.StatusCode)
-			return
-		}
-		registered = append(registered, r.serverName)
 	}
 
 	if a.svc.Command == "" {
-		// External upstream (mdp isn't starting a process). Still probe TCP
-		// so dependents only unblock once the externally-managed service is
-		// actually reachable.
+		// External upstream (mdp isn't starting a process). Register upfront
+		// and probe TCP so dependents only unblock once the externally-managed
+		// service is actually reachable.
+		registered, err := registerAll()
+		if err != nil {
+			slog.Error("register failed", "name", a.name, "err", err)
+			state.Err = err
+			deregisterAll(registered)
+			return
+		}
 		if len(probePorts) > 0 {
 			if err := depwait.TCPReady(ctx, probePorts, batchReadyTimeout, batchReadyPoll, batchTCPCheck); err != nil {
 				slog.Error("external service not ready", "name", a.name, "err", err)
@@ -359,10 +370,46 @@ func launchBatchService(
 	pw := newPrefixWriter(a.name, color, os.Stdout)
 	pwErr := newPrefixWriter(a.name, color, os.Stderr)
 
+	// Run setup before registering so routing never points at a service
+	// whose setup is still running (or has failed).
+	for i, raw := range a.svc.Setup {
+		parts, err := orchestrator.SplitHookArgs(raw)
+		if err != nil {
+			slog.Error("setup hook parse failed", "name", a.name, "step", i+1, "cmd", raw, "err", err)
+			state.Err = err
+			return
+		}
+		if len(parts) == 0 {
+			continue
+		}
+		slog.Info("service hook", "name", a.name, "phase", "setup", "step", i+1, "cmd", raw)
+		h := exec.CommandContext(ctx, parts[0], parts[1:]...)
+		h.Env = append(os.Environ(), env...)
+		if a.svc.Dir != "" {
+			h.Dir = a.svc.Dir
+		}
+		h.Stdout = pw
+		h.Stderr = pwErr
+		if err := h.Run(); err != nil {
+			slog.Error("setup hook failed", "name", a.name, "step", i+1, "cmd", raw, "err", err)
+			state.Err = err
+			return
+		}
+	}
+
+	registered, err := registerAll()
+	if err != nil {
+		slog.Error("register failed", "name", a.name, "err", err)
+		state.Err = err
+		deregisterAll(registered)
+		return
+	}
+
 	cmd, err := startBatchCommand(bt, a.svc.Command, a.svc.Dir, env, pw, pwErr)
 	if err != nil {
 		slog.Error("service process failed to start", "name", a.name, "command", a.svc.Command, "err", err)
 		state.Err = err
+		deregisterAll(registered)
 		return
 	}
 	for _, sn := range registered {
@@ -386,9 +433,36 @@ func launchBatchService(
 	if waitErr := cmd.Wait(); waitErr != nil {
 		slog.Error("service process exited", "name", a.name, "command", a.svc.Command, "err", waitErr)
 	}
+
+	for i, raw := range a.svc.Shutdown {
+		parts, err := orchestrator.SplitHookArgs(raw)
+		if err != nil {
+			slog.Warn("shutdown hook parse failed", "name", a.name, "step", i+1, "cmd", raw, "err", err)
+			continue
+		}
+		if len(parts) == 0 {
+			continue
+		}
+		slog.Info("service hook", "name", a.name, "phase", "shutdown", "step", i+1, "cmd", raw)
+		hCtx, hCancel := context.WithTimeout(context.Background(), shutdownHookTimeout)
+		h := exec.CommandContext(hCtx, parts[0], parts[1:]...)
+		h.Env = append(os.Environ(), env...)
+		if a.svc.Dir != "" {
+			h.Dir = a.svc.Dir
+		}
+		h.Stdout = pw
+		h.Stderr = pwErr
+		if err := h.Run(); err != nil {
+			slog.Warn("shutdown hook failed", "name", a.name, "step", i+1, "cmd", raw, "err", err)
+		}
+		hCancel()
+	}
+
 	pw.Flush()
 	pwErr.Flush()
 }
+
+const shutdownHookTimeout = 30 * time.Second
 
 // buildBatchEnv builds the environment for a batch-mode service. Returns nil
 // if env expansion fails (the error is logged).
@@ -417,7 +491,10 @@ func buildBatchEnv(a batchAlloc, portMap envexpand.PortMap) []string {
 // startBatchCommand starts the service process and registers it with bt.
 // Returns the started *exec.Cmd; the caller is responsible for cmd.Wait().
 func startBatchCommand(bt *batchTracker, command, dir string, env []string, stdout, stderr *prefixWriter) (*exec.Cmd, error) {
-	parts := strings.Fields(command)
+	parts, err := orchestrator.SplitHookArgs(command)
+	if err != nil {
+		return nil, err
+	}
 	if len(parts) == 0 {
 		return nil, fmt.Errorf("empty command")
 	}

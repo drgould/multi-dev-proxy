@@ -68,17 +68,19 @@ func (g *GlobalEnvValue) UnmarshalYAML(node *yaml.Node) error {
 
 // ServiceConfig defines a single service in the config file.
 type ServiceConfig struct {
-	Command string            `yaml:"command"`
-	Dir     string            `yaml:"dir"`
-	Proxy   int               `yaml:"proxy"`
-	Port    int               `yaml:"port"`
-	Group   string            `yaml:"group"`
-	Scheme  string            `yaml:"scheme"`   // "http" or "https"; defaults to "http"
-	TLSCert string            `yaml:"tls_cert"` // path to TLS certificate file
-	TLSKey  string            `yaml:"tls_key"`  // path to TLS key file
-	EnvFile string            `yaml:"env_file"` // optional path for exported .env file
-	Env     map[string]string `yaml:"env"`
-	Ports   []PortMapping     `yaml:"ports"`
+	Command  string            `yaml:"command"`
+	Setup    []string          `yaml:"setup"`    // commands run sequentially before Command
+	Shutdown []string          `yaml:"shutdown"` // commands run sequentially after Command exits
+	Dir      string            `yaml:"dir"`
+	Proxy    int               `yaml:"proxy"`
+	Port     int               `yaml:"port"`
+	Group    string            `yaml:"group"`
+	Scheme   string            `yaml:"scheme"`   // "http" or "https"; defaults to "http"
+	TLSCert  string            `yaml:"tls_cert"` // path to TLS certificate file
+	TLSKey   string            `yaml:"tls_key"`  // path to TLS key file
+	EnvFile  string            `yaml:"env_file"` // optional path for exported .env file
+	Env      map[string]string `yaml:"env"`
+	Ports    []PortMapping     `yaml:"ports"`
 
 	// DependsOn names other services that must be ready before this service
 	// starts. Names must match keys in the top-level services map.

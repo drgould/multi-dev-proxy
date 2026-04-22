@@ -44,12 +44,12 @@ type ProxyInstance struct {
 
 // ManagedService tracks a service process started by the orchestrator.
 type ManagedService struct {
-	Name    string
-	Config  config.ServiceConfig
-	Group   string
-	PID     int
-	Port    int
-	Status  string // "waiting", "starting", "running", "stopped", "failed"
+	Name   string
+	Config config.ServiceConfig
+	Group  string
+	PID    int
+	Port   int
+	Status string // "waiting", "starting", "running", "stopped", "failed"
 }
 
 // Orchestrator manages proxy instances, services, and groups.

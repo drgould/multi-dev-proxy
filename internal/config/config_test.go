@@ -126,6 +126,44 @@ func TestLoadDefaultPortRange(t *testing.T) {
 	}
 }
 
+func TestLoadHooks(t *testing.T) {
+	dir := t.TempDir()
+	path := filepath.Join(dir, "mdp.yaml")
+	os.WriteFile(path, []byte(`
+services:
+  web:
+    setup:
+      - bun install
+      - bun run build:assets
+    command: bun dev
+    shutdown:
+      - rm -rf .cache/dev
+    proxy: 3000
+`), 0644)
+
+	cfg, err := Load(path)
+	if err != nil {
+		t.Fatalf("Load() error = %v", err)
+	}
+	web := cfg.Services["web"]
+	wantSetup := []string{"bun install", "bun run build:assets"}
+	if len(web.Setup) != len(wantSetup) {
+		t.Fatalf("setup len = %d, want %d", len(web.Setup), len(wantSetup))
+	}
+	for i, s := range wantSetup {
+		if web.Setup[i] != s {
+			t.Errorf("setup[%d] = %q, want %q", i, web.Setup[i], s)
+		}
+	}
+	wantShutdown := []string{"rm -rf .cache/dev"}
+	if len(web.Shutdown) != len(wantShutdown) {
+		t.Fatalf("shutdown len = %d, want %d", len(web.Shutdown), len(wantShutdown))
+	}
+	if web.Shutdown[0] != wantShutdown[0] {
+		t.Errorf("shutdown[0] = %q, want %q", web.Shutdown[0], wantShutdown[0])
+	}
+}
+
 func TestFind(t *testing.T) {
 	dir := t.TempDir()
 	sub := filepath.Join(dir, "a", "b")

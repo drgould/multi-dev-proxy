@@ -326,7 +326,10 @@ func (o *Orchestrator) startMultiPortService(ctx context.Context, name string, s
 }
 
 func (o *Orchestrator) launchProcess(ctx context.Context, name string, svc config.ServiceConfig, serverName, group string, port int, env []string) error {
-	parts := strings.Fields(svc.Command)
+	parts, err := SplitHookArgs(svc.Command)
+	if err != nil {
+		return fmt.Errorf("parse command for %s: %w", name, err)
+	}
 	if len(parts) == 0 {
 		return fmt.Errorf("empty command for service %s", name)
 	}
@@ -399,4 +402,53 @@ func DetectGroup(dir string) string {
 		return "default"
 	}
 	return branch
+}
+
+// SplitHookArgs tokenizes a hook command honoring single and double quotes.
+// Quotes group whitespace-containing arguments; they are stripped from output.
+// Backslash escaping is not supported — users who need it can invoke their
+// own shell, e.g. `sh -c '...'`.
+func SplitHookArgs(s string) ([]string, error) {
+	var args []string
+	var cur strings.Builder
+	var inSingle, inDouble, hasTok bool
+	for i := 0; i < len(s); i++ {
+		c := s[i]
+		switch {
+		case inSingle:
+			if c == '\'' {
+				inSingle = false
+			} else {
+				cur.WriteByte(c)
+			}
+		case inDouble:
+			if c == '"' {
+				inDouble = false
+			} else {
+				cur.WriteByte(c)
+			}
+		case c == '\'':
+			inSingle = true
+			hasTok = true
+		case c == '"':
+			inDouble = true
+			hasTok = true
+		case c == ' ' || c == '\t':
+			if hasTok {
+				args = append(args, cur.String())
+				cur.Reset()
+				hasTok = false
+			}
+		default:
+			cur.WriteByte(c)
+			hasTok = true
+		}
+	}
+	if inSingle || inDouble {
+		return nil, fmt.Errorf("unterminated quote in %q", s)
+	}
+	if hasTok {
+		args = append(args, cur.String())
+	}
+	return args, nil
 }
