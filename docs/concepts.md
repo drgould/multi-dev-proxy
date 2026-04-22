@@ -1,6 +1,4 @@
-# Multi-dev Proxy (AKA mdp)
-
-Run multiple dev servers from different branches and even repos behind a single port.
+# Concepts
 
 ## The problem
 
@@ -22,43 +20,52 @@ browser → :3000 (frontend proxy) → :42301 (main branch)
                                   → :20235 (api/feature-auth)
 ```
 
-See [docs/concepts.md](docs/concepts.md) for service groups, switching resolution order, and multi-repo naming.
+## Service groups
 
-## Quick start
+Services are automatically grouped by their git branch name (or an explicit `--group` flag). All services sharing the same group name form a switchable group. Switching to a group sets the default upstream on every proxy at once.
 
 ```sh
-# Terminal 1 — start the orchestrator (opens TUI)
-mdp
+# Start services under the "main" group
+mdp run --group main
 
-# Terminal 2 — run your frontend dev server
+# Switch all proxies to the "feature-auth" group
+mdp switch --group feature-auth
+```
+
+See [`mdp switch`](./cli.md#mdp-switch) for CLI details.
+
+## How switching works
+
+Each proxy has its own cookie (e.g., `__mdp_upstream_3000`) to avoid collisions when multiple proxies run on localhost. The resolution order for each request is:
+
+1. **Cookie** — if a valid cookie is present, route to that server
+2. **Default upstream** — a server-side default set via `mdp switch` or the TUI
+3. **Auto-route** — if only one server is registered, route to it automatically
+4. **Redirect** — redirect to the switch page at `/__mdp/switch`
+
+The default upstream is especially useful for backend proxies where cookies aren't available (dev-server proxies, curl, API clients).
+
+## Multi-repo support
+
+Server names use the format `repo/branch`. The repo name is auto-detected from `git remote get-url origin`, falling back to the directory name.
+
+```sh
+# In ~/code/frontend on branch feature/nav
 mdp run -P 3000 -- npm run dev
+# Registers as: frontend/feature/nav
 
-# Terminal 3 — run your backend
+# In ~/code/api on branch main
 mdp run -P 4000 -- go run ./cmd/server
-
-# Open https://localhost:3000 — use the widget to switch branches
+# Registers as: api/main
 ```
 
-## Install
+Override the name with `--name` or just the repo with `--repo`:
 
 ```sh
-brew install drgould/mdp/mdp
+mdp run --name myapp/staging -- npm run dev
+mdp run --repo frontend -- npm run dev
 ```
 
-Other methods (curl, Scoop): see [docs/installation.md](docs/installation.md).
+---
 
-## Documentation
-
-- [Concepts](docs/concepts.md) — the problem, how it works, groups, switching, multi-repo
-- [Installation](docs/installation.md) — Homebrew, curl, Scoop
-- [Quick start](docs/quick-start.md) — tutorial flow
-- [CLI reference](docs/cli.md) — every command and flag
-- [Config (`mdp.yaml`)](docs/config.md) — services, hooks, `depends_on`, `env_file`, ports, TLS
-- [Recipes](docs/recipes.md) — Docker Compose, HTTPS / mkcert
-- [API reference](docs/api.md) — per-proxy and orchestrator endpoints
-- [Testbed](docs/testbed.md) — demo servers
-- [Contributing](docs/contributing.md) — build, test, release
-
-## License
-
-GPL-3.0. See [LICENSE](LICENSE).
+[← Back to docs index](./index.md)
