@@ -15,6 +15,7 @@ import (
 	"github.com/derekgould/multi-dev-proxy/internal/depwait"
 	"github.com/derekgould/multi-dev-proxy/internal/detect"
 	"github.com/derekgould/multi-dev-proxy/internal/envexpand"
+	"github.com/derekgould/multi-dev-proxy/internal/envexport"
 	"github.com/derekgould/multi-dev-proxy/internal/ports"
 	"github.com/derekgould/multi-dev-proxy/internal/registry"
 )
@@ -34,6 +35,7 @@ type serviceAlloc struct {
 	svc             config.ServiceConfig
 	assignedPort    int
 	portAssignments map[string]int // multi-port only
+	env             []string       // populated in the env-build phase
 }
 
 // StartConfigServices starts all services from the config under the given group name.
@@ -76,7 +78,7 @@ func (o *Orchestrator) StartConfigServices(ctx context.Context, group string) er
 				svcPorts[k] = v
 			}
 			portMap[name] = svcPorts
-			allocations = append(allocations, serviceAlloc{name, svc, 0, portAssignments})
+			allocations = append(allocations, serviceAlloc{name: name, svc: svc, portAssignments: portAssignments})
 			continue
 		}
 		assignedPort := svc.Port
@@ -89,7 +91,40 @@ func (o *Orchestrator) StartConfigServices(ctx context.Context, group string) er
 			assignedPorts = append(assignedPorts, assignedPort)
 		}
 		portMap[name] = map[string]int{"port": assignedPort, "PORT": assignedPort}
-		allocations = append(allocations, serviceAlloc{name, svc, assignedPort, nil})
+		allocations = append(allocations, serviceAlloc{name: name, svc: svc, assignedPort: assignedPort})
+	}
+
+	// Build every service's env up front so we can write .env export files
+	// before any process starts. This is also required for resolving
+	// ${svc.env.VAR} references in the global env block.
+	envMap := envexpand.EnvMap{}
+	for i, a := range allocations {
+		portAssignments := a.portAssignments
+		if portAssignments == nil {
+			portAssignments = map[string]int{"PORT": a.assignedPort}
+		}
+		env, err := buildEnv(a.svc.Env, portAssignments, portMap)
+		if err != nil {
+			return fmt.Errorf("build env for %s: %w", a.name, err)
+		}
+		allocations[i].env = env
+		envMap[a.name] = envSliceToMap(env)
+	}
+
+	// Write the global env file (if configured) before launching any service,
+	// so a startup failure below still leaves the user with a usable file.
+	if o.cfg.Global.EnvFile != "" {
+		if err := envexport.WriteGlobal(o.cfg.Global.EnvFile, o.cfg.Global.Env, portMap, envMap); err != nil {
+			return fmt.Errorf("write global env file: %w", err)
+		}
+	}
+	for _, a := range allocations {
+		if a.svc.EnvFile == "" {
+			continue
+		}
+		if err := envexport.WritePerService(a.svc.EnvFile, a.env); err != nil {
+			return fmt.Errorf("write env file for %s: %w", a.name, err)
+		}
 	}
 
 	names := make([]string, 0, len(allocations))
@@ -129,9 +164,9 @@ func (o *Orchestrator) StartConfigServices(ctx context.Context, group string) er
 
 			var err error
 			if len(a.svc.Ports) > 0 {
-				err = o.startMultiPortService(ctx, a.name, a.svc, group, a.portAssignments, portMap)
+				err = o.startMultiPortService(ctx, a.name, a.svc, group, a.portAssignments, a.env)
 			} else {
-				err = o.startSingleService(ctx, a.name, a.svc, group, a.assignedPort, portMap)
+				err = o.startSingleService(ctx, a.name, a.svc, group, a.assignedPort, a.env)
 			}
 			if err != nil {
 				slog.Error("failed to start service", "name", a.name, "err", err)
@@ -160,6 +195,17 @@ func (o *Orchestrator) StartConfigServices(ctx context.Context, group string) er
 	}
 	wg.Wait()
 	return nil
+}
+
+// envSliceToMap parses a "KEY=VALUE" env slice back into a map.
+func envSliceToMap(env []string) map[string]string {
+	m := make(map[string]string, len(env))
+	for _, kv := range env {
+		if i := strings.IndexByte(kv, '='); i >= 0 {
+			m[kv[:i]] = kv[i+1:]
+		}
+	}
+	return m
 }
 
 // probePortsFor returns the TCP ports that should be polled to decide whether
@@ -212,14 +258,10 @@ func (o *Orchestrator) waitForReady(ctx context.Context, serverName string, prob
 	}
 }
 
-func (o *Orchestrator) startSingleService(ctx context.Context, name string, svc config.ServiceConfig, group string, assignedPort int, portMap envexpand.PortMap) error {
+func (o *Orchestrator) startSingleService(ctx context.Context, name string, svc config.ServiceConfig, group string, assignedPort int, env []string) error {
 	serverName := fmt.Sprintf("%s/%s", group, name)
 
 	if svc.Command != "" {
-		env, err := buildEnv(svc.Env, map[string]int{"PORT": assignedPort}, portMap)
-		if err != nil {
-			return fmt.Errorf("build env for %s: %w", name, err)
-		}
 		if err := o.launchProcess(ctx, name, svc, serverName, group, assignedPort, env); err != nil {
 			return err
 		}
@@ -252,12 +294,8 @@ func (o *Orchestrator) startSingleService(ctx context.Context, name string, svc 
 	return nil
 }
 
-func (o *Orchestrator) startMultiPortService(ctx context.Context, name string, svc config.ServiceConfig, group string, portAssignments map[string]int, portMap envexpand.PortMap) error {
+func (o *Orchestrator) startMultiPortService(ctx context.Context, name string, svc config.ServiceConfig, group string, portAssignments map[string]int, env []string) error {
 	if svc.Command != "" {
-		env, err := buildEnv(svc.Env, portAssignments, portMap)
-		if err != nil {
-			return fmt.Errorf("build env for %s: %w", name, err)
-		}
 		if err := o.launchProcess(ctx, name, svc, fmt.Sprintf("%s/%s", group, name), group, 0, env); err != nil {
 			return err
 		}

@@ -1,3 +1,17 @@
+# Export selected generated env vars to a .env file at the project root so
+# outside-of-mdp tools (IDE, shell, psql, curl) can consume them.
+global:
+  env_file: ./.mdp.env
+  env:
+    # Mapping form — pass through another service's env var or port as-is.
+    API_PORT:
+      ref: api-main.env.PORT
+    DB_PORT:
+      ref: db-main.env.DB_PORT
+    # Scalar form — any string with ${svc.key} or ${svc.env.VAR} refs.
+    API_URL: "http://localhost:${api-main.PORT}"
+    DB_URL:  "postgres://localhost:${db-main.env.DB_PORT}/app"
+
 services:
   # === main branch (TLS frontend + Docker API + proxy-less fake DB) ===
   web-main:
@@ -9,6 +23,8 @@ services:
     tls_key: .certs/localhost-key.pem
     depends_on:
       - api-main
+    # Per-service export — contains exactly what web-main's process sees.
+    env_file: ./.mdp.web-main.env
     env:
       NAME: "web / main"
       COLOR: "#0f2027,#203a43,#2c5364"
