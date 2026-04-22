@@ -49,7 +49,7 @@ type ManagedService struct {
 	Group   string
 	PID     int
 	Port    int
-	Status  string // "starting", "running", "stopped", "failed"
+	Status  string // "waiting", "starting", "running", "stopped", "failed"
 }
 
 // Orchestrator manages proxy instances, services, and groups.
@@ -528,6 +528,18 @@ func (o *Orchestrator) SetService(name string, svc *ManagedService) {
 	defer o.mu.Unlock()
 	o.services[name] = svc
 	o.emit(Event{Type: "service_started", Name: name})
+}
+
+// ServiceStatus returns the status of a managed service. ok is false if the
+// service is not tracked.
+func (o *Orchestrator) ServiceStatus(name string) (string, bool) {
+	o.mu.RLock()
+	defer o.mu.RUnlock()
+	svc, ok := o.services[name]
+	if !ok {
+		return "", false
+	}
+	return svc.Status, true
 }
 
 // UpdateServiceStatus updates a managed service status.

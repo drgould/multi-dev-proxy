@@ -7,6 +7,9 @@ services:
     scheme: https
     tls_cert: .certs/localhost.pem
     tls_key: .certs/localhost-key.pem
+    depends_on:
+      - api-main
+      - db-main
     env:
       NAME: "web / main"
       COLOR: "#0f2027,#203a43,#2c5364"
