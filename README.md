@@ -231,6 +231,35 @@ services:
 
 For multi-port services, reference the specific env key: `${infra.API_PORT}`.
 
+### Startup dependencies
+
+Use `depends_on` to declare that a service needs other services to be up first. `mdp` waits for each dependency to be TCP-reachable on its assigned port(s) before launching dependents:
+
+```yaml
+services:
+  db:
+    command: docker compose up db --wait
+    env:
+      DB_PORT: auto
+    ports:
+      - env: DB_PORT
+
+  api:
+    command: ./api
+    proxy: 4000
+    depends_on:
+      - db
+
+  web:
+    command: npm run dev
+    proxy: 3000
+    depends_on:
+      - api
+      - db
+```
+
+Services without `depends_on` start in parallel. Independent branches of the dependency graph run in parallel too — only direct dependents wait. Each dependency has a 60s readiness timeout; if a dependency fails to become ready, its dependents are marked `failed` and skipped. Cycles and references to undefined services are rejected at config-load time.
+
 ## Service groups
 
 Services are automatically grouped by their git branch name (or an explicit `--group` flag). All services sharing the same group name form a switchable group. Switching to a group sets the default upstream on every proxy at once.

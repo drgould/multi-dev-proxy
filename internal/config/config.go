@@ -4,6 +4,7 @@ import (
 	"fmt"
 	"os"
 	"path/filepath"
+	"sort"
 	"strings"
 
 	"gopkg.in/yaml.v3"
@@ -80,6 +81,10 @@ type ServiceConfig struct {
 	EnvFile  string            `yaml:"env_file"` // optional path for exported .env file
 	Env      map[string]string `yaml:"env"`
 	Ports    []PortMapping     `yaml:"ports"`
+
+	// DependsOn names other services that must be ready before this service
+	// starts. Names must match keys in the top-level services map.
+	DependsOn []string `yaml:"depends_on"`
 }
 
 // PortMapping maps an auto-assigned port env var to a proxy and service name.
@@ -124,6 +129,9 @@ func Load(path string) (*Config, error) {
 		cfg.Services[name] = svc
 	}
 	cfg.Global.EnvFile = resolvePath(cfg.Global.EnvFile, dir)
+	if err := validateDependencies(cfg.Services); err != nil {
+		return nil, err
+	}
 	return &cfg, nil
 }
 
@@ -146,6 +154,69 @@ func resolvePath(p, base string) string {
 		return p
 	}
 	return filepath.Join(base, p)
+}
+
+// validateDependencies checks that every name in each service's depends_on
+// refers to a defined service, and that the dependency graph has no cycles.
+func validateDependencies(services map[string]ServiceConfig) error {
+	names := make([]string, 0, len(services))
+	for name := range services {
+		names = append(names, name)
+	}
+	sort.Strings(names)
+
+	for _, name := range names {
+		for _, dep := range services[name].DependsOn {
+			if _, ok := services[dep]; !ok {
+				return fmt.Errorf("service %q: unknown dependency %q", name, dep)
+			}
+		}
+	}
+
+	const (
+		white = 0
+		gray  = 1
+		black = 2
+	)
+	color := make(map[string]int, len(services))
+	var path []string
+	var visit func(string) error
+	visit = func(n string) error {
+		color[n] = gray
+		path = append(path, n)
+		deps := append([]string(nil), services[n].DependsOn...)
+		sort.Strings(deps)
+		for _, dep := range deps {
+			switch color[dep] {
+			case gray:
+				cycle := append([]string(nil), path...)
+				cycle = append(cycle, dep)
+				start := 0
+				for i, v := range cycle {
+					if v == dep {
+						start = i
+						break
+					}
+				}
+				return fmt.Errorf("dependency cycle: %s", strings.Join(cycle[start:], " -> "))
+			case white:
+				if err := visit(dep); err != nil {
+					return err
+				}
+			}
+		}
+		path = path[:len(path)-1]
+		color[n] = black
+		return nil
+	}
+	for _, name := range names {
+		if color[name] == white {
+			if err := visit(name); err != nil {
+				return err
+			}
+		}
+	}
+	return nil
 }
 
 // Find looks for mdp.yaml in the given directory, then walks up to the root.

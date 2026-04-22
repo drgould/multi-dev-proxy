@@ -23,12 +23,25 @@ import (
 	"github.com/spf13/cobra"
 
 	"github.com/derekgould/multi-dev-proxy/internal/config"
+	"github.com/derekgould/multi-dev-proxy/internal/depwait"
 	"github.com/derekgould/multi-dev-proxy/internal/detect"
 	"github.com/derekgould/multi-dev-proxy/internal/envexpand"
 	"github.com/derekgould/multi-dev-proxy/internal/orchestrator"
 	"github.com/derekgould/multi-dev-proxy/internal/ports"
 	"github.com/derekgould/multi-dev-proxy/internal/process"
+	"github.com/derekgould/multi-dev-proxy/internal/registry"
 )
+
+// batchReadyTimeout and batchReadyPoll control how long the client-side batch
+// launcher waits for each service to become TCP-reachable before marking its
+// dep-graph entry as failed. Vars (not consts) so tests can shorten them.
+var (
+	batchReadyTimeout = 60 * time.Second
+	batchReadyPoll    = 200 * time.Millisecond
+)
+
+// batchTCPCheck is overridable in tests.
+var batchTCPCheck = registry.TCPCheck
 
 var runCmd = &cobra.Command{
 	Use:   "run",
@@ -111,17 +124,7 @@ func runBatchMode(cmd *cobra.Command, controlPort int, groupFlag string) error {
 
 	bt := &batchTracker{}
 
-	svcCtx, svcCancel := context.WithCancel(context.Background())
-	defer svcCancel()
-
-	type alloc struct {
-		name            string
-		svc             config.ServiceConfig
-		svcGroup        string
-		assignedPort    int            // single-port only
-		portAssignments map[string]int // multi-port only
-	}
-	var allocations []alloc
+	var allocations []batchAlloc
 	portMap := envexpand.PortMap{}
 	var assignedPorts []int
 	for _, svc := range cfg.Services {
@@ -156,7 +159,7 @@ func runBatchMode(cmd *cobra.Command, controlPort int, groupFlag string) error {
 				svcPorts[k] = v
 			}
 			portMap[name] = svcPorts
-			allocations = append(allocations, alloc{name, svc, svcGroup, 0, portAssignments})
+			allocations = append(allocations, batchAlloc{name, svc, svcGroup, 0, portAssignments})
 			continue
 		}
 
@@ -169,59 +172,21 @@ func runBatchMode(cmd *cobra.Command, controlPort int, groupFlag string) error {
 			assignedPorts = append(assignedPorts, assignedPort)
 		}
 		portMap[name] = map[string]int{"port": assignedPort, "PORT": assignedPort}
-		allocations = append(allocations, alloc{name, svc, svcGroup, assignedPort, nil})
+		allocations = append(allocations, batchAlloc{name, svc, svcGroup, assignedPort, nil})
 	}
 
+	batchCtx, batchCancel := context.WithCancel(context.Background())
+	defer batchCancel()
+
+	names := make([]string, 0, len(allocations))
 	for _, a := range allocations {
-		if len(a.svc.Ports) > 0 {
-			if err := launchMultiPortBatch(svcCtx, client, controlURL, a.name, a.svc, a.svcGroup, a.portAssignments, portMap, bt, clientID); err != nil {
-				return fmt.Errorf("launch multi-port service %q: %w", a.name, err)
-			}
-			continue
-		}
+		names = append(names, a.name)
+	}
+	states := depwait.NewStates(names)
 
-		serverName := fmt.Sprintf("%s/%s", a.svcGroup, a.name)
-		if a.svc.Proxy > 0 {
-			regPayload := map[string]any{
-				"name":      serverName,
-				"port":      a.assignedPort,
-				"proxyPort": a.svc.Proxy,
-				"group":     a.svcGroup,
-				"clientID":  clientID,
-			}
-			if a.svc.Scheme != "" {
-				regPayload["scheme"] = a.svc.Scheme
-			}
-			if a.svc.TLSCert != "" {
-				regPayload["tlsCertPath"] = a.svc.TLSCert
-				regPayload["tlsKeyPath"] = a.svc.TLSKey
-			}
-			body, _ := json.Marshal(regPayload)
-			resp, err := client.Post(controlURL+"/__mdp/register", "application/json", bytes.NewReader(body))
-			if err != nil {
-				return fmt.Errorf("register %q: %w", serverName, err)
-			}
-			resp.Body.Close()
-			if resp.StatusCode != http.StatusOK {
-				return fmt.Errorf("register %q failed (status %d)", serverName, resp.StatusCode)
-			}
-		}
-
-		if a.svc.Command != "" {
-			env := []string{fmt.Sprintf("PORT=%d", a.assignedPort), "MDP=1"}
-			for k, v := range a.svc.Env {
-				if v == "auto" {
-					continue
-				}
-				expanded, err := envexpand.Expand(v, portMap)
-				if err != nil {
-					return fmt.Errorf("service %q env %q: %w", a.name, k, err)
-				}
-				env = append(env, k+"="+expanded)
-			}
-			bt.wg.Add(1)
-			go runServiceProcess(svcCtx, bt, a.name, a.svc, env, controlURL, serverName)
-		}
+	for _, a := range allocations {
+		bt.wg.Add(1)
+		go launchBatchService(batchCtx, bt, client, controlURL, clientID, a, portMap, states)
 	}
 
 	slog.Info("batch services started", "group", group)
@@ -243,8 +208,11 @@ func runBatchMode(cmd *cobra.Command, controlPort int, groupFlag string) error {
 	}
 
 	hbCancel()
-	svcCancel()
 
+	// Cancel the batch context so any launch goroutines still blocked in
+	// depwait.Wait or depwait.TCPReady return immediately instead of holding
+	// shutdown hostage for the full per-dep readiness timeout.
+	batchCancel()
 	bt.signalAll()
 	waitDone := make(chan struct{})
 	go func() { bt.wg.Wait(); close(waitDone) }()
@@ -259,70 +227,277 @@ func runBatchMode(cmd *cobra.Command, controlPort int, groupFlag string) error {
 	return nil
 }
 
-func launchMultiPortBatch(ctx context.Context, client *http.Client, controlURL, name string, svc config.ServiceConfig, group string, portAssignments map[string]int, portMap envexpand.PortMap, bt *batchTracker, clientID string) error {
-	var registered []string
-	for _, pm := range svc.Ports {
-		port, ok := portAssignments[pm.Env]
-		if !ok {
-			continue
+// batchAlloc holds a service's resolved port allocations prior to launch.
+type batchAlloc struct {
+	name            string
+	svc             config.ServiceConfig
+	svcGroup        string
+	assignedPort    int            // single-port only
+	portAssignments map[string]int // multi-port only
+}
+
+// launchBatchService is the per-service batch-mode launcher: it waits for the
+// service's declared dependencies, registers upstreams with the orchestrator,
+// starts the process, polls TCP readiness, and signals its depwait.State.
+// Runs inside bt.wg so shutdown blocks until each service's cmd exits.
+func launchBatchService(
+	ctx context.Context,
+	bt *batchTracker,
+	client *http.Client,
+	controlURL, clientID string,
+	a batchAlloc,
+	portMap envexpand.PortMap,
+	states map[string]*depwait.State,
+) {
+	defer bt.wg.Done()
+	state := states[a.name]
+	// state.Done must close when readiness is determined — not when the
+	// process exits — so dependents unblock as soon as this service is ready.
+	var readyOnce sync.Once
+	signalReady := func() { readyOnce.Do(func() { close(state.Done) }) }
+	defer signalReady()
+
+	if err := depwait.Wait(ctx, states, a.svc.DependsOn, batchReadyTimeout); err != nil {
+		slog.Error("service aborted waiting on deps", "name", a.name, "err", err)
+		state.Err = err
+		return
+	}
+
+	type regEntry struct {
+		serverName string
+		port       int
+		proxyPort  int
+	}
+	var registrations []regEntry
+	var probePorts []int
+	if len(a.svc.Ports) > 0 {
+		for _, pm := range a.svc.Ports {
+			port, ok := a.portAssignments[pm.Env]
+			if !ok {
+				continue
+			}
+			if pm.Proxy > 0 {
+				serviceName := pm.Name
+				if serviceName == "" {
+					serviceName = pm.Env
+				}
+				registrations = append(registrations, regEntry{
+					serverName: fmt.Sprintf("%s/%s", a.svcGroup, serviceName),
+					port:       port,
+					proxyPort:  pm.Proxy,
+				})
+			}
+			probePorts = append(probePorts, port)
 		}
-		if pm.Proxy <= 0 {
-			// Non-HTTP port: allocated for env interpolation only.
-			continue
+	} else {
+		serverName := fmt.Sprintf("%s/%s", a.svcGroup, a.name)
+		if a.svc.Proxy > 0 {
+			registrations = append(registrations, regEntry{
+				serverName: serverName,
+				port:       a.assignedPort,
+				proxyPort:  a.svc.Proxy,
+			})
 		}
-		serviceName := pm.Name
-		if serviceName == "" {
-			serviceName = pm.Env
+		if a.assignedPort > 0 {
+			probePorts = append(probePorts, a.assignedPort)
 		}
-		serverName := fmt.Sprintf("%s/%s", group, serviceName)
-		regPayload := map[string]any{
-			"name":      serverName,
-			"port":      port,
-			"proxyPort": pm.Proxy,
-			"group":     group,
+	}
+
+	registered := make([]string, 0, len(registrations))
+	for _, r := range registrations {
+		payload := map[string]any{
+			"name":      r.serverName,
+			"port":      r.port,
+			"proxyPort": r.proxyPort,
+			"group":     a.svcGroup,
 			"clientID":  clientID,
 		}
-		if svc.Scheme != "" {
-			regPayload["scheme"] = svc.Scheme
+		if a.svc.Scheme != "" {
+			payload["scheme"] = a.svc.Scheme
 		}
-		if svc.TLSCert != "" {
-			regPayload["tlsCertPath"] = svc.TLSCert
-			regPayload["tlsKeyPath"] = svc.TLSKey
+		if a.svc.TLSCert != "" {
+			payload["tlsCertPath"] = a.svc.TLSCert
+			payload["tlsKeyPath"] = a.svc.TLSKey
 		}
-		body, _ := json.Marshal(regPayload)
+		body, _ := json.Marshal(payload)
 		resp, err := client.Post(controlURL+"/__mdp/register", "application/json", bytes.NewReader(body))
 		if err != nil {
-			return err
+			slog.Error("register failed", "name", r.serverName, "err", err)
+			state.Err = err
+			return
 		}
 		resp.Body.Close()
 		if resp.StatusCode != http.StatusOK {
-			return fmt.Errorf("register %q failed (status %d)", serverName, resp.StatusCode)
+			state.Err = fmt.Errorf("register %q failed (status %d)", r.serverName, resp.StatusCode)
+			slog.Error("register failed", "name", r.serverName, "status", resp.StatusCode)
+			return
 		}
-		registered = append(registered, serverName)
+		registered = append(registered, r.serverName)
 	}
 
-	if svc.Command != "" {
-		env := []string{"MDP=1"}
-		for k, v := range svc.Env {
-			if v == "auto" {
-				if port, ok := portAssignments[k]; ok {
-					env = append(env, fmt.Sprintf("%s=%d", k, port))
-				}
-				continue
+	if a.svc.Command == "" {
+		// External upstream (mdp isn't starting a process). Still probe TCP
+		// so dependents only unblock once the externally-managed service is
+		// actually reachable.
+		if len(probePorts) > 0 {
+			if err := depwait.TCPReady(ctx, probePorts, batchReadyTimeout, batchReadyPoll, batchTCPCheck); err != nil {
+				slog.Error("external service not ready", "name", a.name, "err", err)
+				state.Err = err
 			}
-			expanded, err := envexpand.Expand(v, portMap)
-			if err != nil {
-				return fmt.Errorf("service %q env %q: %w", name, k, err)
-			}
-			env = append(env, k+"="+expanded)
 		}
-		namesCopy := make([]string, len(registered))
-		copy(namesCopy, registered)
-		bt.wg.Add(1)
-		go runServiceProcess(ctx, bt, name, svc, env, controlURL, namesCopy...)
+		return
 	}
 
-	return nil
+	env := buildBatchEnv(a, portMap)
+	if env == nil {
+		// env expansion failed inside buildBatchEnv (error already logged).
+		state.Err = fmt.Errorf("env expansion failed for %q", a.name)
+		return
+	}
+
+	color := nextColor()
+	pw := newPrefixWriter(a.name, color, os.Stdout)
+	pwErr := newPrefixWriter(a.name, color, os.Stderr)
+
+	// If we don't successfully start the main process (setup hook or exec
+	// failure), deregister the upstreams we registered above so routing
+	// doesn't pick a dead server.
+	mainStarted := false
+	defer func() {
+		if !mainStarted {
+			for _, sn := range registered {
+				deregisterFromOrchestrator(controlURL, sn)
+			}
+		}
+	}()
+
+	for i, raw := range a.svc.Setup {
+		parts, err := orchestrator.SplitHookArgs(raw)
+		if err != nil {
+			slog.Error("setup hook parse failed", "name", a.name, "step", i+1, "cmd", raw, "err", err)
+			state.Err = err
+			return
+		}
+		if len(parts) == 0 {
+			continue
+		}
+		slog.Info("service hook", "name", a.name, "phase", "setup", "step", i+1, "cmd", raw)
+		h := exec.CommandContext(ctx, parts[0], parts[1:]...)
+		h.Env = append(os.Environ(), env...)
+		if a.svc.Dir != "" {
+			h.Dir = a.svc.Dir
+		}
+		h.Stdout = pw
+		h.Stderr = pwErr
+		if err := h.Run(); err != nil {
+			slog.Error("setup hook failed", "name", a.name, "step", i+1, "cmd", raw, "err", err)
+			state.Err = err
+			return
+		}
+	}
+
+	cmd, err := startBatchCommand(bt, a.svc.Command, a.svc.Dir, env, pw, pwErr)
+	if err != nil {
+		slog.Error("service process failed to start", "name", a.name, "command", a.svc.Command, "err", err)
+		state.Err = err
+		return
+	}
+	mainStarted = true
+	for _, sn := range registered {
+		updatePIDWithOrchestrator(controlURL, sn, cmd.Process.Pid)
+	}
+
+	// Poll TCP readiness so dependents only unblock once this service is
+	// actually accepting connections.
+	if len(probePorts) > 0 {
+		if err := depwait.TCPReady(ctx, probePorts, batchReadyTimeout, batchReadyPoll, batchTCPCheck); err != nil {
+			slog.Error("service not ready", "name", a.name, "err", err)
+			state.Err = err
+			// Fall through to wait for the cmd — leave it running so logs
+			// still stream and shutdown can clean it up normally.
+		}
+	}
+
+	// Signal dependents now; the rest of this goroutine just drains the cmd.
+	signalReady()
+
+	if waitErr := cmd.Wait(); waitErr != nil {
+		slog.Error("service process exited", "name", a.name, "command", a.svc.Command, "err", waitErr)
+	}
+
+	for i, raw := range a.svc.Shutdown {
+		parts, err := orchestrator.SplitHookArgs(raw)
+		if err != nil {
+			slog.Warn("shutdown hook parse failed", "name", a.name, "step", i+1, "cmd", raw, "err", err)
+			continue
+		}
+		if len(parts) == 0 {
+			continue
+		}
+		slog.Info("service hook", "name", a.name, "phase", "shutdown", "step", i+1, "cmd", raw)
+		hCtx, hCancel := context.WithTimeout(context.Background(), shutdownHookTimeout)
+		h := exec.CommandContext(hCtx, parts[0], parts[1:]...)
+		h.Env = append(os.Environ(), env...)
+		if a.svc.Dir != "" {
+			h.Dir = a.svc.Dir
+		}
+		h.Stdout = pw
+		h.Stderr = pwErr
+		if err := h.Run(); err != nil {
+			slog.Warn("shutdown hook failed", "name", a.name, "step", i+1, "cmd", raw, "err", err)
+		}
+		hCancel()
+	}
+
+	pw.Flush()
+	pwErr.Flush()
+}
+
+const shutdownHookTimeout = 30 * time.Second
+
+// buildBatchEnv builds the environment for a batch-mode service. Returns nil
+// if env expansion fails (the error is logged).
+func buildBatchEnv(a batchAlloc, portMap envexpand.PortMap) []string {
+	env := []string{"MDP=1"}
+	if len(a.svc.Ports) == 0 && a.assignedPort > 0 {
+		env = append(env, fmt.Sprintf("PORT=%d", a.assignedPort))
+	}
+	for k, v := range a.svc.Env {
+		if v == "auto" {
+			if port, ok := a.portAssignments[k]; ok {
+				env = append(env, fmt.Sprintf("%s=%d", k, port))
+			}
+			continue
+		}
+		expanded, err := envexpand.Expand(v, portMap)
+		if err != nil {
+			slog.Error("env expansion failed", "service", a.name, "key", k, "err", err)
+			return nil
+		}
+		env = append(env, k+"="+expanded)
+	}
+	return env
+}
+
+// startBatchCommand starts the service process and registers it with bt.
+// Returns the started *exec.Cmd; the caller is responsible for cmd.Wait().
+func startBatchCommand(bt *batchTracker, command, dir string, env []string, stdout, stderr *prefixWriter) (*exec.Cmd, error) {
+	parts := strings.Fields(command)
+	if len(parts) == 0 {
+		return nil, fmt.Errorf("empty command")
+	}
+	cmd := exec.Command(parts[0], parts[1:]...)
+	cmd.Env = append(os.Environ(), env...)
+	if dir != "" {
+		cmd.Dir = dir
+	}
+	cmd.Stdout = stdout
+	cmd.Stderr = stderr
+	if err := cmd.Start(); err != nil {
+		return nil, err
+	}
+	bt.add(cmd)
+	return cmd, nil
 }
 
 var serviceColors = []string{
@@ -428,99 +603,6 @@ func (bt *batchTracker) killAll() {
 		if cmd.Process != nil {
 			cmd.Process.Kill()
 		}
-	}
-}
-
-const shutdownHookTimeout = 30 * time.Second
-
-func runServiceProcess(ctx context.Context, bt *batchTracker, name string, svc config.ServiceConfig, env []string, controlURL string, serverNames ...string) {
-	defer bt.wg.Done()
-	color := nextColor()
-	pw := newPrefixWriter(name, color, os.Stdout)
-	pwErr := newPrefixWriter(name, color, os.Stderr)
-	defer pw.Flush()
-	defer pwErr.Flush()
-
-	mainStarted := false
-	defer func() {
-		if !mainStarted {
-			for _, sn := range serverNames {
-				deregisterFromOrchestrator(controlURL, sn)
-			}
-		}
-	}()
-
-	for i, raw := range svc.Setup {
-		parts, err := orchestrator.SplitHookArgs(raw)
-		if err != nil {
-			slog.Error("setup hook parse failed", "name", name, "step", i+1, "cmd", raw, "err", err)
-			return
-		}
-		if len(parts) == 0 {
-			continue
-		}
-		slog.Info("service hook", "name", name, "phase", "setup", "step", i+1, "cmd", raw)
-		h := exec.CommandContext(ctx, parts[0], parts[1:]...)
-		h.Env = append(os.Environ(), env...)
-		if svc.Dir != "" {
-			h.Dir = svc.Dir
-		}
-		h.Stdout = pw
-		h.Stderr = pwErr
-		if err := h.Run(); err != nil {
-			slog.Error("setup hook failed", "name", name, "step", i+1, "cmd", raw, "err", err)
-			return
-		}
-	}
-
-	parts := strings.Fields(svc.Command)
-	if len(parts) == 0 {
-		slog.Error("empty command", "name", name)
-		return
-	}
-	cmd := exec.Command(parts[0], parts[1:]...)
-	cmd.Env = append(os.Environ(), env...)
-	if svc.Dir != "" {
-		cmd.Dir = svc.Dir
-	}
-	cmd.Stdout = pw
-	cmd.Stderr = pwErr
-
-	bt.add(cmd)
-	if err := cmd.Start(); err != nil {
-		slog.Error("service process failed to start", "name", name, "command", svc.Command, "err", err)
-		return
-	}
-	mainStarted = true
-	for _, sn := range serverNames {
-		updatePIDWithOrchestrator(controlURL, sn, cmd.Process.Pid)
-	}
-	if err := cmd.Wait(); err != nil {
-		slog.Error("service process exited", "name", name, "command", svc.Command, "err", err)
-	}
-
-	for i, raw := range svc.Shutdown {
-		parts, err := orchestrator.SplitHookArgs(raw)
-		if err != nil {
-			slog.Warn("shutdown hook parse failed", "name", name, "step", i+1, "cmd", raw, "err", err)
-			continue
-		}
-		if len(parts) == 0 {
-			continue
-		}
-		slog.Info("service hook", "name", name, "phase", "shutdown", "step", i+1, "cmd", raw)
-		ctx, cancel := context.WithTimeout(context.Background(), shutdownHookTimeout)
-		h := exec.CommandContext(ctx, parts[0], parts[1:]...)
-		h.Env = append(os.Environ(), env...)
-		if svc.Dir != "" {
-			h.Dir = svc.Dir
-		}
-		h.Stdout = pw
-		h.Stderr = pwErr
-		if err := h.Run(); err != nil {
-			slog.Warn("shutdown hook failed", "name", name, "step", i+1, "cmd", raw, "err", err)
-		}
-		cancel()
 	}
 }
 

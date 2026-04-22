@@ -15,6 +15,7 @@ import (
 	"time"
 
 	"github.com/derekgould/multi-dev-proxy/internal/config"
+	"github.com/derekgould/multi-dev-proxy/internal/depwait"
 	"github.com/derekgould/multi-dev-proxy/internal/envexpand"
 )
 
@@ -186,7 +187,13 @@ func TestWatchHealthStaysOpenWhenHealthy(t *testing.T) {
 	}
 }
 
-func TestLaunchMultiPortBatchSkipsProxylessPorts(t *testing.T) {
+func TestLaunchBatchServiceSkipsProxylessPorts(t *testing.T) {
+	// Commandless services still get TCP-probed; stub the check so the test
+	// doesn't block on unbound ports.
+	origCheck := batchTCPCheck
+	batchTCPCheck = func(int) bool { return true }
+	t.Cleanup(func() { batchTCPCheck = origCheck })
+
 	var registerMu sync.Mutex
 	var registerBodies []map[string]any
 	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
@@ -204,27 +211,30 @@ func TestLaunchMultiPortBatchSkipsProxylessPorts(t *testing.T) {
 	}))
 	defer srv.Close()
 
-	svc := config.ServiceConfig{
-		// Command empty → no process launched by the test.
-		Env: map[string]string{
-			"API_PORT": "auto",
-			"DB_PORT":  "auto",
+	a := batchAlloc{
+		name:     "infra",
+		svcGroup: "main",
+		svc: config.ServiceConfig{
+			// Command empty → no process launched.
+			Env: map[string]string{
+				"API_PORT": "auto",
+				"DB_PORT":  "auto",
+			},
+			Ports: []config.PortMapping{
+				{Env: "API_PORT", Proxy: 4000, Name: "api"},
+				{Env: "DB_PORT"}, // no proxy — should be skipped
+			},
 		},
-		Ports: []config.PortMapping{
-			{Env: "API_PORT", Proxy: 4000, Name: "api"},
-			{Env: "DB_PORT"}, // no proxy — should be skipped
-		},
+		portAssignments: map[string]int{"API_PORT": 40001, "DB_PORT": 54321},
 	}
-	portAssignments := map[string]int{"API_PORT": 40001, "DB_PORT": 54321}
 	portMap := envexpand.PortMap{
 		"infra": {"API_PORT": 40001, "DB_PORT": 54321},
 	}
 
 	bt := &batchTracker{}
-	err := launchMultiPortBatch(context.Background(), http.DefaultClient, srv.URL, "infra", svc, "main", portAssignments, portMap, bt, "client-1")
-	if err != nil {
-		t.Fatalf("launchMultiPortBatch: %v", err)
-	}
+	bt.wg.Add(1)
+	states := depwait.NewStates([]string{"infra"})
+	launchBatchService(context.Background(), bt, http.DefaultClient, srv.URL, "client-1", a, portMap, states)
 
 	registerMu.Lock()
 	defer registerMu.Unlock()
@@ -240,6 +250,148 @@ func TestLaunchMultiPortBatchSkipsProxylessPorts(t *testing.T) {
 	}
 	if got, _ := body["name"].(string); got != "main/api" {
 		t.Errorf("name = %v, want main/api", body["name"])
+	}
+}
+
+func TestLaunchBatchServiceWaitsForDependencies(t *testing.T) {
+	origTimeout, origPoll := batchReadyTimeout, batchReadyPoll
+	batchReadyTimeout, batchReadyPoll = 5*time.Second, 10*time.Millisecond
+	t.Cleanup(func() { batchReadyTimeout, batchReadyPoll = origTimeout, origPoll })
+
+	gateA := make(chan struct{})
+	origCheck := batchTCPCheck
+	batchTCPCheck = func(p int) bool {
+		if p == 19001 {
+			select {
+			case <-gateA:
+				return true
+			default:
+				return false
+			}
+		}
+		return true
+	}
+	t.Cleanup(func() { batchTCPCheck = origCheck })
+
+	type regCall struct {
+		name string
+		at   time.Time
+	}
+	var regMu sync.Mutex
+	var regs []regCall
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.Method == "POST" && r.URL.Path == "/__mdp/register" {
+			b, _ := io.ReadAll(r.Body)
+			var body map[string]any
+			json.Unmarshal(b, &body)
+			name, _ := body["name"].(string)
+			regMu.Lock()
+			regs = append(regs, regCall{name: name, at: time.Now()})
+			regMu.Unlock()
+		}
+		w.WriteHeader(http.StatusOK)
+	}))
+	t.Cleanup(srv.Close)
+
+	allocs := []batchAlloc{
+		{name: "a", svcGroup: "test", assignedPort: 19001, svc: config.ServiceConfig{Command: "sleep 30", Proxy: 3000}},
+		{name: "b", svcGroup: "test", assignedPort: 19002, svc: config.ServiceConfig{Command: "sleep 30", Proxy: 3001, DependsOn: []string{"a"}}},
+	}
+	bt := &batchTracker{}
+	states := depwait.NewStates([]string{"a", "b"})
+	ctx, cancel := context.WithCancel(context.Background())
+	t.Cleanup(cancel)
+	t.Cleanup(func() {
+		bt.killAll()
+		doneCh := make(chan struct{})
+		go func() { bt.wg.Wait(); close(doneCh) }()
+		select {
+		case <-doneCh:
+		case <-time.After(3 * time.Second):
+		}
+	})
+
+	for _, a := range allocs {
+		bt.wg.Add(1)
+		go launchBatchService(ctx, bt, http.DefaultClient, srv.URL, "c1", a, envexpand.PortMap{}, states)
+	}
+
+	waitFor := func(name string, dur time.Duration) bool {
+		deadline := time.Now().Add(dur)
+		for time.Now().Before(deadline) {
+			regMu.Lock()
+			for _, r := range regs {
+				if r.name == name {
+					regMu.Unlock()
+					return true
+				}
+			}
+			regMu.Unlock()
+			time.Sleep(10 * time.Millisecond)
+		}
+		return false
+	}
+
+	if !waitFor("test/a", time.Second) {
+		t.Fatal("a did not register")
+	}
+
+	// b must not register until a's TCP becomes ready.
+	time.Sleep(150 * time.Millisecond)
+	regMu.Lock()
+	for _, r := range regs {
+		if r.name == "test/b" {
+			regMu.Unlock()
+			t.Fatalf("b registered before a's TCP ready")
+		}
+	}
+	regMu.Unlock()
+
+	close(gateA)
+
+	if !waitFor("test/b", 2*time.Second) {
+		t.Fatal("b did not register after a became ready")
+	}
+}
+
+func TestLaunchBatchServiceReturnsOnContextCancel(t *testing.T) {
+	// Regression: on SIGINT, batchCancel() must unblock goroutines still
+	// waiting on deps so shutdown isn't held up by the full readiness timeout.
+	origTimeout, origPoll := batchReadyTimeout, batchReadyPoll
+	batchReadyTimeout, batchReadyPoll = 30*time.Second, 10*time.Millisecond
+	t.Cleanup(func() { batchReadyTimeout, batchReadyPoll = origTimeout, origPoll })
+
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.WriteHeader(http.StatusOK)
+	}))
+	t.Cleanup(srv.Close)
+
+	// b depends on a; a's state.Done is never closed → b blocks in depwait.Wait.
+	states := depwait.NewStates([]string{"a", "b"})
+	bt := &batchTracker{}
+	ctx, cancel := context.WithCancel(context.Background())
+
+	a := batchAlloc{
+		name:         "b",
+		svcGroup:     "test",
+		assignedPort: 29001,
+		svc:          config.ServiceConfig{Command: "sleep 30", DependsOn: []string{"a"}},
+	}
+
+	bt.wg.Add(1)
+	done := make(chan struct{})
+	go func() {
+		launchBatchService(ctx, bt, http.DefaultClient, srv.URL, "c1", a, envexpand.PortMap{}, states)
+		close(done)
+	}()
+
+	time.Sleep(50 * time.Millisecond) // let goroutine enter the dep wait
+	cancel()
+
+	select {
+	case <-done:
+	case <-time.After(time.Second):
+		t.Fatal("launchBatchService did not return promptly after ctx cancel")
 	}
 }
 
