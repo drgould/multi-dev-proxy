@@ -4,6 +4,7 @@ import (
 	"fmt"
 	"os"
 	"path/filepath"
+	"strings"
 
 	"gopkg.in/yaml.v3"
 )
@@ -12,6 +13,52 @@ import (
 type Config struct {
 	Services  map[string]ServiceConfig `yaml:"services"`
 	PortRange string                   `yaml:"port_range"`
+	Global    GlobalConfig             `yaml:"global"`
+}
+
+// GlobalConfig holds project-wide settings that aren't tied to a single service.
+type GlobalConfig struct {
+	// EnvFile, if non-empty, is a path where an aggregate .env file is written
+	// at startup. Values are resolved from Env (below).
+	EnvFile string `yaml:"env_file"`
+	// Env is an explicit map of env vars to write to EnvFile. Values may be
+	// scalar strings (supporting ${svc.key} and ${svc.env.VAR} interpolation)
+	// or mappings with a single `ref:` key that pass through another service's
+	// env var or port without string-wrapping it.
+	Env map[string]GlobalEnvValue `yaml:"env"`
+}
+
+// GlobalEnvValue is either a literal value (possibly with ${...} refs) or a
+// pass-through reference to another service's env var or port.
+type GlobalEnvValue struct {
+	Value string // set when the YAML entry is a scalar string
+	Ref   string // set when the YAML entry is a mapping with `ref:`
+}
+
+// UnmarshalYAML accepts either a scalar string or a mapping with a single
+// `ref:` key. Any other shape is a parse error so typos surface early.
+func (g *GlobalEnvValue) UnmarshalYAML(node *yaml.Node) error {
+	switch node.Kind {
+	case yaml.ScalarNode:
+		g.Value = node.Value
+		return nil
+	case yaml.MappingNode:
+		if len(node.Content) != 2 {
+			return fmt.Errorf("line %d: global env mapping must have exactly one key (`ref`)", node.Line)
+		}
+		key := node.Content[0].Value
+		if key != "ref" {
+			return fmt.Errorf("line %d: unknown key %q in global env entry (only `ref` is supported)", node.Line, key)
+		}
+		val := node.Content[1]
+		if val.Kind != yaml.ScalarNode {
+			return fmt.Errorf("line %d: `ref:` value must be a scalar", val.Line)
+		}
+		g.Ref = val.Value
+		return nil
+	default:
+		return fmt.Errorf("line %d: global env entry must be a string or mapping with `ref:`", node.Line)
+	}
 }
 
 // ServiceConfig defines a single service in the config file.
@@ -24,6 +71,7 @@ type ServiceConfig struct {
 	Scheme  string            `yaml:"scheme"`   // "http" or "https"; defaults to "http"
 	TLSCert string            `yaml:"tls_cert"` // path to TLS certificate file
 	TLSKey  string            `yaml:"tls_key"`  // path to TLS key file
+	EnvFile string            `yaml:"env_file"` // optional path for exported .env file
 	Env     map[string]string `yaml:"env"`
 	Ports   []PortMapping     `yaml:"ports"`
 }
@@ -53,22 +101,45 @@ func Load(path string) (*Config, error) {
 	}
 	dir := filepath.Dir(path)
 	for name, svc := range cfg.Services {
-		if svc.Dir != "" && !filepath.IsAbs(svc.Dir) {
-			svc.Dir = filepath.Join(dir, svc.Dir)
+		svc.Dir = resolvePath(svc.Dir, dir)
+		svc.TLSCert = resolvePath(svc.TLSCert, dir)
+		svc.TLSKey = resolvePath(svc.TLSKey, dir)
+		// Per-service env_file is resolved against the service's (already
+		// absolute) dir; fall back to the config dir when dir is empty.
+		envFileBase := svc.Dir
+		if envFileBase == "" {
+			envFileBase = dir
 		}
-		if svc.TLSCert != "" && !filepath.IsAbs(svc.TLSCert) {
-			svc.TLSCert = filepath.Join(dir, svc.TLSCert)
-		}
-		if svc.TLSKey != "" && !filepath.IsAbs(svc.TLSKey) {
-			svc.TLSKey = filepath.Join(dir, svc.TLSKey)
-		}
+		svc.EnvFile = resolvePath(svc.EnvFile, envFileBase)
 		// Infer scheme from cert presence.
 		if svc.Scheme == "" && svc.TLSCert != "" {
 			svc.Scheme = "https"
 		}
 		cfg.Services[name] = svc
 	}
+	cfg.Global.EnvFile = resolvePath(cfg.Global.EnvFile, dir)
 	return &cfg, nil
+}
+
+// resolvePath expands a leading "~" and joins relative paths against base.
+// Returns an empty string unchanged.
+func resolvePath(p, base string) string {
+	if p == "" {
+		return ""
+	}
+	if strings.HasPrefix(p, "~") {
+		if home, err := os.UserHomeDir(); err == nil {
+			if p == "~" {
+				p = home
+			} else if strings.HasPrefix(p, "~/") {
+				p = filepath.Join(home, p[2:])
+			}
+		}
+	}
+	if filepath.IsAbs(p) {
+		return p
+	}
+	return filepath.Join(base, p)
 }
 
 // Find looks for mdp.yaml in the given directory, then walks up to the root.

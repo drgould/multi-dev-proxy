@@ -145,3 +145,101 @@ func TestFindNotFound(t *testing.T) {
 		t.Errorf("Find() = %q, want empty", found)
 	}
 }
+
+func TestLoadGlobalEnv(t *testing.T) {
+	dir := t.TempDir()
+	path := filepath.Join(dir, "mdp.yaml")
+	os.WriteFile(path, []byte(`
+global:
+  env_file: ./.mdp.env
+  env:
+    API_BASE: "http://localhost:${api.PORT}"
+    API_PORT:
+      ref: api.env.PORT
+services:
+  api:
+    command: ./api
+    env:
+      PORT: auto
+    ports:
+      - env: PORT
+        proxy: 4000
+`), 0644)
+
+	cfg, err := Load(path)
+	if err != nil {
+		t.Fatalf("Load() error = %v", err)
+	}
+	if cfg.Global.EnvFile != filepath.Join(dir, ".mdp.env") {
+		t.Errorf("Global.EnvFile = %q, want %q", cfg.Global.EnvFile, filepath.Join(dir, ".mdp.env"))
+	}
+	if len(cfg.Global.Env) != 2 {
+		t.Fatalf("expected 2 global env entries, got %d", len(cfg.Global.Env))
+	}
+	if got := cfg.Global.Env["API_BASE"]; got.Value != "http://localhost:${api.PORT}" || got.Ref != "" {
+		t.Errorf("API_BASE = %+v", got)
+	}
+	if got := cfg.Global.Env["API_PORT"]; got.Ref != "api.env.PORT" || got.Value != "" {
+		t.Errorf("API_PORT = %+v", got)
+	}
+}
+
+func TestLoadGlobalEnvRejectsUnknownKey(t *testing.T) {
+	dir := t.TempDir()
+	path := filepath.Join(dir, "mdp.yaml")
+	os.WriteFile(path, []byte(`
+global:
+  env:
+    FOO:
+      reference: api.env.PORT
+`), 0644)
+	if _, err := Load(path); err == nil {
+		t.Fatal("expected error for unknown key, got nil")
+	}
+}
+
+func TestLoadGlobalEnvRejectsExtraKeys(t *testing.T) {
+	dir := t.TempDir()
+	path := filepath.Join(dir, "mdp.yaml")
+	os.WriteFile(path, []byte(`
+global:
+  env:
+    FOO:
+      ref: api.env.PORT
+      default: 1234
+`), 0644)
+	if _, err := Load(path); err == nil {
+		t.Fatal("expected error for extra key, got nil")
+	}
+}
+
+func TestLoadServiceEnvFileRelativeToServiceDir(t *testing.T) {
+	dir := t.TempDir()
+	path := filepath.Join(dir, "mdp.yaml")
+	os.WriteFile(path, []byte(`
+services:
+  web:
+    command: ./serve
+    dir: ./web
+    env_file: ./.env.local
+  api:
+    command: ./api
+    env_file: ./.env.api
+`), 0644)
+
+	cfg, err := Load(path)
+	if err != nil {
+		t.Fatalf("Load() error = %v", err)
+	}
+	web := cfg.Services["web"]
+	wantWeb := filepath.Join(dir, "web", ".env.local")
+	if web.EnvFile != wantWeb {
+		t.Errorf("web.EnvFile = %q, want %q", web.EnvFile, wantWeb)
+	}
+	api := cfg.Services["api"]
+	// No dir → fall back to config dir.
+	wantAPI := filepath.Join(dir, ".env.api")
+	if api.EnvFile != wantAPI {
+		t.Errorf("api.EnvFile = %q, want %q", api.EnvFile, wantAPI)
+	}
+}
