@@ -1,5 +1,13 @@
 # Changelog
 
+## [1.5.1](https://github.com/drgould/multi-dev-proxy/compare/v1.5.0...v1.5.1) (2026-04-22)
+
+
+### Bug Fixes
+
+* load TLS certs across all register paths ([#24](https://github.com/drgould/multi-dev-proxy/issues/24)) ([cf0c8d0](https://github.com/drgould/multi-dev-proxy/commit/cf0c8d09876a165f7edb628b4544c028ce3f6f93))
+* thread batch readiness knobs through launchBatchService ([#26](https://github.com/drgould/multi-dev-proxy/issues/26)) ([159edc4](https://github.com/drgould/multi-dev-proxy/commit/159edc46da000bf661f85ad11d222001a96b7f69))
+
 ## [1.5.0](https://github.com/drgould/multi-dev-proxy/compare/v1.4.1...v1.5.0) (2026-04-22)
 
 
