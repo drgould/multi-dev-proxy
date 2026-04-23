@@ -4,6 +4,8 @@ import (
 	"encoding/json"
 	"net/http"
 	"net/http/httptest"
+	"os"
+	"path/filepath"
 	"strings"
 	"testing"
 
@@ -93,6 +95,44 @@ func TestRegisterViaOrchestratorForwardsTLS(t *testing.T) {
 	}
 	if gotBody["scheme"] != "https" {
 		t.Errorf("scheme = %v, want https", gotBody["scheme"])
+	}
+}
+
+func TestRegisterViaOrchestratorResolvesRelativeTLSPaths(t *testing.T) {
+	var gotBody map[string]any
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.URL.Path == "/__mdp/health" {
+			json.NewEncoder(w).Encode(map[string]any{"ok": true})
+			return
+		}
+		json.NewDecoder(r.Body).Decode(&gotBody)
+		json.NewEncoder(w).Encode(map[string]bool{"ok": true})
+	}))
+	defer srv.Close()
+
+	t.Chdir(t.TempDir())
+	cwd, err := os.Getwd()
+	if err != nil {
+		t.Fatalf("getwd: %v", err)
+	}
+
+	port := testPort(t, srv.URL)
+	cmd := newRegisterCmd(port, map[string]string{
+		"port":       "4001",
+		"proxy-port": "3000",
+		"tls-cert":   "cert.pem",
+		"tls-key":    "key.pem",
+	}, []string{"app/main"})
+	if err := cmd.Execute(); err != nil {
+		t.Fatalf("register: %v", err)
+	}
+	wantCert := filepath.Join(cwd, "cert.pem")
+	wantKey := filepath.Join(cwd, "key.pem")
+	if gotBody["tlsCertPath"] != wantCert {
+		t.Errorf("tlsCertPath = %v, want %s", gotBody["tlsCertPath"], wantCert)
+	}
+	if gotBody["tlsKeyPath"] != wantKey {
+		t.Errorf("tlsKeyPath = %v, want %s", gotBody["tlsKeyPath"], wantKey)
 	}
 }
 

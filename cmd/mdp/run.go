@@ -646,6 +646,22 @@ func runSingleMode(cmd *cobra.Command, args []string, controlPort int, groupFlag
 	if err != nil {
 		return fmt.Errorf("cannot determine working directory: %w", err)
 	}
+	// Resolve TLS paths against the caller's cwd — the daemon, which actually
+	// loads the cert, may be running from a different directory.
+	if tlsCert != "" {
+		abs, err := filepath.Abs(tlsCert)
+		if err != nil {
+			return fmt.Errorf("resolve --tls-cert: %w", err)
+		}
+		tlsCert = abs
+	}
+	if tlsKey != "" {
+		abs, err := filepath.Abs(tlsKey)
+		if err != nil {
+			return fmt.Errorf("resolve --tls-key: %w", err)
+		}
+		tlsKey = abs
+	}
 	serverName := nameOverride
 	if serverName == "" {
 		repo := repoOverride
