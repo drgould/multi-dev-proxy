@@ -8,6 +8,7 @@ import (
 	"io"
 	"net/http"
 	"os"
+	"path/filepath"
 	"time"
 
 	"github.com/spf13/cobra"
@@ -46,6 +47,23 @@ func runRegister(cmd *cobra.Command, args []string) error {
 
 	if (tlsCert != "") != (tlsKey != "") {
 		return fmt.Errorf("both --tls-cert and --tls-key are required")
+	}
+
+	// Resolve TLS paths against the caller's cwd — the daemon, which actually
+	// loads the cert, may be running from a different directory.
+	if tlsCert != "" {
+		abs, err := filepath.Abs(tlsCert)
+		if err != nil {
+			return fmt.Errorf("resolve --tls-cert: %w", err)
+		}
+		tlsCert = abs
+	}
+	if tlsKey != "" {
+		abs, err := filepath.Abs(tlsKey)
+		if err != nil {
+			return fmt.Errorf("resolve --tls-key: %w", err)
+		}
+		tlsKey = abs
 	}
 
 	if isOrchestratorRunning(controlPort) {
