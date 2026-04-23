@@ -12,7 +12,7 @@ mdp run -P 3000 -- npm run dev
 # Terminal 3 — run your backend
 mdp run -P 4000 -- go run ./cmd/server
 
-# Open https://localhost:3000 — use the widget to switch branches
+# Open http://localhost:3000 — use the widget to switch branches
 ```
 
 ## Documentation

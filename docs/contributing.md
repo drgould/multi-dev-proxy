@@ -25,7 +25,7 @@ E2E tests require the testbed running in a separate terminal. See [Testbed](./te
 
 ```sh
 cd testbed && ./run.sh   # terminal 1: start proxy + demo servers
-npm run test:e2e         # terminal 2: run Playwright tests
+npm run test:e2e         # terminal 2: run Vitest + Puppeteer tests
 ```
 
 ## Conventional commits

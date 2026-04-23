@@ -39,7 +39,13 @@ mdp run                        # uses current git branch as group
 mdp run --group feature-auth   # override group name
 ```
 
-If no orchestrator is running, `mdp run` falls back to solo mode and just runs the command directly.
+When a command is given, `mdp run` picks its mode in this order:
+
+1. **Orchestrator mode** — if an orchestrator is running on `--control-port`, register with it.
+2. **Standalone proxy mode** — otherwise, probe `--proxy-port` for a bare `mdp` proxy (no orchestrator) and register with it if found.
+3. **Solo mode** — otherwise, run the command directly with no proxy.
+
+Batch mode (`mdp run` with no command) requires an orchestrator — it errors out if one isn't running.
 
 ## `mdp register`
 
@@ -51,6 +57,14 @@ mdp register myapp/main --port 4000 --pid 12345
 mdp register --list
 ```
 
+## `mdp deregister`
+
+Remove a server from all proxies. Useful when an externally managed service (e.g. Docker) stops without notifying the orchestrator.
+
+```sh
+mdp deregister myapp/main
+```
+
 ## `mdp switch`
 
 Switch active upstream service or group from the command line. See [how switching works](./concepts.md#how-switching-works) for the resolution order.
@@ -59,6 +73,25 @@ Switch active upstream service or group from the command line. See [how switchin
 mdp switch app/main -P 3000          # switch individual server
 mdp switch --group main              # switch all services in a group
 mdp switch --clear -P 3000           # clear default
+```
+
+## `mdp status`
+
+Print daemon status, proxies, registered servers, and groups. Add `--json` for machine-readable output.
+
+```sh
+mdp status
+mdp status --json
+```
+
+## `mdp logs`
+
+Show the daemon's log output. Defaults to the last 50 lines; use `-f` to follow.
+
+```sh
+mdp logs
+mdp logs -n 200
+mdp logs -f
 ```
 
 ## `mdp --stop`
@@ -103,6 +136,9 @@ mdp --stop
 | `--group`          |               | Group name override (default: git branch)        |
 | `--env`            | `PORT`        | Env var name for the assigned port               |
 | `--port-range`     | `10000-60000` | Port range for spawned services                  |
+| `--tls-cert`       |               | TLS certificate file (serves this service over HTTPS; see [recipes](./recipes.md)) |
+| `--tls-key`        |               | TLS key file (paired with `--tls-cert`)          |
+| `--auto-tls`       | `false`       | Auto-detect TLS certs from mkcert                |
 | `--control-port`   | `13100`       | Orchestrator control port                        |
 
 
@@ -116,7 +152,20 @@ mdp --stop
 | `-P, --proxy-port` | `3000`  | Proxy port to connect to                  |
 | `--group`          |         | Group name override                       |
 | `-l, --list`       |         | List registered services                  |
+| `--tls-cert`       |         | TLS certificate file (registers as HTTPS) |
+| `--tls-key`        |         | TLS key file (paired with `--tls-cert`)   |
 | `--control-port`   | `13100` | Orchestrator control port                 |
+
+
+`**mdp switch` flags:**
+
+
+| Flag               | Default | Description                                    |
+| ------------------ | ------- | ---------------------------------------------- |
+| `-P, --proxy-port` |         | Proxy port (required for individual switches)  |
+| `--group`          |         | Switch all services in a group                 |
+| `--clear`          |         | Clear the default upstream (needs `-P`)        |
+| `--control-port`   | `13100` | Orchestrator control port                      |
 
 ---
 
