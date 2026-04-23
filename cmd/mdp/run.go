@@ -26,6 +26,7 @@ import (
 	"github.com/derekgould/multi-dev-proxy/internal/depwait"
 	"github.com/derekgould/multi-dev-proxy/internal/detect"
 	"github.com/derekgould/multi-dev-proxy/internal/envexpand"
+	"github.com/derekgould/multi-dev-proxy/internal/envexport"
 	"github.com/derekgould/multi-dev-proxy/internal/orchestrator"
 	"github.com/derekgould/multi-dev-proxy/internal/ports"
 	"github.com/derekgould/multi-dev-proxy/internal/process"
@@ -165,7 +166,7 @@ func runBatchMode(cmd *cobra.Command, controlPort int, groupFlag string) error {
 				svcPorts[k] = v
 			}
 			portMap[name] = svcPorts
-			allocations = append(allocations, batchAlloc{name, svc, svcGroup, 0, portAssignments})
+			allocations = append(allocations, batchAlloc{name: name, svc: svc, svcGroup: svcGroup, portAssignments: portAssignments})
 			continue
 		}
 
@@ -178,7 +179,11 @@ func runBatchMode(cmd *cobra.Command, controlPort int, groupFlag string) error {
 			assignedPorts = append(assignedPorts, assignedPort)
 		}
 		portMap[name] = map[string]int{"port": assignedPort, "PORT": assignedPort}
-		allocations = append(allocations, batchAlloc{name, svc, svcGroup, assignedPort, nil})
+		allocations = append(allocations, batchAlloc{name: name, svc: svc, svcGroup: svcGroup, assignedPort: assignedPort})
+	}
+
+	if err := exportBatchEnvFiles(cfg, allocations, portMap); err != nil {
+		return err
 	}
 
 	batchCtx, batchCancel := context.WithCancel(context.Background())
@@ -193,7 +198,7 @@ func runBatchMode(cmd *cobra.Command, controlPort int, groupFlag string) error {
 	rt := defaultBatchRuntime()
 	for _, a := range allocations {
 		bt.wg.Add(1)
-		go launchBatchService(batchCtx, bt, client, controlURL, clientID, a, portMap, states, rt)
+		go launchBatchService(batchCtx, bt, client, controlURL, clientID, a, states, rt)
 	}
 
 	slog.Info("batch services started", "group", group)
@@ -241,6 +246,7 @@ type batchAlloc struct {
 	svcGroup        string
 	assignedPort    int            // single-port only
 	portAssignments map[string]int // multi-port only
+	env             []string       // populated by exportBatchEnvFiles before fan-out
 }
 
 // launchBatchService is the per-service batch-mode launcher: it waits for the
@@ -253,7 +259,6 @@ func launchBatchService(
 	client *http.Client,
 	controlURL, clientID string,
 	a batchAlloc,
-	portMap envexpand.PortMap,
 	states map[string]*depwait.State,
 	rt batchRuntime,
 ) {
@@ -367,12 +372,7 @@ func launchBatchService(
 		return
 	}
 
-	env := buildBatchEnv(a, portMap)
-	if env == nil {
-		// env expansion failed inside buildBatchEnv (error already logged).
-		state.Err = fmt.Errorf("env expansion failed for %q", a.name)
-		return
-	}
+	env := a.env
 
 	color := nextColor()
 	pw := newPrefixWriter(a.name, color, os.Stdout)
@@ -472,9 +472,8 @@ func launchBatchService(
 
 const shutdownHookTimeout = 30 * time.Second
 
-// buildBatchEnv builds the environment for a batch-mode service. Returns nil
-// if env expansion fails (the error is logged).
-func buildBatchEnv(a batchAlloc, portMap envexpand.PortMap) []string {
+// buildBatchEnv builds the environment for a batch-mode service.
+func buildBatchEnv(a batchAlloc, portMap envexpand.PortMap) ([]string, error) {
 	env := []string{"MDP=1"}
 	if len(a.svc.Ports) == 0 && a.assignedPort > 0 {
 		env = append(env, fmt.Sprintf("PORT=%d", a.assignedPort))
@@ -488,12 +487,50 @@ func buildBatchEnv(a batchAlloc, portMap envexpand.PortMap) []string {
 		}
 		expanded, err := envexpand.Expand(v, portMap)
 		if err != nil {
-			slog.Error("env expansion failed", "service", a.name, "key", k, "err", err)
-			return nil
+			return nil, fmt.Errorf("env expansion for %s.%s: %w", a.name, k, err)
 		}
 		env = append(env, k+"="+expanded)
 	}
-	return env
+	return env, nil
+}
+
+// exportBatchEnvFiles builds each allocation's env up front and writes the
+// global + per-service env files before any service launches. Env is stored
+// on allocations[i].env for the launch goroutine to consume.
+func exportBatchEnvFiles(cfg *config.Config, allocations []batchAlloc, portMap envexpand.PortMap) error {
+	envMap := envexpand.EnvMap{}
+	for i, a := range allocations {
+		env, err := buildBatchEnv(a, portMap)
+		if err != nil {
+			return err
+		}
+		allocations[i].env = env
+		envMap[a.name] = envSliceToMap(env)
+	}
+	if cfg.Global.EnvFile != "" {
+		if err := envexport.WriteGlobal(cfg.Global.EnvFile, cfg.Global.Env, portMap, envMap); err != nil {
+			return fmt.Errorf("write global env file: %w", err)
+		}
+	}
+	for _, a := range allocations {
+		if a.svc.EnvFile == "" {
+			continue
+		}
+		if err := envexport.WritePerService(a.svc.EnvFile, a.env); err != nil {
+			return fmt.Errorf("write env file for %s: %w", a.name, err)
+		}
+	}
+	return nil
+}
+
+func envSliceToMap(env []string) map[string]string {
+	m := make(map[string]string, len(env))
+	for _, kv := range env {
+		if i := strings.IndexByte(kv, '='); i >= 0 {
+			m[kv[:i]] = kv[i+1:]
+		}
+	}
+	return m
 }
 
 // startBatchCommand starts the service process and registers it with bt.

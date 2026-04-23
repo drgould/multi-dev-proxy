@@ -230,14 +230,11 @@ func TestLaunchBatchServiceSkipsProxylessPorts(t *testing.T) {
 		},
 		portAssignments: map[string]int{"API_PORT": 40001, "DB_PORT": 54321},
 	}
-	portMap := envexpand.PortMap{
-		"infra": {"API_PORT": 40001, "DB_PORT": 54321},
-	}
 
 	bt := &batchTracker{}
 	bt.wg.Add(1)
 	states := depwait.NewStates([]string{"infra"})
-	launchBatchService(context.Background(), bt, http.DefaultClient, srv.URL, "client-1", a, portMap, states, rt)
+	launchBatchService(context.Background(), bt, http.DefaultClient, srv.URL, "client-1", a, states, rt)
 
 	registerMu.Lock()
 	defer registerMu.Unlock()
@@ -309,7 +306,7 @@ func TestLaunchBatchServiceWaitsForDependencies(t *testing.T) {
 
 	for _, a := range allocs {
 		bt.wg.Add(1)
-		go launchBatchService(ctx, bt, http.DefaultClient, srv.URL, "c1", a, envexpand.PortMap{}, states, rt)
+		go launchBatchService(ctx, bt, http.DefaultClient, srv.URL, "c1", a, states, rt)
 	}
 
 	waitFor := func(name string, dur time.Duration) bool {
@@ -379,7 +376,7 @@ func TestLaunchBatchServiceReturnsOnContextCancel(t *testing.T) {
 	bt.wg.Add(1)
 	done := make(chan struct{})
 	go func() {
-		launchBatchService(ctx, bt, http.DefaultClient, srv.URL, "c1", a, envexpand.PortMap{}, states, rt)
+		launchBatchService(ctx, bt, http.DefaultClient, srv.URL, "c1", a, states, rt)
 		close(done)
 	}()
 
@@ -436,7 +433,7 @@ func TestLaunchBatchServiceHookOrdering(t *testing.T) {
 	bt := &batchTracker{}
 	bt.wg.Add(1)
 	states := depwait.NewStates([]string{"web"})
-	launchBatchService(context.Background(), bt, http.DefaultClient, srv.URL, "c1", a, envexpand.PortMap{}, states, rt)
+	launchBatchService(context.Background(), bt, http.DefaultClient, srv.URL, "c1", a, states, rt)
 
 	data, err := os.ReadFile(logPath)
 	if err != nil {
@@ -489,7 +486,7 @@ func TestLaunchBatchServiceSetupFailureSkipsRegistration(t *testing.T) {
 	bt := &batchTracker{}
 	bt.wg.Add(1)
 	states := depwait.NewStates([]string{"web"})
-	launchBatchService(context.Background(), bt, http.DefaultClient, srv.URL, "c1", a, envexpand.PortMap{}, states, rt)
+	launchBatchService(context.Background(), bt, http.DefaultClient, srv.URL, "c1", a, states, rt)
 
 	regMu.Lock()
 	defer regMu.Unlock()
@@ -625,5 +622,141 @@ func TestRunProxiedSetsMDPEnv(t *testing.T) {
 	)
 	if err != nil {
 		t.Fatalf("runProxied should set MDP=1 and PORT: %v", err)
+	}
+}
+
+func TestExportBatchEnvFilesWritesGlobalAndPerService(t *testing.T) {
+	tmp := t.TempDir()
+	globalPath := filepath.Join(tmp, "global.env")
+	apiEnvPath := filepath.Join(tmp, "api.env")
+	webEnvPath := filepath.Join(tmp, "web.env")
+
+	cfg := &config.Config{
+		Global: config.GlobalConfig{
+			EnvFile: globalPath,
+			Env: map[string]config.GlobalEnvValue{
+				"API_PORT": {Ref: "api.env.PORT"},
+				"API_URL":  {Value: "http://localhost:${api.PORT}"},
+				"WEB_MODE": {Ref: "web.env.MODE"},
+			},
+		},
+	}
+
+	allocations := []batchAlloc{
+		{
+			name:         "api",
+			svcGroup:     "test",
+			assignedPort: 40100,
+			svc: config.ServiceConfig{
+				EnvFile: apiEnvPath,
+				Env:     map[string]string{"NAME": "api"},
+			},
+		},
+		{
+			name:         "web",
+			svcGroup:     "test",
+			assignedPort: 40101,
+			svc: config.ServiceConfig{
+				EnvFile: webEnvPath,
+				Env:     map[string]string{"MODE": "dev"},
+			},
+		},
+	}
+	portMap := envexpand.PortMap{
+		"api": {"port": 40100, "PORT": 40100},
+		"web": {"port": 40101, "PORT": 40101},
+	}
+
+	if err := exportBatchEnvFiles(cfg, allocations, portMap); err != nil {
+		t.Fatalf("exportBatchEnvFiles: %v", err)
+	}
+
+	gdata, err := os.ReadFile(globalPath)
+	if err != nil {
+		t.Fatalf("read global: %v", err)
+	}
+	gtext := string(gdata)
+	for _, want := range []string{
+		`API_PORT="40100"`,
+		`API_URL="http://localhost:40100"`,
+		`WEB_MODE="dev"`,
+	} {
+		if !strings.Contains(gtext, want) {
+			t.Errorf("global missing %q in:\n%s", want, gtext)
+		}
+	}
+
+	adata, err := os.ReadFile(apiEnvPath)
+	if err != nil {
+		t.Fatalf("read api: %v", err)
+	}
+	atext := string(adata)
+	for _, want := range []string{`NAME="api"`, `PORT="40100"`} {
+		if !strings.Contains(atext, want) {
+			t.Errorf("api missing %q in:\n%s", want, atext)
+		}
+	}
+
+	wdata, err := os.ReadFile(webEnvPath)
+	if err != nil {
+		t.Fatalf("read web: %v", err)
+	}
+	wtext := string(wdata)
+	for _, want := range []string{`MODE="dev"`, `PORT="40101"`} {
+		if !strings.Contains(wtext, want) {
+			t.Errorf("web missing %q in:\n%s", want, wtext)
+		}
+	}
+
+	if allocations[0].env == nil || allocations[1].env == nil {
+		t.Fatal("expected allocations[i].env to be populated for launch goroutines")
+	}
+}
+
+func TestExportBatchEnvFilesSkipsWhenNoEnvFile(t *testing.T) {
+	tmp := t.TempDir()
+	cfg := &config.Config{}
+	allocations := []batchAlloc{
+		{
+			name:         "api",
+			svcGroup:     "test",
+			assignedPort: 40200,
+			svc:          config.ServiceConfig{Env: map[string]string{"X": "y"}},
+		},
+	}
+	if err := exportBatchEnvFiles(cfg, allocations, envexpand.PortMap{}); err != nil {
+		t.Fatalf("exportBatchEnvFiles: %v", err)
+	}
+	entries, _ := os.ReadDir(tmp)
+	if len(entries) != 0 {
+		t.Errorf("expected no files written, got: %v", entries)
+	}
+	if allocations[0].env == nil {
+		t.Error("env should be populated even when no env files are configured")
+	}
+}
+
+func TestExportBatchEnvFilesPropagatesExpansionError(t *testing.T) {
+	tmp := t.TempDir()
+	cfg := &config.Config{
+		Global: config.GlobalConfig{
+			EnvFile: filepath.Join(tmp, "global.env"),
+			Env:     map[string]config.GlobalEnvValue{"X": {Ref: "nope.env.MISSING"}},
+		},
+	}
+	allocations := []batchAlloc{
+		{
+			name:         "api",
+			svcGroup:     "test",
+			assignedPort: 40300,
+			svc:          config.ServiceConfig{Env: map[string]string{"A": "b"}},
+		},
+	}
+	err := exportBatchEnvFiles(cfg, allocations, envexpand.PortMap{"api": {"port": 40300, "PORT": 40300}})
+	if err == nil {
+		t.Fatal("expected error from unresolved ref")
+	}
+	if !strings.Contains(err.Error(), "write global env file") {
+		t.Errorf("expected wrapped global env file error, got: %v", err)
 	}
 }
