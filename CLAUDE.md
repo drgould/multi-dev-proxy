@@ -21,13 +21,13 @@ Require the testbed running in a separate terminal:
 
 ```sh
 cd testbed && ./run.sh   # start proxy + all demo servers
-npm run test:e2e         # run Playwright tests (separate terminal)
+npm run test:e2e         # run Vitest + Puppeteer tests (separate terminal)
 ```
 
 ## Architecture
 
 ```
-cmd/mdp/              CLI entrypoints (root orchestrator, run, register, switch, kill)
+cmd/mdp/              CLI entrypoints (root orchestrator, run, register, deregister, switch, status, logs)
 internal/
   api/                HTTP handlers for /__mdp/* per-proxy endpoints + CORS + config
   certs/              TLS cert generation helpers (unused — proxy inherits certs from services)

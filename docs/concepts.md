@@ -20,6 +20,15 @@ browser → :3000 (frontend proxy) → :42301 (main branch)
                                   → :20235 (api/feature-auth)
 ```
 
+## The switcher widget
+
+The floating widget mentioned above is auto-injected into every HTML response routed through a proxy. A few things worth knowing:
+
+- It runs inside a **Shadow DOM**, so your page's CSS can't style it and its styles can't leak into your page.
+- Selection is persisted per proxy port via the `__mdp_upstream_<port>` cookie — each proxy gets its own cookie to avoid collisions.
+- It subscribes to a server-sent events stream so the list of available servers updates live as services come and go.
+- There's currently no flag to disable injection; if you don't want it, route traffic to the upstream port directly instead of through the proxy.
+
 ## Service groups
 
 Services are automatically grouped by their git branch name (or an explicit `--group` flag). All services sharing the same group name form a switchable group. Switching to a group sets the default upstream on every proxy at once.
@@ -38,10 +47,11 @@ See [`mdp switch`](./cli.md#mdp-switch) for CLI details.
 
 Each proxy has its own cookie (e.g., `__mdp_upstream_3000`) to avoid collisions when multiple proxies run on localhost. The resolution order for each request is:
 
-1. **Cookie** — if a valid cookie is present, route to that server
-2. **Default upstream** — a server-side default set via `mdp switch` or the TUI
-3. **Auto-route** — if only one server is registered, route to it automatically
-4. **Redirect** — redirect to the switch page at `/__mdp/switch`
+1. **Auto-route** — if only one server is registered, route to it (skips every other step)
+2. **Query parameter** — `?__mdp_upstream=<name>` wins over cookie. Useful for per-iframe or per-tab routing where a shared cookie would collide
+3. **Cookie** — if a valid cookie is present, route to that server
+4. **Default upstream** — a server-side default set via `mdp switch` or the TUI
+5. **Redirect** — redirect to the switch page at `/__mdp/switch`
 
 The default upstream is especially useful for backend proxies where cookies aren't available (dev-server proxies, curl, API clients).
 

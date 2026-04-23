@@ -11,7 +11,7 @@ ARCH=$(uname -m)
 
 case "$OS" in
   linux|darwin) ;;
-  *) die "Unsupported OS: $OS. Use 'npm install -g mdp' on Windows." ;;
+  *) die "Unsupported OS: $OS. Use Scoop on Windows (see docs/installation.md)." ;;
 esac
 
 case "$ARCH" in
