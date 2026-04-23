@@ -22,6 +22,7 @@ mdp run -P 4000 -- go run ./cmd/server
 - [Quick start](./quick-start.md) — tutorial flow
 - [CLI reference](./cli.md) — every command and flag
 - [Config (`mdp.yaml`)](./config.md) — services, hooks, `depends_on`, `env_file`, ports, TLS
+- [mdp.yaml reference](./mdp-yaml-reference.md) — every field in the config schema
 - [Recipes](./recipes.md) — Docker Compose, HTTPS / mkcert
 - [API reference](./api.md) — per-proxy and orchestrator endpoints
 - [Testbed](./testbed.md) — demo servers

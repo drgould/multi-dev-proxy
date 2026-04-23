@@ -15,11 +15,12 @@ nav:
   - Quick start: quick-start.md
   - Installation: installation.md
   - Concepts: concepts.md
-  - CLI reference: cli.md
   - Config: config.md
   - Recipes: recipes.md
-  - API reference: api.md
   - Testbed: testbed.md
+  - CLI reference: cli.md
+  - mdp.yaml reference: mdp-yaml-reference.md
+  - API reference: api.md
   - Contributing: contributing.md
 
 markdown_extensions:

@@ -54,6 +54,7 @@ Other methods (curl, Scoop): see [docs/installation.md](docs/installation.md).
 - [Quick start](docs/quick-start.md) — tutorial flow
 - [CLI reference](docs/cli.md) — every command and flag
 - [Config (`mdp.yaml`)](docs/config.md) — services, hooks, `depends_on`, `env_file`, ports, TLS
+- [mdp.yaml reference](docs/mdp-yaml-reference.md) — every field in the config schema
 - [Recipes](docs/recipes.md) — Docker Compose, HTTPS / mkcert
 - [API reference](docs/api.md) — per-proxy and orchestrator endpoints
 - [Testbed](docs/testbed.md) — demo servers

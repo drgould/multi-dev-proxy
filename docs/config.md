@@ -2,6 +2,8 @@
 
 Place an `mdp.yaml` in your project root to declaratively define services. When present, `mdp run` (without a command) starts all configured services.
 
+> For the full field-by-field schema, see the [**mdp.yaml reference**](./mdp-yaml-reference.md).
+
 ```yaml
 services:
   frontend:
