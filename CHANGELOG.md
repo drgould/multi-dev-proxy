@@ -1,5 +1,13 @@
 # Changelog
 
+## [1.5.2](https://github.com/drgould/multi-dev-proxy/compare/v1.5.1...v1.5.2) (2026-04-23)
+
+
+### Bug Fixes
+
+* resolve relative TLS paths against caller cwd ([#27](https://github.com/drgould/multi-dev-proxy/issues/27)) ([3b0e248](https://github.com/drgould/multi-dev-proxy/commit/3b0e2486f69acf512e5baada95eb42578bdda6cc))
+* write env files in mdp run batch mode ([#29](https://github.com/drgould/multi-dev-proxy/issues/29)) ([4d4cab3](https://github.com/drgould/multi-dev-proxy/commit/4d4cab39f8be7f14a451f6a51d8b99eecabb12f4))
+
 ## [1.5.1](https://github.com/drgould/multi-dev-proxy/compare/v1.5.0...v1.5.1) (2026-04-22)
 
 
