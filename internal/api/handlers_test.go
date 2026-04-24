@@ -277,7 +277,7 @@ func TestDeregisterHandler(t *testing.T) {
 			if tt.preRegister {
 				_ = reg.Register(&registry.ServerEntry{Name: "app/main", Repo: "app", Port: 3000, PID: 100})
 			}
-			handler := DeregisterHandler(reg)
+			handler := DeregisterHandler(reg, nil)
 
 			req := httptest.NewRequest(tt.method, tt.path, nil)
 			namePart := strings.TrimPrefix(tt.path, "/__mdp/register/")

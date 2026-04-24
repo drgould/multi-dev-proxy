@@ -147,8 +147,10 @@ func RegisterHandler(reg *registry.Registry, addCert CertLoader) http.HandlerFun
 	}
 }
 
-// DeregisterHandler handles DELETE /__mdp/register/{name}
-func DeregisterHandler(reg *registry.Registry) http.HandlerFunc {
+// DeregisterHandler handles DELETE /__mdp/register/{name}.
+// onDeregistered, if non-nil, is invoked after a successful deregister so the
+// caller can react (e.g. shut down an empty proxy).
+func DeregisterHandler(reg *registry.Registry, onDeregistered func()) http.HandlerFunc {
 	return func(w http.ResponseWriter, r *http.Request) {
 		if r.Method != http.MethodDelete {
 			writeJSON(w, http.StatusMethodNotAllowed, map[string]string{"error": "method not allowed"})
@@ -164,6 +166,9 @@ func DeregisterHandler(reg *registry.Registry) http.HandlerFunc {
 			decodedName = name
 		}
 		deleted := reg.Deregister(decodedName)
+		if deleted && onDeregistered != nil {
+			onDeregistered()
+		}
 		writeJSON(w, http.StatusOK, map[string]any{"ok": true, "deleted": deleted})
 	}
 }

@@ -92,6 +92,23 @@ func freeTCPPort(t *testing.T) int {
 	return port
 }
 
+// waitPortFree polls until a TCP bind to the given port succeeds, or fails
+// the test on timeout. Used to verify an auto-shut-down proxy actually
+// released its listener.
+func waitPortFree(t *testing.T, port int, timeout time.Duration) {
+	t.Helper()
+	deadline := time.Now().Add(timeout)
+	for time.Now().Before(deadline) {
+		ln, err := net.Listen("tcp", fmt.Sprintf("127.0.0.1:%d", port))
+		if err == nil {
+			_ = ln.Close()
+			return
+		}
+		time.Sleep(10 * time.Millisecond)
+	}
+	t.Fatalf("port %d not released within %s", port, timeout)
+}
+
 // startOrchProxy spins up an orchestrator listening on a real ephemeral port
 // and returns the orchestrator, proxy port, and a teardown helper that runs
 // on test cleanup.
@@ -204,10 +221,9 @@ func TestPlainHTTPRegisterAndRoute(t *testing.T) {
 	}
 }
 
-// TestDeregisterMidTraffic registers and routes successfully, then deregisters
-// and asserts the next request no longer reaches the upstream — instead it
-// redirects to /__mdp/switch (Count==0 path in routing.ResolveUpstream).
-func TestDeregisterMidTraffic(t *testing.T) {
+// TestDeregisterLastServerShutsDownProxy registers a single server, deregisters
+// it, and asserts the proxy is removed and its port can be rebound.
+func TestDeregisterLastServerShutsDownProxy(t *testing.T) {
 	upstream := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		fmt.Fprintln(w, "live")
 	}))
@@ -227,7 +243,7 @@ func TestDeregisterMidTraffic(t *testing.T) {
 		resp.Body.Close()
 	}
 
-	// Deregister via the control API.
+	// Deregister via the control API — proxy should auto-shutdown.
 	delReq := httptest.NewRequest(http.MethodDelete, "/__mdp/register/app/main", nil)
 	delRec := httptest.NewRecorder()
 	NewControlAPI(o, nil).Handler().ServeHTTP(delRec, delReq)
@@ -235,17 +251,12 @@ func TestDeregisterMidTraffic(t *testing.T) {
 		t.Fatalf("deregister: status %d, body %s", delRec.Code, delRec.Body.String())
 	}
 
-	resp, err := noRedirectClient().Get(fmt.Sprintf("http://127.0.0.1:%d/", proxyPort))
-	if err != nil {
-		t.Fatalf("post-deregister GET: %v", err)
+	if pi := o.GetProxy(proxyPort); pi != nil {
+		t.Errorf("proxy still registered after last deregister: %+v", pi)
 	}
-	defer resp.Body.Close()
-	if resp.StatusCode != http.StatusFound {
-		t.Errorf("post-deregister status = %d, want 302 (redirect to switch)", resp.StatusCode)
-	}
-	if loc := resp.Header.Get("Location"); loc != "/__mdp/switch" {
-		t.Errorf("Location = %q, want /__mdp/switch", loc)
-	}
+
+	// Wait for the port to be rebindable (Server.Shutdown runs async).
+	waitPortFree(t, proxyPort, 2*time.Second)
 }
 
 // TestCookieRoutingBetweenSiblings registers two upstreams on the same proxy

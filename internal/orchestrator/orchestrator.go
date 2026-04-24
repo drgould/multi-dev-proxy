@@ -4,6 +4,7 @@ import (
 	"context"
 	"crypto/tls"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"io"
 	"log"
@@ -25,7 +26,7 @@ import (
 
 // Event represents a state change in the orchestrator.
 type Event struct {
-	Type string // "proxy_created", "registered", "deregistered", "default_changed", "group_switched", "service_started", "service_stopped"
+	Type string // "proxy_created", "proxy_destroyed", "registered", "deregistered", "default_changed", "group_switched", "service_started", "service_stopped"
 	Port int
 	Name string
 }
@@ -210,6 +211,16 @@ func (o *Orchestrator) createProxyLocked(port int, label string) (*ProxyInstance
 	inj := inject.New()
 	prx.SetModifyResponse(inj.ModifyResponse)
 
+	ctx, cancel := context.WithCancel(context.Background())
+	pi := &ProxyInstance{
+		Port:       port,
+		Label:      label,
+		Registry:   reg,
+		CookieName: cookieName,
+		Proxy:      prx,
+		cancel:     cancel,
+	}
+
 	configFn := func() api.ConfigResponse {
 		o.mu.RLock()
 		defer o.mu.RUnlock()
@@ -237,7 +248,9 @@ func (o *Orchestrator) createProxyLocked(port int, label string) (*ProxyInstance
 	mux.HandleFunc("GET /__mdp/health", api.HealthHandler(reg))
 	mux.HandleFunc("GET /__mdp/servers", api.ServersHandler(reg))
 	mux.HandleFunc("POST /__mdp/register", api.RegisterHandler(reg, o.AddCert))
-	mux.HandleFunc("DELETE /__mdp/register/{name...}", api.DeregisterHandler(reg))
+	mux.HandleFunc("DELETE /__mdp/register/{name...}", api.DeregisterHandler(reg, func() {
+		o.shutdownIfEmpty(pi)
+	}))
 	mux.HandleFunc("POST /__mdp/switch/{name...}", api.SwitchHandler(reg, cookieName, prx, port))
 	mux.HandleFunc("GET /__mdp/last-path/{name...}", api.LastPathHandler(prx))
 	mux.HandleFunc("GET /__mdp/switch", ui.SwitchPageHandler())
@@ -267,9 +280,6 @@ func (o *Orchestrator) createProxyLocked(port int, label string) (*ProxyInstance
 		ErrorLog: log.New(io.Discard, "", 0),
 	}
 
-	ctx, cancel := context.WithCancel(context.Background())
-	registry.StartPruner(ctx, reg, 10*time.Second, process.IsProcessAlive, registry.TCPCheck)
-
 	ln, listenErr := net.Listen("tcp", addr)
 	if listenErr != nil {
 		cancel()
@@ -284,7 +294,11 @@ func (o *Orchestrator) createProxyLocked(port int, label string) (*ProxyInstance
 	smartLn := proxy.NewSmartListener(ln, tlsCfg)
 
 	go func() {
-		if err := srv.Serve(smartLn); err != nil && err != http.ErrServerClosed {
+		// ShutdownProxy closes the listener synchronously before the async
+		// Server.Shutdown sets the internal shutting-down flag, so Serve can
+		// return net.ErrClosed instead of http.ErrServerClosed. Treat both as
+		// expected shutdown signals.
+		if err := srv.Serve(smartLn); err != nil && err != http.ErrServerClosed && !errors.Is(err, net.ErrClosed) {
 			slog.Error("proxy listener failed", "port", port, "err", err)
 		}
 	}()
@@ -294,17 +308,12 @@ func (o *Orchestrator) createProxyLocked(port int, label string) (*ProxyInstance
 		"cookie", cookieName,
 	)
 
-	pi := &ProxyInstance{
-		Port:       port,
-		Label:      label,
-		Registry:   reg,
-		CookieName: cookieName,
-		Proxy:      prx,
-		Server:     srv,
-		smartLn:    smartLn,
-		cancel:     cancel,
-	}
+	pi.Server = srv
+	pi.smartLn = smartLn
 	o.proxies[port] = pi
+	registry.StartPruner(ctx, reg, 10*time.Second, process.IsProcessAlive, registry.TCPCheck, func() {
+		o.shutdownIfEmpty(pi)
+	})
 	o.emit(Event{Type: "proxy_created", Port: port})
 	return pi, nil
 }
@@ -340,11 +349,52 @@ func (o *Orchestrator) Disconnect(clientID string) int {
 			o.emit(Event{Type: "deregistered", Port: pi.Port, Name: name})
 		}
 		total += len(removed)
+		if len(removed) > 0 {
+			o.shutdownIfEmpty(pi)
+		}
 	}
 	if total > 0 {
 		slog.Info("client disconnected", "clientID", clientID, "removed", total)
 	}
 	return total
+}
+
+// ShutdownProxy tears down the proxy listening on the given port and releases
+// the port. Safe to call for a port that has no proxy (no-op). The listener
+// is closed synchronously so the port is immediately rebindable by a fresh
+// EnsureProxy. In-flight requests drain asynchronously via http.Server.Shutdown
+// so callers don't block.
+func (o *Orchestrator) ShutdownProxy(port int) {
+	o.mu.Lock()
+	pi, ok := o.proxies[port]
+	if !ok {
+		o.mu.Unlock()
+		return
+	}
+	delete(o.proxies, port)
+	pi.cancel()
+	o.mu.Unlock()
+
+	// Close the listener synchronously so the port is released before we
+	// return — a concurrent EnsureProxy on the same port must be able to
+	// net.Listen without racing the goroutine below.
+	if pi.smartLn != nil {
+		_ = pi.smartLn.Close()
+	}
+	go func() {
+		ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+		defer cancel()
+		_ = pi.Server.Shutdown(ctx)
+	}()
+	slog.Info("proxy shut down (empty)", "port", port)
+	o.emit(Event{Type: "proxy_destroyed", Port: port})
+}
+
+// shutdownIfEmpty shuts the proxy down if its registry has no servers.
+func (o *Orchestrator) shutdownIfEmpty(pi *ProxyInstance) {
+	if pi.Registry.Count() == 0 {
+		o.ShutdownProxy(pi.Port)
+	}
 }
 
 // ShutdownCh returns a channel that is closed when the orchestrator shuts down.
