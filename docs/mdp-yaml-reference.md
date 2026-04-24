@@ -111,6 +111,7 @@ Keys under `services.<name>`.
 | `env` | map of name → string | `{}` | Env vars for `command`, `setup`, and `shutdown`. Values support: literal strings, `auto` (allocates a port in the corresponding `ports[]` entry), `${svc.port}` (another service's primary port), and `${svc.NAMED_PORT}` (a named port from another service's `ports[]`). `${svc.env.VAR}` is **not** supported here — it only works in `global.env`. |
 | `ports` | list of [port mapping](#port-mapping) | `[]` | Multi-port mode. When present, `port` is ignored and ports are allocated per entry. |
 | `depends_on` | list of service names | `[]` | Wait for each dependency to be TCP-reachable on its assigned port(s) before starting. 60s per-dependency timeout. Unknown names and cycles are rejected at config load. |
+| `health_check` | [health check](#health_check) \| `"docker"` | nil (TCP on `port`) | Liveness probe used by the registry pruner. When unset, the default is a TCP dial of the service's registered port. See [Detached services and health checks](#detached-services-and-health-checks). |
 
 ### `command` — the basic case
 
@@ -313,6 +314,55 @@ services:
 ```
 
 Services without `depends_on` start in parallel. Independent branches of the dependency graph also run in parallel — only direct dependents wait. Each dependency has a 60s TCP-readiness timeout. Failed deps cause dependents to be marked `failed` and skipped. Cycles and references to undefined services are rejected at config load.
+
+### Detached services and health checks
+
+By default, `mdp` prunes a service from its proxy when the command process exits. That's wrong for detached commands like `docker compose up -d`: the foreground process exits quickly, but the real service is still listening on its port.
+
+Instead, once the process exits `mdp` falls back to a liveness probe and keeps the entry around until the probe fails for ~30 seconds. The default probe is a TCP dial of the service's port. Override it with `health_check`:
+
+```yaml
+services:
+  # Default — TCP probe on svc.port.
+  web:
+    command: npm run dev
+    proxy: 3000
+
+  # Custom HTTP probe.
+  api:
+    command: bun run dev
+    proxy: 4000
+    health_check:
+      http: http://localhost:4000/health
+
+  # Shorthand for docker compose: runs `docker compose ps -q` in `dir`,
+  # healthy as long as at least one container in the project is running.
+  db:
+    command: docker compose up -d
+    dir: ./db
+    port: 5432
+    health_check: docker
+
+  # For compose projects whose services are all short-lived, probe the
+  # network directly instead.
+  workers:
+    command: docker compose up -d
+    dir: ./workers
+    port: 6000
+    health_check:
+      command: "docker network inspect workers_default"
+```
+
+Variants (mutually exclusive):
+
+| Field | Healthy when |
+|---|---|
+| `tcp: <port>` | a TCP connection to `localhost:<port>` succeeds |
+| `http: <url>` | an HTTP GET returns a 2xx or 3xx status |
+| `command: <shell tokens>` | the command exits 0 (run in the service's `dir`) |
+| shorthand `docker` | `docker compose ps -q` in the service's `dir` exits 0 with non-empty output |
+
+Command parsing honors single/double quotes but does not invoke a shell, so write `sh -c "..."` explicitly if you need shell features. Timeouts: TCP 2s, HTTP 3s, command/docker 5s.
 
 ## Port mapping
 

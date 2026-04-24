@@ -85,6 +85,62 @@ type ServiceConfig struct {
 	// DependsOn names other services that must be ready before this service
 	// starts. Names must match keys in the top-level services map.
 	DependsOn []string `yaml:"depends_on"`
+
+	// HealthCheck customizes the liveness probe used to decide whether the
+	// service is still up after its command has exited. Nil falls back to
+	// a TCP probe on the service's registered port.
+	HealthCheck *HealthCheck `yaml:"health_check"`
+}
+
+// HealthCheck customizes the liveness probe used to decide whether a service
+// is still up. Exactly one of TCP, HTTP, Command, or Docker must be set.
+type HealthCheck struct {
+	TCP     int    `yaml:"tcp"`     // TCP-dial localhost on this port
+	HTTP    string `yaml:"http"`    // HTTP GET on this absolute URL; 2xx/3xx = healthy
+	Command string `yaml:"command"` // shell tokens (same rules as service.command); exit 0 = healthy
+	Docker  bool   `yaml:"-"`       // set via the scalar shorthand `health_check: docker`
+}
+
+// UnmarshalYAML accepts either a scalar shorthand (currently only "docker") or
+// a mapping with tcp/http/command fields.
+func (h *HealthCheck) UnmarshalYAML(node *yaml.Node) error {
+	switch node.Kind {
+	case yaml.ScalarNode:
+		if node.Value != "docker" {
+			return fmt.Errorf("line %d: unknown health_check shorthand %q (only \"docker\" is supported)", node.Line, node.Value)
+		}
+		h.Docker = true
+		return nil
+	case yaml.MappingNode:
+		type raw HealthCheck
+		return node.Decode((*raw)(h))
+	default:
+		return fmt.Errorf("line %d: health_check must be a string or mapping", node.Line)
+	}
+}
+
+// Validate checks that exactly one variant is set.
+func (h *HealthCheck) Validate() error {
+	set := 0
+	if h.TCP > 0 {
+		set++
+	}
+	if h.HTTP != "" {
+		set++
+	}
+	if h.Command != "" {
+		set++
+	}
+	if h.Docker {
+		set++
+	}
+	if set == 0 {
+		return fmt.Errorf("health_check: must set one of tcp, http, command, or the \"docker\" shorthand")
+	}
+	if set > 1 {
+		return fmt.Errorf("health_check: only one of tcp, http, command, or docker may be set")
+	}
+	return nil
 }
 
 // PortMapping maps an auto-assigned port env var to a proxy and service name.
@@ -162,6 +218,11 @@ func Load(path string) (*Config, error) {
 				return nil, fmt.Errorf("service %q: unknown protocol %q for port mapping %q (expected \"tcp\" or \"udp\")", name, pm.Protocol, pm.Env)
 			}
 			svc.Ports[i].Protocol = proto
+		}
+		if svc.HealthCheck != nil {
+			if err := svc.HealthCheck.Validate(); err != nil {
+				return nil, fmt.Errorf("service %q: %w", name, err)
+			}
 		}
 		cfg.Services[name] = svc
 	}

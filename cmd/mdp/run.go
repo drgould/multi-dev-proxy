@@ -919,16 +919,78 @@ func runProxied(args []string, envVar string, port int, controlURL string, serve
 			<-done
 		}
 	case err := <-done:
-		hbCancel()
-		disconnectFromOrchestrator(controlURL, clientID)
 		if err != nil {
+			hbCancel()
+			disconnectFromOrchestrator(controlURL, clientID)
 			if ee, ok := err.(*exec.ExitError); ok {
 				os.Exit(ee.ExitCode())
 			}
 			return err
 		}
+		// Clean exit. The command may have detached (e.g. `docker compose
+		// up -d`) — keep the registration alive while the port still
+		// answers, and only disconnect once it stops or the user
+		// interrupts.
+		if err := holdDetached(sigCh, gone, controlURL, clientID, port); err != nil {
+			return err
+		}
+		hbCancel()
 	}
 	return nil
+}
+
+// holdDetached keeps the client session alive after a clean command exit
+// as long as the service port keeps responding. Returns when a signal
+// arrives, the orchestrator goes away, or the port stops answering.
+func holdDetached(sigCh <-chan os.Signal, gone <-chan struct{}, controlURL, clientID string, port int) error {
+	// A detached command (e.g. `docker compose up -d`) may exit before the
+	// backgrounded process has finished binding its port, so give the port
+	// a short grace window to come up before concluding the command just
+	// crashed.
+	const bindGrace = 5 * time.Second
+	deadline := time.Now().Add(bindGrace)
+	for !registry.TCPCheck(port) {
+		if time.Now().After(deadline) {
+			disconnectFromOrchestrator(controlURL, clientID)
+			return nil
+		}
+		select {
+		case <-sigCh:
+			disconnectFromOrchestrator(controlURL, clientID)
+			return nil
+		case <-gone:
+			disconnectFromOrchestrator(controlURL, clientID)
+			return nil
+		case <-time.After(200 * time.Millisecond):
+		}
+	}
+	slog.Info("command exited cleanly; port still reachable — keeping session alive", "port", port)
+	ticker := time.NewTicker(10 * time.Second)
+	defer ticker.Stop()
+	failures := 0
+	const threshold = 3
+	for {
+		select {
+		case <-sigCh:
+			disconnectFromOrchestrator(controlURL, clientID)
+			return nil
+		case <-gone:
+			slog.Warn("orchestrator is shutting down")
+			disconnectFromOrchestrator(controlURL, clientID)
+			return nil
+		case <-ticker.C:
+			if registry.TCPCheck(port) {
+				failures = 0
+				continue
+			}
+			failures++
+			if failures >= threshold {
+				slog.Info("service port no longer reachable; disconnecting", "port", port, "failures", failures)
+				disconnectFromOrchestrator(controlURL, clientID)
+				return nil
+			}
+		}
+	}
 }
 
 func updatePIDWithOrchestrator(controlURL, serverName string, pid int) {
