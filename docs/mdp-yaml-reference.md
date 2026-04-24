@@ -110,6 +110,7 @@ Keys under `services.<name>`.
 | `env_file` | string path | `""` | Path to write this service's resolved env vars as a `.env` file. Relative paths resolve against the service's `dir` if set, else the `mdp.yaml` directory. `~` is expanded. |
 | `env` | map of name → string | `{}` | Env vars for `command`, `setup`, and `shutdown`. Values support: literal strings, `auto` (allocates a port in the corresponding `ports[]` entry), `${svc.port}` (another service's primary port), and `${svc.NAMED_PORT}` (a named port from another service's `ports[]`). `${svc.env.VAR}` is **not** supported here — it only works in `global.env`. |
 | `ports` | list of [port mapping](#port-mapping) | `[]` | Multi-port mode. When present, `port` is ignored and ports are allocated per entry. |
+| `log_split` | string \| mapping | `""` | Demultiplex combined-stream logs into per-sub-service colored lanes. Accepts the scalar `"compose"` (built-in docker-compose parser) or a mapping `{ regex: '<pattern>' }` for arbitrary prefixes. See [`log_split`](#log_split--demultiplex-combined-stream-logs). |
 | `depends_on` | list of service names | `[]` | Wait for each dependency to be TCP-reachable on its assigned port(s) before starting. 60s per-dependency timeout. Unknown names and cycles are rejected at config load. |
 | `health_check` | [health check](#health_check) \| `"docker"` | nil (TCP on `port`) | Liveness probe used by the registry pruner. When unset, the default is a TCP dial of the service's registered port. See [Detached services and health checks](#detached-services-and-health-checks). |
 
@@ -289,6 +290,53 @@ services:
       API_URL: "http://localhost:${infra.API_PORT}"
       DB_URL:  "postgres://localhost:${infra.DB_PORT}/app"
     depends_on: [infra]
+```
+
+### `log_split` — demultiplex combined-stream logs
+
+When a service's command produces output from multiple sub-processes over a single stream (e.g. `docker compose up`), `log_split` parses each line and routes it to its own colored lane so each sub-process gets its own prefix. Two forms are accepted:
+
+**Built-in compose mode** (scalar shorthand) — parses docker-compose's `<name>  | <message>` format, including colorized output (`--ansi=always` / TTY).
+
+```yaml
+services:
+  infra:
+    command: docker compose up
+    log_split: compose
+    env:
+      API_PORT: auto
+      AUTH_PORT: auto
+    ports:
+      - env: API_PORT
+        proxy: 4000
+        name: api
+      - env: AUTH_PORT
+        proxy: 5000
+        name: auth
+```
+
+**Custom regex mode** (mapping form) — provide any Go-regexp pattern with named captures `name` and `msg`. Useful for kubectl, honcho/foreman, bracket-prefixed tools, or anything else that multiplexes logs over one stream.
+
+```yaml
+services:
+  procfile:
+    command: honcho start
+    log_split:
+      regex: '^(?P<name>[a-z]+)\s*\|\s(?P<msg>.*)$'
+
+  k8s-app:
+    command: kubectl logs --all-containers --prefix -f pod/api
+    log_split:
+      regex: '^\[pod/(?P<name>[^/]+)/[^\]]+\]\s*(?P<msg>.*)$'
+```
+
+Lines that don't match the parser fall through to the outer service prefix, so top-level status output (compose's `Attaching to…`, kubectl's reconnect messages, etc.) still appears under the service name. Stdout and stderr share the same name-to-color map so a sub-process's two streams collapse into one lane. Inside `mdp.yaml`, sub-lane labels are prefixed with the service name as `<service>/<sub>` so it's obvious which service an inner lane belongs to. Lane labels render at full length — short labels are right-padded to 12 characters for column alignment, longer labels expand past that and push their line out rather than being truncated.
+
+For ad-hoc commands, pass the same value as a flag:
+
+```sh
+mdp run --log-split=compose -- docker compose up
+mdp run --log-split='regex:^\[(?P<name>[^\]]+)\]\s*(?P<msg>.*)$' -- some-prefixed-tool
 ```
 
 ### `depends_on` — wait for readiness

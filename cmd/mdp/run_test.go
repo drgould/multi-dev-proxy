@@ -86,7 +86,7 @@ func TestPrefixWriterFlushIncomplete(t *testing.T) {
 	}
 }
 
-func TestNewPrefixWriterTruncatesLabel(t *testing.T) {
+func TestNewPrefixWriterLongLabelNotTruncated(t *testing.T) {
 	r, w, err := os.Pipe()
 	if err != nil {
 		t.Fatal(err)
@@ -101,11 +101,8 @@ func TestNewPrefixWriterTruncatesLabel(t *testing.T) {
 	buf.ReadFrom(r)
 	out := buf.String()
 
-	if strings.Contains(out, "verylonglabelname") {
-		t.Errorf("label should be truncated to 12 chars, got %q", out)
-	}
-	if !strings.Contains(out, "verylonglab") {
-		t.Errorf("should contain truncated label, got %q", out)
+	if !strings.Contains(out, "verylonglabelname") {
+		t.Errorf("full label must be preserved (no truncation), got %q", out)
 	}
 }
 
@@ -572,7 +569,7 @@ func TestLaunchBatchServiceSetupFailureSkipsRegistration(t *testing.T) {
 }
 
 func TestRunSoloNoEnvOverride(t *testing.T) {
-	err := runSolo([]string{"sh", "-c", `test -z "$MDP" && test -z "$PORT"`})
+	err := runSolo([]string{"sh", "-c", `test -z "$MDP" && test -z "$PORT"`}, config.LogSplitConfig{})
 	if err != nil {
 		t.Fatalf("runSolo should not set MDP or PORT: %v", err)
 	}
@@ -623,7 +620,7 @@ func TestRunProxiedDisconnectsOnChildExit(t *testing.T) {
 
 	err := runProxied(
 		[]string{"sh", "-c", "exit 0"},
-		"PORT", 12345, srv.URL, "test/svc", "test-client-id",
+		"PORT", 12345, srv.URL, "test/svc", "test-client-id", config.LogSplitConfig{},
 	)
 	if err != nil {
 		t.Fatalf("runProxied: %v", err)
@@ -654,7 +651,7 @@ func TestRunProxiedDisconnectsOnNonZeroExit(t *testing.T) {
 
 	err := runProxied(
 		[]string{"sh", "-c", "exit 0"},
-		"PORT", 12345, srv.URL, "test/svc", "test-client-id",
+		"PORT", 12345, srv.URL, "test/svc", "test-client-id", config.LogSplitConfig{},
 	)
 	if err != nil {
 		t.Fatalf("runProxied: %v", err)
@@ -685,7 +682,7 @@ func TestRunProxiedSetsMDPEnv(t *testing.T) {
 
 	err := runProxied(
 		[]string{"sh", "-c", `test "$MDP" = "1" && test -n "$PORT"`},
-		"PORT", 12345, srv.URL, "", "",
+		"PORT", 12345, srv.URL, "", "", config.LogSplitConfig{},
 	)
 	if err != nil {
 		t.Fatalf("runProxied should set MDP=1 and PORT: %v", err)

@@ -4,6 +4,7 @@ import (
 	"fmt"
 	"os"
 	"path/filepath"
+	"regexp"
 	"sort"
 	"strings"
 
@@ -81,6 +82,10 @@ type ServiceConfig struct {
 	EnvFile  string            `yaml:"env_file"` // optional path for exported .env file
 	Env      map[string]string `yaml:"env"`
 	Ports    []PortMapping     `yaml:"ports"`
+
+	// LogSplit, if set, enables per-sub-service log demultiplexing on the
+	// service's stdout/stderr. See LogSplitConfig for the accepted shapes.
+	LogSplit LogSplitConfig `yaml:"log_split"`
 
 	// DependsOn names other services that must be ready before this service
 	// starts. Names must match keys in the top-level services map.
@@ -224,6 +229,9 @@ func Load(path string) (*Config, error) {
 				return nil, fmt.Errorf("service %q: %w", name, err)
 			}
 		}
+		if err := svc.LogSplit.Validate(); err != nil {
+			return nil, fmt.Errorf("service %q: %w", name, err)
+		}
 		cfg.Services[name] = svc
 	}
 	cfg.Global.EnvFile = resolvePath(cfg.Global.EnvFile, dir)
@@ -315,6 +323,97 @@ func validateDependencies(services map[string]ServiceConfig) error {
 		}
 	}
 	return nil
+}
+
+// LogSplitConfig describes how a service's combined log stream should be
+// demultiplexed into per-sub-service lanes. YAML accepts two shapes:
+//
+//	log_split: compose                           # built-in shorthand
+//	log_split:
+//	  regex: '^\[(?P<name>[^\]]+)\]\s*(?P<msg>.*)$'   # user-supplied pattern
+//
+// The regex form must have named captures `name` and `msg`.
+type LogSplitConfig struct {
+	Mode  string // "", "compose", or "regex"
+	Regex string // pattern when Mode == "regex"
+}
+
+// UnmarshalYAML accepts the scalar ("compose") and mapping (`regex:`) forms.
+func (l *LogSplitConfig) UnmarshalYAML(node *yaml.Node) error {
+	switch node.Kind {
+	case yaml.ScalarNode:
+		if node.Value == "" {
+			return nil
+		}
+		if node.Value != "compose" {
+			return fmt.Errorf("line %d: unknown log_split shorthand %q (only \"compose\" is supported as a scalar; use a mapping with `regex:` for custom patterns)", node.Line, node.Value)
+		}
+		l.Mode = "compose"
+		return nil
+	case yaml.MappingNode:
+		var raw struct {
+			Regex string `yaml:"regex"`
+		}
+		if err := node.Decode(&raw); err != nil {
+			return fmt.Errorf("line %d: %w", node.Line, err)
+		}
+		if raw.Regex == "" {
+			return fmt.Errorf("line %d: log_split mapping requires `regex:` key", node.Line)
+		}
+		l.Mode = "regex"
+		l.Regex = raw.Regex
+		return nil
+	default:
+		return fmt.Errorf("line %d: log_split must be a string or mapping", node.Line)
+	}
+}
+
+// Validate checks that the config is internally consistent. For regex mode
+// it compiles the pattern and verifies it contains `name` and `msg` captures.
+func (l *LogSplitConfig) Validate() error {
+	switch l.Mode {
+	case "", "compose":
+		return nil
+	case "regex":
+		re, err := regexp.Compile(l.Regex)
+		if err != nil {
+			return fmt.Errorf("log_split: invalid regex: %w", err)
+		}
+		var hasName, hasMsg bool
+		for _, n := range re.SubexpNames() {
+			switch n {
+			case "name":
+				hasName = true
+			case "msg":
+				hasMsg = true
+			}
+		}
+		if !hasName || !hasMsg {
+			return fmt.Errorf("log_split: regex must contain named captures `name` and `msg`")
+		}
+		return nil
+	default:
+		return fmt.Errorf("log_split: unknown mode %q", l.Mode)
+	}
+}
+
+// ParseLogSplitFlag converts the `--log-split` CLI flag value into a
+// LogSplitConfig. Accepts "", "compose", or "regex:<pattern>".
+func ParseLogSplitFlag(v string) (LogSplitConfig, error) {
+	switch {
+	case v == "":
+		return LogSplitConfig{}, nil
+	case v == "compose":
+		return LogSplitConfig{Mode: "compose"}, nil
+	case strings.HasPrefix(v, "regex:"):
+		cfg := LogSplitConfig{Mode: "regex", Regex: strings.TrimPrefix(v, "regex:")}
+		if err := cfg.Validate(); err != nil {
+			return LogSplitConfig{}, err
+		}
+		return cfg, nil
+	default:
+		return LogSplitConfig{}, fmt.Errorf("--log-split: unknown value %q (expected \"compose\" or \"regex:<pattern>\")", v)
+	}
 }
 
 // Find looks for mdp.yaml in the given directory, then walks up to the root.

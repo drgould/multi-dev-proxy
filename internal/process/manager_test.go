@@ -105,6 +105,46 @@ func TestManagerNoProxy(t *testing.T) {
 	}
 }
 
+// flushingWriter captures bytes and records whether Flush() was called so we
+// can verify Manager.Run drains custom sinks before returning.
+type flushingWriter struct {
+	buf     []byte
+	flushed atomic.Bool
+}
+
+func (w *flushingWriter) Write(p []byte) (int, error) {
+	w.buf = append(w.buf, p...)
+	return len(p), nil
+}
+
+func (w *flushingWriter) Flush() { w.flushed.Store(true) }
+
+func TestManagerFlushesCustomSinks(t *testing.T) {
+	out := &flushingWriter{}
+	errW := &flushingWriter{}
+	m := New()
+	ctx := context.Background()
+	opts := RunOpts{
+		AssignedPort: 19878,
+		ProxyTimeout: 500 * time.Millisecond,
+		Stdout:       out,
+		Stderr:       errW,
+	}
+	code, err := m.Run(ctx, []string{"echo", "hello"}, opts)
+	if err != nil {
+		t.Fatalf("Run: %v", err)
+	}
+	if code != 0 {
+		t.Errorf("expected exit code 0, got %d", code)
+	}
+	if !out.flushed.Load() {
+		t.Error("Manager.Run should call Flush on custom Stdout sink")
+	}
+	if !errW.flushed.Load() {
+		t.Error("Manager.Run should call Flush on custom Stderr sink")
+	}
+}
+
 func TestManagerExitCode(t *testing.T) {
 	m := New()
 	ctx := context.Background()
