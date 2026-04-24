@@ -112,6 +112,138 @@ services:
 	}
 }
 
+func TestLoadUDPPortMapping(t *testing.T) {
+	dir := t.TempDir()
+	path := filepath.Join(dir, "mdp.yaml")
+	os.WriteFile(path, []byte(`
+services:
+  infra:
+    command: docker compose up
+    env:
+      JAEGER_AGENT_PORT: auto
+      API_PORT: auto
+    ports:
+      - env: JAEGER_AGENT_PORT
+        protocol: UDP
+      - env: API_PORT
+        proxy: 4000
+        name: api
+`), 0644)
+
+	cfg, err := Load(path)
+	if err != nil {
+		t.Fatalf("Load() error = %v", err)
+	}
+	infra := cfg.Services["infra"]
+	if len(infra.Ports) != 2 {
+		t.Fatalf("expected 2 port mappings, got %d", len(infra.Ports))
+	}
+	if infra.Ports[0].Protocol != "udp" {
+		t.Errorf("ports[0].Protocol = %q, want \"udp\" (normalized to lowercase)", infra.Ports[0].Protocol)
+	}
+	if infra.Ports[1].Protocol != "tcp" && infra.Ports[1].Protocol != "" {
+		t.Errorf("ports[1].Protocol = %q, want \"\" or \"tcp\"", infra.Ports[1].Protocol)
+	}
+}
+
+func TestLoadRejectsUnknownProtocol(t *testing.T) {
+	dir := t.TempDir()
+	path := filepath.Join(dir, "mdp.yaml")
+	os.WriteFile(path, []byte(`
+services:
+  infra:
+    command: docker compose up
+    env:
+      X: auto
+    ports:
+      - env: X
+        protocol: sctp
+`), 0644)
+
+	_, err := Load(path)
+	if err == nil {
+		t.Fatal("expected error for unknown protocol, got nil")
+	}
+	if !strings.Contains(err.Error(), "unknown protocol") {
+		t.Errorf("error = %v, want it to mention \"unknown protocol\"", err)
+	}
+}
+
+func TestLoadRejectsUDPWithProxy(t *testing.T) {
+	dir := t.TempDir()
+	path := filepath.Join(dir, "mdp.yaml")
+	os.WriteFile(path, []byte(`
+services:
+  infra:
+    command: docker compose up
+    env:
+      X: auto
+    ports:
+      - env: X
+        protocol: udp
+        proxy: 1234
+`), 0644)
+
+	_, err := Load(path)
+	if err == nil {
+		t.Fatal("expected error for udp+proxy, got nil")
+	}
+	if !strings.Contains(err.Error(), "udp") || !strings.Contains(err.Error(), "proxy") {
+		t.Errorf("error = %v, want it to mention udp and proxy", err)
+	}
+}
+
+func TestLoadRejectsUDPWithName(t *testing.T) {
+	dir := t.TempDir()
+	path := filepath.Join(dir, "mdp.yaml")
+	os.WriteFile(path, []byte(`
+services:
+  infra:
+    command: docker compose up
+    env:
+      X: auto
+    ports:
+      - env: X
+        protocol: udp
+        name: x
+`), 0644)
+
+	_, err := Load(path)
+	if err == nil {
+		t.Fatal("expected error for udp+name, got nil")
+	}
+	if !strings.Contains(err.Error(), "name") {
+		t.Errorf("error = %v, want it to mention name", err)
+	}
+}
+
+func TestEnvProtocols(t *testing.T) {
+	svc := ServiceConfig{
+		Ports: []PortMapping{
+			{Env: "A", Protocol: "udp"},
+			{Env: "B", Protocol: "tcp"},
+			{Env: "C"},
+		},
+	}
+	got := svc.EnvProtocols()
+	if got["A"] != "udp" {
+		t.Errorf("A = %q, want udp", got["A"])
+	}
+	if got["B"] != "tcp" {
+		t.Errorf("B = %q, want tcp", got["B"])
+	}
+	if got["C"] != "tcp" {
+		t.Errorf("C = %q, want tcp (default)", got["C"])
+	}
+}
+
+func TestEnvProtocolsEmpty(t *testing.T) {
+	svc := ServiceConfig{}
+	if got := svc.EnvProtocols(); got != nil {
+		t.Errorf("EnvProtocols() = %v, want nil for empty Ports", got)
+	}
+}
+
 func TestLoadDefaultPortRange(t *testing.T) {
 	dir := t.TempDir()
 	path := filepath.Join(dir, "mdp.yaml")

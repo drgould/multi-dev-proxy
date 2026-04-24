@@ -188,6 +188,73 @@ func TestWatchHealthStaysOpenWhenHealthy(t *testing.T) {
 	}
 }
 
+func TestLaunchBatchServiceSkipsUDPPortsFromProbe(t *testing.T) {
+	// A port mapping with protocol: udp must never be TCP-probed — that's the
+	// whole point of declaring a port UDP in the first place. The probe list
+	// builder should exclude it, and the UDP port's proxy (always 0) should
+	// not be registered either.
+	var probedPorts []int
+	var probeMu sync.Mutex
+	rt := batchRuntime{
+		readyTimeout: time.Second,
+		readyPoll:    10 * time.Millisecond,
+		tcpCheck: func(p int) bool {
+			probeMu.Lock()
+			probedPorts = append(probedPorts, p)
+			probeMu.Unlock()
+			return true
+		},
+	}
+
+	var registerMu sync.Mutex
+	var registerCount int
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.Method == "POST" && r.URL.Path == "/__mdp/register" {
+			registerMu.Lock()
+			registerCount++
+			registerMu.Unlock()
+		}
+		w.WriteHeader(http.StatusOK)
+	}))
+	defer srv.Close()
+
+	a := batchAlloc{
+		name:     "infra",
+		svcGroup: "main",
+		svc: config.ServiceConfig{
+			// Commandless → external service code path.
+			Env: map[string]string{
+				"API_PORT":          "auto",
+				"JAEGER_AGENT_PORT": "auto",
+			},
+			Ports: []config.PortMapping{
+				{Env: "API_PORT", Proxy: 4000, Name: "api"},
+				{Env: "JAEGER_AGENT_PORT", Protocol: "udp"},
+			},
+		},
+		portAssignments: map[string]int{"API_PORT": 40001, "JAEGER_AGENT_PORT": 54321},
+		portProtocols:   map[string]string{"API_PORT": "tcp", "JAEGER_AGENT_PORT": "udp"},
+	}
+
+	bt := &batchTracker{}
+	bt.wg.Add(1)
+	states := depwait.NewStates([]string{"infra"})
+	launchBatchService(context.Background(), bt, http.DefaultClient, srv.URL, "client-1", a, states, rt)
+
+	probeMu.Lock()
+	defer probeMu.Unlock()
+	for _, p := range probedPorts {
+		if p == 54321 {
+			t.Errorf("TCP probe called on UDP port 54321; UDP ports must be excluded from the probe list")
+		}
+	}
+	registerMu.Lock()
+	defer registerMu.Unlock()
+	if registerCount != 1 {
+		t.Errorf("register called %d times, want 1 (only the TCP API_PORT should register)", registerCount)
+	}
+}
+
 func TestLaunchBatchServiceSkipsProxylessPorts(t *testing.T) {
 	// Commandless services still get TCP-probed; stub the check so the test
 	// doesn't block on unbound ports.

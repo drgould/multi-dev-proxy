@@ -34,8 +34,9 @@ type serviceAlloc struct {
 	name            string
 	svc             config.ServiceConfig
 	assignedPort    int
-	portAssignments map[string]int // multi-port only
-	env             []string       // populated in the env-build phase
+	portAssignments map[string]int    // multi-port only
+	portProtocols   map[string]string // env → "tcp"/"udp"; only populated for multi-port
+	env             []string          // populated in the env-build phase
 }
 
 // StartConfigServices starts all services from the config under the given group name.
@@ -62,10 +63,15 @@ func (o *Orchestrator) StartConfigServices(ctx context.Context, group string) er
 			continue
 		}
 		if len(svc.Ports) > 0 {
+			envProtocols := svc.EnvProtocols()
 			portAssignments := make(map[string]int)
 			for envName, value := range svc.Env {
 				if value == "auto" {
-					port, err := ports.FindFreePort(portRange, assignedPorts)
+					finder := ports.FindFreePort
+					if envProtocols[envName] == "udp" {
+						finder = ports.FindFreeUDPPort
+					}
+					port, err := finder(portRange, assignedPorts)
 					if err != nil {
 						return fmt.Errorf("find free port for %s.%s: %w", name, envName, err)
 					}
@@ -78,7 +84,7 @@ func (o *Orchestrator) StartConfigServices(ctx context.Context, group string) er
 				svcPorts[k] = v
 			}
 			portMap[name] = svcPorts
-			allocations = append(allocations, serviceAlloc{name: name, svc: svc, portAssignments: portAssignments})
+			allocations = append(allocations, serviceAlloc{name: name, svc: svc, portAssignments: portAssignments, portProtocols: envProtocols})
 			continue
 		}
 		assignedPort := svc.Port
@@ -211,11 +217,14 @@ func envSliceToMap(env []string) map[string]string {
 // probePortsFor returns the TCP ports that should be polled to decide whether
 // a service has become ready. External services (no command) are probed too
 // so dependents only unblock once the externally-managed service is actually
-// reachable.
+// reachable. UDP ports are excluded — TCP probes never succeed on them.
 func probePortsFor(a serviceAlloc) []int {
 	if len(a.portAssignments) > 0 {
 		result := make([]int, 0, len(a.portAssignments))
-		for _, p := range a.portAssignments {
+		for env, p := range a.portAssignments {
+			if a.portProtocols[env] == "udp" {
+				continue
+			}
 			result = append(result, p)
 		}
 		return result
@@ -304,6 +313,12 @@ func (o *Orchestrator) startMultiPortService(ctx context.Context, name string, s
 	for _, pm := range svc.Ports {
 		port, ok := portAssignments[pm.Env]
 		if !ok {
+			continue
+		}
+		if pm.Proxy <= 0 {
+			// No proxy requested for this port (internal-only port, or a UDP
+			// mapping). Allocation + env injection is sufficient; nothing to
+			// register against a reverse-proxy listener.
 			continue
 		}
 		serviceName := pm.Name

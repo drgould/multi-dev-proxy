@@ -322,16 +322,18 @@ Entries in `services.<name>.ports[]`.
 |---|---|---|---|
 | `env` | string | yes | Env var name that will hold the allocated port. Reference from other services' `env` with `${svc.NAME}`, or from `global.env` with `${svc.env.NAME}`. |
 | `proxy` | int | no (default `0`) | Proxy port to register this port on. `0` = no proxy (use for DB / non-HTTP ports). |
-| `name` | string | no | Display name in the TUI and server registry. Defaults to the `env` value. |
+| `name` | string | no | Display name in the TUI and server registry. Defaults to the `env` value. Not allowed with `protocol: udp`. |
+| `protocol` | string | no (default `tcp`) | Transport protocol. `udp` marks the port as UDP: allocation uses a UDP-aware free-port check, and the `depends_on` readiness probe skips it (TCP probes never succeed on UDP). Incompatible with `proxy` and `name`. |
 
 ```yaml
 services:
   infra:
     command: docker compose up --wait
     env:
-      API_PORT: auto
-      WS_PORT:  auto
-      DB_PORT:  auto
+      API_PORT:          auto
+      WS_PORT:           auto
+      DB_PORT:           auto
+      JAEGER_AGENT_PORT: auto
     ports:
       - env: API_PORT
         proxy: 4000
@@ -340,9 +342,11 @@ services:
         proxy: 4001
         name: websocket
       - env: DB_PORT     # internal only, no proxy
+      - env: JAEGER_AGENT_PORT
+        protocol: udp    # UDP-only; compose publishes "${JAEGER_AGENT_PORT}:6831/udp"
 ```
 
-In the TUI this service appears as `<group>/api`, `<group>/websocket`, and `<group>/DB_PORT` (falling back to the env name when `name` is omitted).
+In the TUI this service appears as `<group>/api`, `<group>/websocket`, and `<group>/DB_PORT` (falling back to the env name when `name` is omitted). UDP mappings are not registered against any proxy and do not appear in the TUI.
 
 ## Interpolation
 

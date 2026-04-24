@@ -44,7 +44,7 @@ func ParseRange(s string) (PortRange, error) {
 	return PortRange{Start: start, End: end}, nil
 }
 
-// IsPortFree checks whether a port is available by attempting to bind to it.
+// IsPortFree checks whether a TCP port is available by attempting to bind to it.
 func IsPortFree(port int) bool {
 	ln, err := net.Listen("tcp", fmt.Sprintf(":%d", port))
 	if err != nil {
@@ -54,9 +54,31 @@ func IsPortFree(port int) bool {
 	return true
 }
 
-// FindFreePort picks a random free port in r that is not in the exclude list.
-// Returns an error if no free port is found after 100 attempts.
-func FindFreePort(r PortRange, exclude []int) (int, error) {
+// IsUDPPortFree checks whether a UDP port is available by attempting to bind to it.
+func IsUDPPortFree(port int) bool {
+	pc, err := net.ListenPacket("udp", fmt.Sprintf(":%d", port))
+	if err != nil {
+		return false
+	}
+	pc.Close()
+	return true
+}
+
+// FindFreePort picks a random free TCP port in r that is not in the exclude list.
+// Declared as a var so tests can swap it without binding real sockets.
+var FindFreePort = func(r PortRange, exclude []int) (int, error) {
+	return findFreePort(r, exclude, IsPortFree)
+}
+
+// FindFreeUDPPort picks a random free UDP port in r that is not in the exclude list.
+// Declared as a var so tests can swap it without binding real sockets.
+var FindFreeUDPPort = func(r PortRange, exclude []int) (int, error) {
+	return findFreePort(r, exclude, IsUDPPortFree)
+}
+
+// findFreePort is the shared implementation used by FindFreePort and
+// FindFreeUDPPort.
+func findFreePort(r PortRange, exclude []int, isFree func(int) bool) (int, error) {
 	excluded := make(map[int]bool, len(exclude))
 	for _, p := range exclude {
 		excluded[p] = true
@@ -67,7 +89,7 @@ func FindFreePort(r PortRange, exclude []int) (int, error) {
 		if excluded[port] {
 			continue
 		}
-		if IsPortFree(port) {
+		if isFree(port) {
 			return port, nil
 		}
 	}
