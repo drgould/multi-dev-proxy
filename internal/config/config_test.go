@@ -532,3 +532,161 @@ services:
 		t.Error("expected error for empty health_check mapping")
 	}
 }
+
+func TestLoadLogSplit(t *testing.T) {
+	dir := t.TempDir()
+	path := filepath.Join(dir, "mdp.yaml")
+	os.WriteFile(path, []byte(`
+services:
+  svc:
+    command: docker compose up
+    proxy: 3000
+    log_split: compose
+`), 0644)
+
+	cfg, err := Load(path)
+	if err != nil {
+		t.Fatalf("Load() error = %v", err)
+	}
+	if cfg.Services["svc"].LogSplit.Mode != "compose" {
+		t.Errorf("LogSplit.Mode = %q, want \"compose\"", cfg.Services["svc"].LogSplit.Mode)
+	}
+}
+
+func TestLoadLogSplitInvalid(t *testing.T) {
+	dir := t.TempDir()
+	path := filepath.Join(dir, "mdp.yaml")
+	os.WriteFile(path, []byte(`
+services:
+  svc:
+    command: run
+    proxy: 3000
+    log_split: bogus
+`), 0644)
+
+	_, err := Load(path)
+	if err == nil {
+		t.Fatal("expected error for unknown log_split value")
+	}
+	if !strings.Contains(err.Error(), "log_split") {
+		t.Errorf("expected error mentioning log_split, got: %v", err)
+	}
+}
+
+func TestLoadLogSplitRegex(t *testing.T) {
+	dir := t.TempDir()
+	path := filepath.Join(dir, "mdp.yaml")
+	os.WriteFile(path, []byte(`
+services:
+  svc:
+    command: some-prefixed-tool
+    proxy: 3000
+    log_split:
+      regex: '^\[(?P<name>[^\]]+)\]\s*(?P<msg>.*)$'
+`), 0644)
+
+	cfg, err := Load(path)
+	if err != nil {
+		t.Fatalf("Load() error = %v", err)
+	}
+	svc := cfg.Services["svc"]
+	if svc.LogSplit.Mode != "regex" {
+		t.Errorf("LogSplit.Mode = %q, want \"regex\"", svc.LogSplit.Mode)
+	}
+	if !strings.Contains(svc.LogSplit.Regex, "?P<name>") {
+		t.Errorf("LogSplit.Regex did not round-trip: %q", svc.LogSplit.Regex)
+	}
+}
+
+func TestLoadLogSplitRegexMissingCaptures(t *testing.T) {
+	dir := t.TempDir()
+	path := filepath.Join(dir, "mdp.yaml")
+	os.WriteFile(path, []byte(`
+services:
+  svc:
+    command: x
+    proxy: 3000
+    log_split:
+      regex: '^(.+)$'
+`), 0644)
+
+	_, err := Load(path)
+	if err == nil {
+		t.Fatal("expected error when regex omits named captures")
+	}
+	if !strings.Contains(err.Error(), "name") || !strings.Contains(err.Error(), "msg") {
+		t.Errorf("error should mention required `name`/`msg` captures, got: %v", err)
+	}
+}
+
+func TestLoadLogSplitRegexInvalidPattern(t *testing.T) {
+	dir := t.TempDir()
+	path := filepath.Join(dir, "mdp.yaml")
+	os.WriteFile(path, []byte(`
+services:
+  svc:
+    command: x
+    proxy: 3000
+    log_split:
+      regex: '[unclosed'
+`), 0644)
+
+	_, err := Load(path)
+	if err == nil {
+		t.Fatal("expected error for malformed regex")
+	}
+}
+
+func TestLoadLogSplitMappingWithoutRegex(t *testing.T) {
+	dir := t.TempDir()
+	path := filepath.Join(dir, "mdp.yaml")
+	os.WriteFile(path, []byte(`
+services:
+  svc:
+    command: x
+    proxy: 3000
+    log_split:
+      foo: bar
+`), 0644)
+
+	_, err := Load(path)
+	if err == nil {
+		t.Fatal("expected error when mapping form is missing regex: key")
+	}
+	if !strings.Contains(err.Error(), "regex") {
+		t.Errorf("error should mention the missing `regex:` key, got: %v", err)
+	}
+}
+
+func TestParseLogSplitFlag(t *testing.T) {
+	cases := []struct {
+		in       string
+		wantMode string
+		wantErr  bool
+	}{
+		{in: "", wantMode: ""},
+		{in: "compose", wantMode: "compose"},
+		{in: `regex:^\[(?P<name>[^\]]+)\]\s*(?P<msg>.*)$`, wantMode: "regex"},
+		{in: "compose:extra", wantErr: true}, // unknown prefix
+		{in: "regex:(", wantErr: true},       // malformed pattern
+		{in: "regex:^(.+)$", wantErr: true},  // missing named captures
+		{in: "bogus", wantErr: true},
+	}
+	for _, tc := range cases {
+		t.Run(tc.in, func(t *testing.T) {
+			got, err := ParseLogSplitFlag(tc.in)
+			if tc.wantErr {
+				if err == nil {
+					t.Errorf("expected error for %q, got mode=%q", tc.in, got.Mode)
+				}
+				return
+			}
+			if err != nil {
+				t.Fatalf("unexpected error for %q: %v", tc.in, err)
+			}
+			if got.Mode != tc.wantMode {
+				t.Errorf("mode: got %q, want %q", got.Mode, tc.wantMode)
+			}
+		})
+	}
+}

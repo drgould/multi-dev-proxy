@@ -8,6 +8,7 @@ import (
 	"encoding/hex"
 	"encoding/json"
 	"fmt"
+	"io"
 	"log/slog"
 	"net/http"
 	"net/url"
@@ -15,6 +16,7 @@ import (
 	"os/exec"
 	"os/signal"
 	"path/filepath"
+	"regexp"
 	"strings"
 	"sync"
 	"syscall"
@@ -69,6 +71,7 @@ func init() {
 	runCmd.Flags().String("group", "", "Group name override (default: git branch)")
 	runCmd.Flags().String("env", "PORT", "Environment variable name for the assigned port")
 	runCmd.Flags().Int("control-port", 13100, "Orchestrator control port")
+	runCmd.Flags().String("log-split", "", `Demultiplex combined-stream logs. Values: "compose" (docker-compose format) or "regex:<pattern>" with named captures 'name' and 'msg'.`)
 }
 
 func runRun(cmd *cobra.Command, args []string) error {
@@ -82,6 +85,7 @@ func runRun(cmd *cobra.Command, args []string) error {
 	tlsCert, _ := cmd.Flags().GetString("tls-cert")
 	tlsKey, _ := cmd.Flags().GetString("tls-key")
 	autoTLS, _ := cmd.Flags().GetBool("auto-tls")
+	logSplitFlag, _ := cmd.Flags().GetString("log-split")
 
 	if autoTLS && tlsCert == "" {
 		tlsCert, tlsKey = detectMkcertCerts()
@@ -92,8 +96,12 @@ func runRun(cmd *cobra.Command, args []string) error {
 	if (tlsCert != "") != (tlsKey != "") {
 		return fmt.Errorf("both --tls-cert and --tls-key are required")
 	}
+	logSplit, err := config.ParseLogSplitFlag(logSplitFlag)
+	if err != nil {
+		return err
+	}
 
-	return runSingleMode(cmd, args, controlPort, groupFlag, tlsCert, tlsKey)
+	return runSingleMode(cmd, args, controlPort, groupFlag, tlsCert, tlsKey, logSplit)
 }
 
 func runBatchMode(cmd *cobra.Command, controlPort int, groupFlag string) error {
@@ -378,6 +386,21 @@ func launchBatchService(
 	pw := newPrefixWriter(a.name, color, os.Stdout)
 	pwErr := newPrefixWriter(a.name, color, os.Stderr)
 
+	// If log_split is enabled, demultiplex combined output into per-sub-service
+	// colored lanes. Hooks keep the outer service prefix — only the main
+	// command's stdout/stderr get wrapped.
+	var stdoutW, stderrW io.Writer = pw, pwErr
+	splitter, err := newLogSplitterFromConfig(a.svc.LogSplit, a.name)
+	if err != nil {
+		slog.Error("invalid log_split config", "name", a.name, "err", err)
+		state.Err = err
+		return
+	}
+	if splitter != nil {
+		stdoutW = newSplitWriter(pw, os.Stdout, splitter)
+		stderrW = newSplitWriter(pwErr, os.Stderr, splitter)
+	}
+
 	// Run setup before registering so routing never points at a service
 	// whose setup is still running (or has failed).
 	for i, raw := range a.svc.Setup {
@@ -413,7 +436,7 @@ func launchBatchService(
 		return
 	}
 
-	cmd, err := startBatchCommand(bt, a.svc.Command, a.svc.Dir, env, pw, pwErr)
+	cmd, err := startBatchCommand(bt, a.svc.Command, a.svc.Dir, env, stdoutW, stderrW)
 	if err != nil {
 		slog.Error("service process failed to start", "name", a.name, "command", a.svc.Command, "err", err)
 		state.Err = err
@@ -466,6 +489,12 @@ func launchBatchService(
 		hCancel()
 	}
 
+	if sw, ok := stdoutW.(*splitWriter); ok {
+		sw.Flush()
+	}
+	if sw, ok := stderrW.(*splitWriter); ok {
+		sw.Flush()
+	}
 	pw.Flush()
 	pwErr.Flush()
 }
@@ -535,7 +564,7 @@ func envSliceToMap(env []string) map[string]string {
 
 // startBatchCommand starts the service process and registers it with bt.
 // Returns the started *exec.Cmd; the caller is responsible for cmd.Wait().
-func startBatchCommand(bt *batchTracker, command, dir string, env []string, stdout, stderr *prefixWriter) (*exec.Cmd, error) {
+func startBatchCommand(bt *batchTracker, command, dir string, env []string, stdout, stderr io.Writer) (*exec.Cmd, error) {
 	parts, err := orchestrator.SplitHookArgs(command)
 	if err != nil {
 		return nil, err
@@ -597,16 +626,18 @@ func nextColor() string {
 
 type prefixWriter struct {
 	prefix string
-	out    *os.File
+	out    io.Writer
 	buf    []byte
 }
 
-func newPrefixWriter(label string, color string, out *os.File) *prefixWriter {
-	maxLen := 12
-	if len(label) > maxLen {
-		label = label[:maxLen]
-	}
-	prefix := fmt.Sprintf("\033[%sm%-*s\033[0m ", color, maxLen, label)
+// prefixMinWidth is the minimum padded width of a service-name prefix. Labels
+// shorter than this are right-padded for alignment; longer labels expand past
+// it rather than being truncated — truncation hides real service names (e.g.
+// `api-feature-a` becoming `api-feature-`).
+const prefixMinWidth = 12
+
+func newPrefixWriter(label string, color string, out io.Writer) *prefixWriter {
+	prefix := fmt.Sprintf("\033[%sm%-*s\033[0m ", color, prefixMinWidth, label)
 	return &prefixWriter{prefix: prefix, out: out}
 }
 
@@ -628,6 +659,198 @@ func (w *prefixWriter) Flush() {
 	if len(w.buf) > 0 {
 		fmt.Fprintf(w.out, "%s%s\n", w.prefix, w.buf)
 		w.buf = nil
+	}
+}
+
+// ansiSeqRe matches ANSI CSI escape sequences (SGR colors, cursor codes,
+// etc.). Stripped from the pipe-prefix portion of a line before name matching
+// so colorized compose output (TTY / `--ansi=always`) still matches.
+var ansiSeqRe = regexp.MustCompile(`\x1b\[[0-9;]*[A-Za-z]`)
+
+// composeNameRe matches the bare container-name portion of a compose prefix
+// after ANSI codes have been stripped. Compose pads the name with spaces to
+// align the pipe across containers, so trailing whitespace is expected.
+var composeNameRe = regexp.MustCompile(`^([A-Za-z0-9][A-Za-z0-9_.-]*)\s+$`)
+
+// prefixParser extracts a sub-label and message-start index from a line.
+// Returns ok=false when the line doesn't match — callers route non-matching
+// lines to the outer prefix.
+type prefixParser func(line []byte) (name string, msgStart int, ok bool)
+
+// logSplitter holds the parser and a shared name→color map so a service's
+// stdout and stderr splitWriters keep the same color for a given sub-label.
+// outerLabel (when non-empty) is prepended to sub-lane labels as
+// "<outer>/<sub>" so readers can see which service the inner lane belongs to.
+type logSplitter struct {
+	parse      prefixParser
+	outerLabel string
+	mu         sync.Mutex
+	colors     map[string]string
+}
+
+func newLogSplitter(parse prefixParser, outerLabel string) *logSplitter {
+	return &logSplitter{parse: parse, outerLabel: outerLabel, colors: map[string]string{}}
+}
+
+// newLogSplitterFromConfig builds a splitter for the given log_split config.
+// Returns nil when the config disables splitting. outerLabel is the service
+// name to prepend to sub-lane labels; pass "" for ad-hoc commands with no
+// surrounding service context.
+func newLogSplitterFromConfig(cfg config.LogSplitConfig, outerLabel string) (*logSplitter, error) {
+	switch cfg.Mode {
+	case "":
+		return nil, nil
+	case "compose":
+		return newLogSplitter(parseComposePrefix, outerLabel), nil
+	case "regex":
+		re, err := regexp.Compile(cfg.Regex)
+		if err != nil {
+			return nil, fmt.Errorf("log_split: invalid regex: %w", err)
+		}
+		nameIdx := re.SubexpIndex("name")
+		msgIdx := re.SubexpIndex("msg")
+		if nameIdx < 0 || msgIdx < 0 {
+			return nil, fmt.Errorf("log_split: regex must contain named captures `name` and `msg`")
+		}
+		parse := func(line []byte) (string, int, bool) {
+			m := re.FindSubmatchIndex(line)
+			if m == nil {
+				return "", 0, false
+			}
+			nameStart, nameEnd := m[2*nameIdx], m[2*nameIdx+1]
+			if nameStart < 0 {
+				return "", 0, false
+			}
+			msgStart := m[2*msgIdx]
+			if msgStart < 0 {
+				msgStart = m[1] // end of overall match
+			}
+			return string(line[nameStart:nameEnd]), msgStart, true
+		}
+		return newLogSplitter(parse, outerLabel), nil
+	default:
+		return nil, fmt.Errorf("log_split: unknown mode %q", cfg.Mode)
+	}
+}
+
+func (s *logSplitter) colorFor(name string) string {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	if c, ok := s.colors[name]; ok {
+		return c
+	}
+	c := nextColor()
+	s.colors[name] = c
+	return c
+}
+
+// splitWriter sits in front of a service's stdout or stderr, parses each line
+// for a sub-label, and emits matching lines under per-sub-label prefixWriters
+// sharing colors via splitter. Non-matching lines go through fallback.
+type splitWriter struct {
+	mu       sync.Mutex
+	buf      []byte
+	fallback io.Writer
+	out      io.Writer
+	splitter *logSplitter
+	subs     map[string]*prefixWriter
+}
+
+func newSplitWriter(fallback io.Writer, out io.Writer, splitter *logSplitter) *splitWriter {
+	return &splitWriter{
+		fallback: fallback,
+		out:      out,
+		splitter: splitter,
+		subs:     map[string]*prefixWriter{},
+	}
+}
+
+func (w *splitWriter) Write(p []byte) (int, error) {
+	w.mu.Lock()
+	defer w.mu.Unlock()
+	w.buf = append(w.buf, p...)
+	for {
+		idx := bytes.IndexByte(w.buf, '\n')
+		if idx < 0 {
+			break
+		}
+		line := w.buf[:idx]
+		w.buf = w.buf[idx+1:]
+		w.writeLine(line)
+	}
+	return len(p), nil
+}
+
+func (w *splitWriter) writeLine(line []byte) {
+	if len(line) > 0 && line[len(line)-1] == '\r' {
+		line = line[:len(line)-1]
+	}
+	name, msgStart, ok := w.splitter.parse(line)
+	if !ok {
+		out := append(make([]byte, 0, len(line)+1), line...)
+		out = append(out, '\n')
+		_, _ = w.fallback.Write(out)
+		return
+	}
+	pw, present := w.subs[name]
+	if !present {
+		label := name
+		if w.splitter.outerLabel != "" {
+			label = w.splitter.outerLabel + "/" + name
+		}
+		pw = newPrefixWriter(label, w.splitter.colorFor(name), w.out)
+		w.subs[name] = pw
+	}
+	msg := line[msgStart:]
+	out := append(make([]byte, 0, len(msg)+1), msg...)
+	out = append(out, '\n')
+	_, _ = pw.Write(out)
+}
+
+// parseComposePrefix returns the container name and the message start index
+// for a line in docker-compose's combined-stream format. Returns ok=false
+// when the line doesn't match — callers should fall through to the outer
+// prefix in that case.
+//
+// Handles both the plain (`--ansi=never`) and colored forms:
+//
+//	api-1   | hello
+//	\x1b[36mapi-1   \x1b[0m | hello        (name+padding colored, pipe plain)
+//	\x1b[36mapi-1   |\x1b[0m hello         (name+padding+pipe colored)
+//
+// The message portion is returned verbatim — any embedded color codes in the
+// message are preserved.
+func parseComposePrefix(line []byte) (name string, msgStart int, ok bool) {
+	pipeIdx := bytes.IndexByte(line, '|')
+	if pipeIdx <= 0 {
+		return "", 0, false
+	}
+	// Strip ANSI sequences from the prefix before matching the name pattern.
+	stripped := ansiSeqRe.ReplaceAll(line[:pipeIdx], nil)
+	m := composeNameRe.FindSubmatch(stripped)
+	if m == nil {
+		return "", 0, false
+	}
+	// Skip one optional space after the pipe so messages don't start with a
+	// leading space (compose emits `<name>  | <msg>`, i.e. pipe-space-msg).
+	// ANSI reset codes that immediately follow the pipe are left in place so
+	// the rendered output still resets formatting between prefix and message.
+	msgStart = pipeIdx + 1
+	if msgStart < len(line) && line[msgStart] == ' ' {
+		msgStart++
+	}
+	return string(m[1]), msgStart, true
+}
+
+func (w *splitWriter) Flush() {
+	w.mu.Lock()
+	defer w.mu.Unlock()
+	if len(w.buf) > 0 {
+		w.writeLine(w.buf)
+		w.buf = nil
+	}
+	for _, pw := range w.subs {
+		pw.Flush()
 	}
 }
 
@@ -663,7 +886,7 @@ func (bt *batchTracker) killAll() {
 	}
 }
 
-func runSingleMode(cmd *cobra.Command, args []string, controlPort int, groupFlag, tlsCert, tlsKey string) error {
+func runSingleMode(cmd *cobra.Command, args []string, controlPort int, groupFlag, tlsCert, tlsKey string, logSplit config.LogSplitConfig) error {
 	proxyPort, _ := cmd.Flags().GetInt("proxy-port")
 	repoOverride, _ := cmd.Flags().GetString("repo")
 	nameOverride, _ := cmd.Flags().GetString("name")
@@ -754,12 +977,12 @@ func runSingleMode(cmd *cobra.Command, args []string, controlPort int, groupFlag
 		}
 		slog.Info("registered with orchestrator", "name", serverName, "proxy", proxyPort)
 		controlURL := fmt.Sprintf("http://127.0.0.1:%d", controlPort)
-		return runProxied(args, envVar, assignedPort, controlURL, serverName, clientID)
+		return runProxied(args, envVar, assignedPort, controlURL, serverName, clientID, logSplit)
 	} else {
 		proxyURL, proxyRunning := detectProxy(proxyPort)
 		if !proxyRunning {
 			slog.Info("no proxy detected, starting in solo mode", "proxy-port", proxyPort)
-			return runSolo(args)
+			return runSolo(args, logSplit)
 		}
 		slog.Info("proxy detected, starting in proxy mode", "url", proxyURL)
 
@@ -773,6 +996,14 @@ func runSingleMode(cmd *cobra.Command, args []string, controlPort int, groupFlag
 			TLSCertPath:  tlsCert,
 			TLSKeyPath:   tlsKey,
 			ProxyTimeout: 3 * time.Second,
+		}
+		splitter, err := newLogSplitterFromConfig(logSplit, "")
+		if err != nil {
+			return err
+		}
+		if splitter != nil {
+			opts.Stdout = newSplitWriter(os.Stdout, os.Stdout, splitter)
+			opts.Stderr = newSplitWriter(os.Stderr, os.Stderr, splitter)
 		}
 		code, err := mgr.Run(ctx, args, opts)
 		if err != nil {
@@ -862,12 +1093,33 @@ func watchHealth(healthURL string) <-chan struct{} {
 	return gone
 }
 
-func runProxied(args []string, envVar string, port int, controlURL string, serverName string, clientID string) error {
+func runProxied(args []string, envVar string, port int, controlURL string, serverName string, clientID string, logSplit config.LogSplitConfig) error {
 	cmd := exec.Command(args[0], args[1:]...)
 	cmd.Stdin = os.Stdin
-	cmd.Stdout = os.Stdout
-	cmd.Stderr = os.Stderr
+	splitter, err := newLogSplitterFromConfig(logSplit, "")
+	if err != nil {
+		return err
+	}
+	var stdoutSplit, stderrSplit *splitWriter
+	if splitter != nil {
+		stdoutSplit = newSplitWriter(os.Stdout, os.Stdout, splitter)
+		stderrSplit = newSplitWriter(os.Stderr, os.Stderr, splitter)
+		cmd.Stdout = stdoutSplit
+		cmd.Stderr = stderrSplit
+	} else {
+		cmd.Stdout = os.Stdout
+		cmd.Stderr = os.Stderr
+	}
 	cmd.Env = append(os.Environ(), fmt.Sprintf("%s=%d", envVar, port), "MDP=1")
+	flushSplits := func() {
+		if stdoutSplit != nil {
+			stdoutSplit.Flush()
+		}
+		if stderrSplit != nil {
+			stderrSplit.Flush()
+		}
+	}
+	defer flushSplits()
 
 	if err := cmd.Start(); err != nil {
 		return fmt.Errorf("start %q: %w", args[0], err)
@@ -914,6 +1166,7 @@ func runProxied(args []string, envVar string, port int, controlURL string, serve
 			hbCancel()
 			disconnectFromOrchestrator(controlURL, clientID)
 			if ee, ok := err.(*exec.ExitError); ok {
+				flushSplits()
 				os.Exit(ee.ExitCode())
 			}
 			return err
@@ -1118,11 +1371,32 @@ func deregisterFromOrchestrator(controlURL, serverName string) {
 	slog.Info("deregistered from orchestrator", "name", serverName)
 }
 
-func runSolo(args []string) error {
+func runSolo(args []string, logSplit config.LogSplitConfig) error {
 	cmd := exec.Command(args[0], args[1:]...)
 	cmd.Stdin = os.Stdin
-	cmd.Stdout = os.Stdout
-	cmd.Stderr = os.Stderr
+	splitter, err := newLogSplitterFromConfig(logSplit, "")
+	if err != nil {
+		return err
+	}
+	var stdoutSplit, stderrSplit *splitWriter
+	if splitter != nil {
+		stdoutSplit = newSplitWriter(os.Stdout, os.Stdout, splitter)
+		stderrSplit = newSplitWriter(os.Stderr, os.Stderr, splitter)
+		cmd.Stdout = stdoutSplit
+		cmd.Stderr = stderrSplit
+	} else {
+		cmd.Stdout = os.Stdout
+		cmd.Stderr = os.Stderr
+	}
+	flushSplits := func() {
+		if stdoutSplit != nil {
+			stdoutSplit.Flush()
+		}
+		if stderrSplit != nil {
+			stderrSplit.Flush()
+		}
+	}
+	defer flushSplits()
 
 	if err := cmd.Start(); err != nil {
 		return fmt.Errorf("start %q: %w", args[0], err)
@@ -1147,6 +1421,7 @@ func runSolo(args []string) error {
 	case err := <-done:
 		if err != nil {
 			if ee, ok := err.(*exec.ExitError); ok {
+				flushSplits()
 				os.Exit(ee.ExitCode())
 			}
 			return err

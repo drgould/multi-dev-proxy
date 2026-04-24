@@ -13,6 +13,7 @@ services:
 
   infra:
     command: docker compose up
+    log_split: compose     # split per-container logs into their own colored lanes
     env:
       API_PORT: auto       # mdp assigns a free port
       AUTH_PORT: auto
@@ -41,6 +42,14 @@ services:
 ```
 
 When you run `mdp run`, mdp assigns free ports, sets them as environment variables, and registers each port mapping with the appropriate proxy.
+
+**Per-container log splitting:** `log_split: compose` parses compose's combined-stream output (`<name>  | <message>`) and gives each container its own colored prefix. Lines that don't match (compose's own status output like `Attaching to api-1, auth-1…`) stay under the outer service's prefix. For ad-hoc commands outside `mdp.yaml`, pass `--log-split=compose`:
+
+```sh
+mdp run --log-split=compose -- docker compose up
+```
+
+For non-compose multiplexers (kubectl, honcho/foreman, bracket-prefixed tools), use the regex form — see [`log_split`](./mdp-yaml-reference.md#log_split--demultiplex-combined-stream-logs) in the reference.
 
 **Non-HTTP ports (no proxy):** omit `proxy:` (and optionally `name:`) on a `ports:` entry to allocate a free port for `${svc.env.VAR}` interpolation without starting a reverse-proxy listener for it. Useful for databases, caches, and other non-HTTP services other services just need to connect to directly.
 

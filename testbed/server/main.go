@@ -39,22 +39,46 @@ func main() {
 		mux.HandleFunc("/", webHandler(name, color, port, apiURL))
 	}
 
+	handler := withRequestLog(mux)
+
 	addr := ":" + port
 	tlsCert := os.Getenv("TLS_CERT")
 	tlsKey := os.Getenv("TLS_KEY")
 	if tlsCert != "" && tlsKey != "" {
 		fmt.Printf("%s listening on https://localhost:%s\n", name, port)
-		if err := http.ListenAndServeTLS(addr, tlsCert, tlsKey, mux); err != nil {
+		if err := http.ListenAndServeTLS(addr, tlsCert, tlsKey, handler); err != nil {
 			fmt.Fprintf(os.Stderr, "error: %v\n", err)
 			os.Exit(1)
 		}
 		return
 	}
 	fmt.Printf("%s listening on http://localhost:%s\n", name, port)
-	if err := http.ListenAndServe(addr, mux); err != nil {
+	if err := http.ListenAndServe(addr, handler); err != nil {
 		fmt.Fprintf(os.Stderr, "error: %v\n", err)
 		os.Exit(1)
 	}
+}
+
+// withRequestLog wraps h with a per-request log line. Gives the testbed's
+// docker-compose lane something to emit beyond startup so log splitting is
+// visible as you click around the dashboard.
+func withRequestLog(h http.Handler) http.Handler {
+	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		start := time.Now()
+		rec := &statusRecorder{ResponseWriter: w, status: 200}
+		h.ServeHTTP(rec, r)
+		fmt.Printf("%s %s -> %d (%s)\n", r.Method, r.URL.Path, rec.status, time.Since(start).Round(time.Microsecond))
+	})
+}
+
+type statusRecorder struct {
+	http.ResponseWriter
+	status int
+}
+
+func (s *statusRecorder) WriteHeader(code int) {
+	s.status = code
+	s.ResponseWriter.WriteHeader(code)
 }
 
 func identityHandler(name, color string) http.HandlerFunc {

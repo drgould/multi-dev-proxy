@@ -45,10 +45,13 @@ services:
       - env: DB_PORT
 
   api-main:
-    command: docker compose up --build --wait
+    command: docker compose up --build
     dir: ./docker
     proxy: 3001
     group: main
+    # Give each docker-compose container its own colored lane in mdp's output
+    # instead of bundling them all under "api-main".
+    log_split: compose
     env:
       PORT: auto
       NAME: "api / main"

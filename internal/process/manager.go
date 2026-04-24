@@ -26,6 +26,10 @@ type RunOpts struct {
 	TLSCertPath  string // forwarded to proxy for dynamic TLS upgrade
 	TLSKeyPath   string // forwarded to proxy for dynamic TLS upgrade
 	ProxyTimeout time.Duration
+	// Stdout/Stderr override where the child's output is forwarded.
+	// When nil, falls back to os.Stdout / os.Stderr.
+	Stdout io.Writer
+	Stderr io.Writer
 }
 
 type Manager struct{}
@@ -40,9 +44,22 @@ func (m *Manager) Run(ctx context.Context, args []string, opts RunOpts) (int, er
 		opts.ProxyTimeout = 2 * time.Second
 	}
 
+	stdoutSink := opts.Stdout
+	if stdoutSink == nil {
+		stdoutSink = os.Stdout
+	}
+	stderrSink := opts.Stderr
+	if stderrSink == nil {
+		stderrSink = os.Stderr
+	}
+	// Flush any sinks that buffer (e.g. splitWriter) before we return, so a
+	// trailing unterminated log line isn't dropped when the child exits.
+	defer flushSink(opts.Stdout)
+	defer flushSink(opts.Stderr)
+
 	cmd := exec.CommandContext(ctx, args[0], args[1:]...)
 	cmd.Stdin = os.Stdin
-	cmd.Stderr = os.Stderr
+	cmd.Stderr = stderrSink
 	cmd.Env = append(os.Environ(), fmt.Sprintf("PORT=%d", opts.AssignedPort), "MDP=1")
 	SetProcessGroup(cmd)
 
@@ -66,7 +83,7 @@ func (m *Manager) Run(ctx context.Context, args []string, opts RunOpts) (int, er
 	if opts.ProxyURL != "" && opts.ServerName != "" {
 		go func() {
 			defer close(registerDone)
-			detected, err := detect.TeeAndDetect(stdout, os.Stdout, 30*time.Second)
+			detected, err := detect.TeeAndDetect(stdout, stdoutSink, 30*time.Second)
 			regPort := opts.AssignedPort
 			if err == nil && detected.Port > 0 {
 				if detected.Port != opts.AssignedPort {
@@ -89,7 +106,7 @@ func (m *Manager) Run(ctx context.Context, args []string, opts RunOpts) (int, er
 	} else {
 		go func() {
 			defer close(registerDone)
-			io.Copy(os.Stdout, stdout)
+			io.Copy(stdoutSink, stdout)
 		}()
 	}
 
@@ -128,6 +145,15 @@ func (m *Manager) Run(ctx context.Context, args []string, opts RunOpts) (int, er
 		return ee.ExitCode(), nil
 	}
 	return -1, exitErr
+}
+
+func flushSink(w io.Writer) {
+	if w == nil {
+		return
+	}
+	if f, ok := w.(interface{ Flush() }); ok {
+		f.Flush()
+	}
 }
 
 func registerWithProxy(proxyURL string, opts RunOpts, pid int, timeout time.Duration) error {
