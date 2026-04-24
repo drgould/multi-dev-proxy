@@ -194,6 +194,7 @@ func (c *ControlAPI) handleDeregister(w http.ResponseWriter, r *http.Request) {
 	for _, pi := range c.orch.ListProxies() {
 		if pi.Registry.Deregister(name) {
 			deleted = true
+			c.orch.shutdownIfEmpty(pi)
 		}
 	}
 	writeJSON(w, http.StatusOK, map[string]any{"ok": true, "deleted": deleted})

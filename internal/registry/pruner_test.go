@@ -18,7 +18,7 @@ func TestPrunerRemovesDead(t *testing.T) {
 
 	ctx, cancel := context.WithCancel(context.Background())
 	defer cancel()
-	StartPruner(ctx, reg, 20*time.Millisecond, isAlive, tcpAlive)
+	StartPruner(ctx, reg, 20*time.Millisecond, isAlive, tcpAlive, nil)
 
 	time.Sleep(60 * time.Millisecond)
 
@@ -45,7 +45,7 @@ func TestPrunerStopsOnContextCancel(t *testing.T) {
 	tcpAlive := func(port int) bool { return true }
 
 	ctx, cancel := context.WithCancel(context.Background())
-	StartPruner(ctx, reg, 20*time.Millisecond, isAlive, tcpAlive)
+	StartPruner(ctx, reg, 20*time.Millisecond, isAlive, tcpAlive, nil)
 	time.Sleep(60 * time.Millisecond)
 	cancel()
 	time.Sleep(60 * time.Millisecond)

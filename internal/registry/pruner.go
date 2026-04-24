@@ -11,7 +11,9 @@ import (
 // StartPruner launches a goroutine that removes dead servers from the registry.
 // isAlive is injected for testability — pass process.IsProcessAlive in production.
 // tcpCheck is used as a fallback for servers with no PID (externally managed).
-func StartPruner(ctx context.Context, reg *Registry, interval time.Duration, isAlive func(pid int) bool, tcpCheck func(port int) bool) {
+// onTick, if non-nil, is invoked after each prune pass (useful for reacting to
+// state changes such as an empty registry).
+func StartPruner(ctx context.Context, reg *Registry, interval time.Duration, isAlive func(pid int) bool, tcpCheck func(port int) bool, onTick func()) {
 	go func() {
 		ticker := time.NewTicker(interval)
 		defer ticker.Stop()
@@ -21,6 +23,9 @@ func StartPruner(ctx context.Context, reg *Registry, interval time.Duration, isA
 				return
 			case <-ticker.C:
 				pruneOnce(reg, isAlive, tcpCheck)
+				if onTick != nil {
+					onTick()
+				}
 			}
 		}
 	}()
