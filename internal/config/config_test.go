@@ -417,3 +417,118 @@ services:
 		t.Errorf("api.EnvFile = %q, want %q", api.EnvFile, wantAPI)
 	}
 }
+
+func TestLoadHealthCheckMapping(t *testing.T) {
+	dir := t.TempDir()
+	path := filepath.Join(dir, "mdp.yaml")
+	os.WriteFile(path, []byte(`
+services:
+  tcp_svc:
+    command: run tcp
+    port: 3000
+    health_check:
+      tcp: 3100
+  http_svc:
+    command: run http
+    port: 4000
+    health_check:
+      http: http://localhost:4000/health
+  cmd_svc:
+    command: run cmd
+    port: 5000
+    health_check:
+      command: "echo ok"
+`), 0644)
+
+	cfg, err := Load(path)
+	if err != nil {
+		t.Fatalf("Load() error = %v", err)
+	}
+	if hc := cfg.Services["tcp_svc"].HealthCheck; hc == nil || hc.TCP != 3100 {
+		t.Errorf("tcp_svc health_check = %+v", hc)
+	}
+	if hc := cfg.Services["http_svc"].HealthCheck; hc == nil || hc.HTTP != "http://localhost:4000/health" {
+		t.Errorf("http_svc health_check = %+v", hc)
+	}
+	if hc := cfg.Services["cmd_svc"].HealthCheck; hc == nil || hc.Command != "echo ok" {
+		t.Errorf("cmd_svc health_check = %+v", hc)
+	}
+}
+
+func TestLoadHealthCheckDockerShorthand(t *testing.T) {
+	dir := t.TempDir()
+	path := filepath.Join(dir, "mdp.yaml")
+	os.WriteFile(path, []byte(`
+services:
+  db:
+    command: docker compose up -d
+    dir: ./db
+    port: 5432
+    health_check: docker
+`), 0644)
+
+	cfg, err := Load(path)
+	if err != nil {
+		t.Fatalf("Load() error = %v", err)
+	}
+	hc := cfg.Services["db"].HealthCheck
+	if hc == nil || !hc.Docker {
+		t.Errorf("expected Docker=true, got %+v", hc)
+	}
+}
+
+func TestLoadHealthCheckUnknownShorthand(t *testing.T) {
+	dir := t.TempDir()
+	path := filepath.Join(dir, "mdp.yaml")
+	os.WriteFile(path, []byte(`
+services:
+  svc:
+    command: run
+    port: 3000
+    health_check: bogus
+`), 0644)
+
+	if _, err := Load(path); err == nil {
+		t.Error("expected error for unknown shorthand")
+	} else if !strings.Contains(err.Error(), "bogus") {
+		t.Errorf("expected error to mention 'bogus', got: %v", err)
+	}
+}
+
+func TestLoadHealthCheckMultipleVariants(t *testing.T) {
+	dir := t.TempDir()
+	path := filepath.Join(dir, "mdp.yaml")
+	os.WriteFile(path, []byte(`
+services:
+  svc:
+    command: run
+    port: 3000
+    health_check:
+      tcp: 3000
+      http: http://localhost:3000/health
+`), 0644)
+
+	_, err := Load(path)
+	if err == nil {
+		t.Fatal("expected error when multiple variants are set")
+	}
+	if !strings.Contains(err.Error(), "only one") {
+		t.Errorf("expected 'only one' error, got: %v", err)
+	}
+}
+
+func TestLoadHealthCheckEmpty(t *testing.T) {
+	dir := t.TempDir()
+	path := filepath.Join(dir, "mdp.yaml")
+	os.WriteFile(path, []byte(`
+services:
+  svc:
+    command: run
+    port: 3000
+    health_check: {}
+`), 0644)
+
+	if _, err := Load(path); err == nil {
+		t.Error("expected error for empty health_check mapping")
+	}
+}

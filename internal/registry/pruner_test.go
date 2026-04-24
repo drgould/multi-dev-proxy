@@ -9,18 +9,19 @@ import (
 
 func TestPrunerRemovesDead(t *testing.T) {
 	reg := New()
-	reg.Register(&ServerEntry{Name: "app/alive", Repo: "app", Port: 1001, PID: 1001})
-	reg.Register(&ServerEntry{Name: "app/dead", Repo: "app", Port: 1002, PID: 1002})
-	reg.Register(&ServerEntry{Name: "app/also-alive", Repo: "app", Port: 1003, PID: 1003})
+	pastGrace := time.Now().Add(-60 * time.Second)
+	reg.Register(&ServerEntry{Name: "app/alive", Repo: "app", Port: 1001, PID: 1001, RegisteredAt: pastGrace})
+	reg.Register(&ServerEntry{Name: "app/dead", Repo: "app", Port: 1002, PID: 1002, RegisteredAt: pastGrace})
+	reg.Register(&ServerEntry{Name: "app/also-alive", Repo: "app", Port: 1003, PID: 1003, RegisteredAt: pastGrace})
 
 	isAlive := func(pid int) bool { return pid != 1002 }
-	tcpAlive := func(port int) bool { return true }
+	// Port 1002 is also dead — distinguishes "truly dead" from "detached".
+	tcpCheck := func(port int) bool { return port != 1002 }
 
-	ctx, cancel := context.WithCancel(context.Background())
-	defer cancel()
-	StartPruner(ctx, reg, 20*time.Millisecond, isAlive, tcpAlive, nil)
-
-	time.Sleep(60 * time.Millisecond)
+	// Tick past the failure threshold so the dead/unreachable entry deregisters.
+	for i := 0; i < tcpFailThreshold; i++ {
+		pruneOnce(reg, isAlive, tcpCheck)
+	}
 
 	if reg.Count() != 2 {
 		t.Errorf("expected 2 servers after pruning, got %d", reg.Count())
@@ -30,6 +31,118 @@ func TestPrunerRemovesDead(t *testing.T) {
 	}
 	if reg.Get("app/alive") == nil {
 		t.Error("alive server should remain")
+	}
+}
+
+// A batch-mode entry carries both a PID and a clientID. When the tracked
+// process exits but the port is still serving (detached case), the registry
+// pruner must keep the entry alive — the session pruner alone would not
+// notice until the `mdp run` client disconnected.
+func TestPrunerKeepsBatchEntryWhenProcessDeadButPortAlive(t *testing.T) {
+	reg := New()
+	reg.Register(&ServerEntry{
+		Name:         "app/batch-detached",
+		Repo:         "app",
+		Port:         5010,
+		PID:          99999,
+		ClientID:     "batch-run-session",
+		RegisteredAt: time.Now().Add(-60 * time.Second),
+	})
+
+	isAlive := func(pid int) bool { return false }
+	tcpAlive := func(port int) bool { return true }
+
+	for i := 0; i < 10; i++ {
+		pruneOnce(reg, isAlive, tcpAlive)
+	}
+
+	if reg.Get("app/batch-detached") == nil {
+		t.Fatal("batch-mode detached service should persist while port is reachable")
+	}
+}
+
+// Detached services (process exits but port still serves) must be kept in the
+// registry — this is the whole point of the health-check fallback.
+func TestPrunerKeepsEntryWhenProcessDeadButProbePasses(t *testing.T) {
+	reg := New()
+	reg.Register(&ServerEntry{
+		Name:         "app/detached",
+		Repo:         "app",
+		Port:         5000,
+		PID:          99999,
+		RegisteredAt: time.Now().Add(-60 * time.Second),
+	})
+
+	isAlive := func(pid int) bool { return false }       // process exited
+	tcpAlive := func(port int) bool { return true }      // but port still up
+
+	for i := 0; i < 10; i++ {
+		pruneOnce(reg, isAlive, tcpAlive)
+	}
+
+	if reg.Get("app/detached") == nil {
+		t.Fatal("detached service should persist while port is reachable")
+	}
+	if got := reg.Get("app/detached").ConsecutiveFailures; got != 0 {
+		t.Errorf("failure counter should stay at 0, got %d", got)
+	}
+}
+
+func TestPrunerUsesCustomHealthCheck(t *testing.T) {
+	reg := New()
+	reg.Register(&ServerEntry{
+		Name:         "app/custom",
+		Repo:         "app",
+		Port:         5001,
+		PID:          0,
+		RegisteredAt: time.Now().Add(-60 * time.Second),
+		HealthCheck:  func() bool { return false },
+	})
+
+	isAlive := func(pid int) bool { return true }
+	tcpAlive := func(port int) bool { return true } // default TCP would say healthy
+
+	for i := 0; i < tcpFailThreshold; i++ {
+		pruneOnce(reg, isAlive, tcpAlive)
+	}
+
+	if reg.Get("app/custom") != nil {
+		t.Error("custom health check returning false should override default TCP probe and trigger pruning")
+	}
+}
+
+// Detached service whose port later goes away must be pruned after the
+// failure threshold.
+func TestPrunerDeregistersDetachedWhenPortDies(t *testing.T) {
+	reg := New()
+	reg.Register(&ServerEntry{
+		Name:         "app/detached",
+		Repo:         "app",
+		Port:         5002,
+		PID:          99999,
+		RegisteredAt: time.Now().Add(-60 * time.Second),
+	})
+
+	isAlive := func(pid int) bool { return false }
+	var alive bool
+	tcpCheck := func(port int) bool { return alive }
+
+	// Port up initially — entry should persist across many ticks.
+	alive = true
+	for i := 0; i < 5; i++ {
+		pruneOnce(reg, isAlive, tcpCheck)
+	}
+	if reg.Get("app/detached") == nil {
+		t.Fatal("entry should still exist while port is reachable")
+	}
+
+	// Port goes down — after threshold consecutive failures, prune.
+	alive = false
+	for i := 0; i < tcpFailThreshold; i++ {
+		pruneOnce(reg, isAlive, tcpCheck)
+	}
+	if reg.Get("app/detached") != nil {
+		t.Error("entry should be pruned once port stops responding")
 	}
 }
 

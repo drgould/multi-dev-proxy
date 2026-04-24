@@ -38,34 +38,49 @@ const (
 
 func pruneOnce(reg *Registry, isAlive func(int) bool, tcpCheck func(int) bool) {
 	for _, e := range reg.List() {
-		if e.PID > 0 {
-			if !isAlive(e.PID) {
-				reg.Deregister(e.Name)
-				slog.Info("pruned dead server", "name", e.Name, "pid", e.PID)
-			}
+		// Pure session-owned entries (no PID to track) are the session
+		// pruner's responsibility.
+		if e.PID == 0 && e.ClientID != "" {
 			continue
 		}
 
-		// PID=0 with clientID: handled by session pruner, skip here
-		if e.ClientID != "" {
+		// If the process is still running, the entry is live regardless of
+		// whether the port is responsive yet (the service may still be
+		// starting). Reset failures so a later check starts clean.
+		if e.PID > 0 && isAlive(e.PID) {
+			reg.ResetFailures(e.Name)
 			continue
 		}
 
-		// PID=0, no clientID: use TCP liveness check with grace period
+		// Process is gone (or was never tracked). Fall back to the liveness
+		// probe. Grace period prevents flapping on just-registered entries
+		// and gives detached processes time to hand off to their child
+		// (e.g. `docker compose up -d` exiting while containers come up).
 		if time.Since(e.RegisteredAt) < tcpGracePeriod {
 			continue
 		}
 
-		if tcpCheck(e.Port) {
+		if probe(e, tcpCheck) {
+			// Port/health check passes — keep the entry. For detached
+			// services this is what keeps the proxy alive after the
+			// foreground process has exited.
 			reg.ResetFailures(e.Name)
-		} else {
-			failures := reg.IncrementFailures(e.Name)
-			if failures >= tcpFailThreshold {
-				reg.Deregister(e.Name)
-				slog.Info("pruned unreachable server", "name", e.Name, "port", e.Port, "failures", failures)
-			}
+			continue
+		}
+
+		failures := reg.IncrementFailures(e.Name)
+		if failures >= tcpFailThreshold {
+			reg.Deregister(e.Name)
+			slog.Info("pruned unreachable server", "name", e.Name, "pid", e.PID, "port", e.Port, "failures", failures)
 		}
 	}
+}
+
+func probe(e ServerEntry, tcpCheck func(int) bool) bool {
+	if e.HealthCheck != nil {
+		return e.HealthCheck()
+	}
+	return tcpCheck(e.Port)
 }
 
 // TCPCheck attempts a TCP connection to localhost on the given port.
