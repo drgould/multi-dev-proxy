@@ -16,6 +16,7 @@ import (
 	"github.com/derekgould/multi-dev-proxy/internal/detect"
 	"github.com/derekgould/multi-dev-proxy/internal/envexpand"
 	"github.com/derekgould/multi-dev-proxy/internal/envexport"
+	"github.com/derekgould/multi-dev-proxy/internal/health"
 	"github.com/derekgould/multi-dev-proxy/internal/ports"
 	"github.com/derekgould/multi-dev-proxy/internal/registry"
 )
@@ -234,7 +235,10 @@ func (o *Orchestrator) waitForReady(ctx context.Context, serverName string, prob
 	ticker := time.NewTicker(readyPoll)
 	defer ticker.Stop()
 	for {
-		if status, ok := o.ServiceStatus(serverName); ok && (status == "stopped" || status == "failed") {
+		// Only treat "failed" as a terminal signal. A clean exit ("stopped")
+		// can be a detached service (e.g. `docker compose up -d`) whose port
+		// is about to come up — keep polling until it does or we time out.
+		if status, ok := o.ServiceStatus(serverName); ok && status == "failed" {
 			return fmt.Errorf("service exited before becoming ready (status=%s)", status)
 		}
 		allReady := true
@@ -280,6 +284,7 @@ func (o *Orchestrator) startSingleService(ctx context.Context, name string, svc 
 			Scheme:      scheme,
 			TLSCertPath: svc.TLSCert,
 			TLSKeyPath:  svc.TLSKey,
+			HealthCheck: health.Build(svc.HealthCheck, assignedPort, svc.Dir),
 		}
 		if err := o.Register(svc.Proxy, entry); err != nil {
 			return fmt.Errorf("register %s: %w", serverName, err)
@@ -312,10 +317,11 @@ func (o *Orchestrator) startMultiPortService(ctx context.Context, name string, s
 		}
 		serverName := fmt.Sprintf("%s/%s", group, serviceName)
 		entry := &registry.ServerEntry{
-			Name:  serverName,
-			Repo:  name,
-			Group: group,
-			Port:  port,
+			Name:        serverName,
+			Repo:        name,
+			Group:       group,
+			Port:        port,
+			HealthCheck: health.Build(svc.HealthCheck, port, svc.Dir),
 		}
 		if err := o.Register(pm.Proxy, entry); err != nil {
 			slog.Error("register multi-port service", "name", serverName, "err", err)

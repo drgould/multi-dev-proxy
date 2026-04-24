@@ -132,6 +132,29 @@ services:
 
 Services without `depends_on` start in parallel. Independent branches of the dependency graph run in parallel too — only direct dependents wait. Each dependency has a 60s readiness timeout; if a dependency fails to become ready, its dependents are marked `failed` and skipped. Cycles and references to undefined services are rejected at config-load time.
 
+## Detached commands and health checks
+
+By default, `mdp` keeps a service's proxy registration alive as long as either its process is running or its port is still answering a TCP probe. That makes detached commands like `docker compose up -d` work out of the box — the foreground process exits, but the probe keeps the entry alive while the containers keep listening.
+
+Override the probe with `health_check`:
+
+```yaml
+services:
+  db:
+    command: docker compose up -d
+    dir: ./db
+    port: 5432
+    health_check: docker               # shorthand for `docker compose ps -q`
+
+  api:
+    command: bun run dev
+    proxy: 4000
+    health_check:
+      http: http://localhost:4000/health
+```
+
+Supported variants: `tcp: <port>`, `http: <url>`, `command: <shell tokens>`, and the `docker` shorthand. See the [`mdp.yaml` reference](./mdp-yaml-reference.md#detached-services-and-health-checks) for details.
+
 ---
 
 [← Back to docs index](./index.md)
