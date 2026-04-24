@@ -53,6 +53,30 @@ db:
     - env: DB_PORT    # allocated & interpolatable, no proxy
 ```
 
+**UDP ports:** add `protocol: udp` to a `ports:` entry so mdp allocates the host port with a UDP-aware free-port check and skips it in the `depends_on` readiness probe (TCP probes never succeed on UDP). This is what lets multiple worktrees run the same UDP-publishing compose stack in parallel — each gets its own random host port, and nothing collides.
+
+```yaml
+# mdp.yaml
+infra:
+  command: docker compose up --wait
+  env:
+    JAEGER_AGENT_PORT: auto
+  ports:
+    - env: JAEGER_AGENT_PORT
+      protocol: udp
+```
+
+```yaml
+# docker-compose.yml
+services:
+  jaeger:
+    image: jaegertracing/all-in-one
+    ports:
+      - "${JAEGER_AGENT_PORT}:6831/udp"
+```
+
+UDP mappings are allocation-only: `proxy:` and `name:` are rejected at config load.
+
 ## HTTPS
 
 mdp inherits TLS certificates from the services it proxies. When a service registers with `--tls-cert` and `--tls-key`, the proxy automatically starts accepting HTTPS connections using that certificate. Each proxy port serves both HTTP and HTTPS on the same port.

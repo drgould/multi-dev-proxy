@@ -22,6 +22,9 @@ echo "Building mdp..."
 echo "Building testbed server..."
 (cd "$SCRIPT_DIR/server" && go build -o "$SCRIPT_DIR/server/server" .)
 
+echo "Building udp-echo..."
+(cd "$SCRIPT_DIR/udp-echo" && go build -o "$SCRIPT_DIR/udp-echo/udp-echo" .)
+
 echo "Generating TLS cert..."
 CERT_DIR="$SCRIPT_DIR/.certs"
 mkdir -p "$CERT_DIR"
@@ -65,9 +68,12 @@ printf "  Frontend:    \033[1;36mhttp://localhost:3000\033[0m (TLS on main)\n"
 printf "  Backend:     \033[1;36mhttp://localhost:3001\033[0m (Docker on main)\n"
 echo ""
 printf "  Groups:\n"
-printf "    \033[1;36mmain\033[0m       web (TLS) + api (Docker)\n"
+printf "    \033[1;36mmain\033[0m       web (TLS) + api (Docker) + udp-echo\n"
 printf "    \033[1;32mfeature-a\033[0m  web + api\n"
 printf "    \033[1;31mfeature-b\033[0m  web + api\n"
+echo ""
+printf "  UDP echo (main group): port shown as \$UDP_PORT in .mdp.env\n"
+printf "    printf 'hi' | socat -t1 - UDP:127.0.0.1:\$UDP_PORT\n"
 echo ""
 echo "  Press Ctrl+C to stop everything."
 echo ""

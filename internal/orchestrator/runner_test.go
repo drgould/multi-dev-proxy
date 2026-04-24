@@ -12,6 +12,7 @@ import (
 
 	"github.com/derekgould/multi-dev-proxy/internal/config"
 	"github.com/derekgould/multi-dev-proxy/internal/envexpand"
+	"github.com/derekgould/multi-dev-proxy/internal/ports"
 )
 
 func TestSplitHookArgs(t *testing.T) {
@@ -528,5 +529,138 @@ func TestStartConfigServicesFailsWhenDepTimesOut(t *testing.T) {
 	}
 	if status, _ := o.ServiceStatus("test/b"); status != "failed" {
 		t.Errorf("b status = %q, want 'failed' (dep failed)", status)
+	}
+}
+
+// swapFinders replaces ports.FindFreePort and ports.FindFreeUDPPort with
+// recording stubs. Returns pointers that can be inspected after the test runs.
+// Each finder returns an incrementing port from startPort so assignments are
+// deterministic and non-colliding across the test.
+func swapFinders(t *testing.T, startPort int) (tcpCalls, udpCalls *[]string) {
+	t.Helper()
+	origTCP := ports.FindFreePort
+	origUDP := ports.FindFreeUDPPort
+	var tcp, udp []string
+	tcpNext, udpNext := startPort, startPort+1000
+	var mu sync.Mutex
+	ports.FindFreePort = func(r ports.PortRange, exclude []int) (int, error) {
+		mu.Lock()
+		defer mu.Unlock()
+		tcp = append(tcp, "tcp")
+		p := tcpNext
+		tcpNext++
+		return p, nil
+	}
+	ports.FindFreeUDPPort = func(r ports.PortRange, exclude []int) (int, error) {
+		mu.Lock()
+		defer mu.Unlock()
+		udp = append(udp, "udp")
+		p := udpNext
+		udpNext++
+		return p, nil
+	}
+	t.Cleanup(func() {
+		ports.FindFreePort = origTCP
+		ports.FindFreeUDPPort = origUDP
+	})
+	return &tcp, &udp
+}
+
+func TestStartConfigServicesDispatchesUDPAllocator(t *testing.T) {
+	// Service with a UDP port mapping must allocate via FindFreeUDPPort, and
+	// a TCP mapping must allocate via FindFreePort.
+	swapTimeouts(t, 100*time.Millisecond, 10*time.Millisecond)
+	swapTCPCheck(t, func(int) bool { return true })
+	tcpCalls, udpCalls := swapFinders(t, 30000)
+
+	cfg := &config.Config{
+		PortRange: "10000-60000",
+		Services: map[string]config.ServiceConfig{
+			"infra": {
+				Command: "sleep 30",
+				Env: map[string]string{
+					"TCP_PORT": "auto",
+					"UDP_PORT": "auto",
+				},
+				Ports: []config.PortMapping{
+					{Env: "TCP_PORT"},
+					{Env: "UDP_PORT", Protocol: "udp"},
+				},
+			},
+		},
+	}
+	o := New(cfg, "")
+	ctx, cancel := context.WithCancel(context.Background())
+	t.Cleanup(cancel)
+
+	done := make(chan struct{})
+	go func() {
+		_ = o.StartConfigServices(ctx, "test")
+		close(done)
+	}()
+
+	select {
+	case <-done:
+	case <-time.After(3 * time.Second):
+		t.Fatal("StartConfigServices did not return")
+	}
+
+	if len(*tcpCalls) != 1 {
+		t.Errorf("FindFreePort called %d times, want 1 (for TCP_PORT)", len(*tcpCalls))
+	}
+	if len(*udpCalls) != 1 {
+		t.Errorf("FindFreeUDPPort called %d times, want 1 (for UDP_PORT)", len(*udpCalls))
+	}
+}
+
+func TestProbePortsForExcludesUDP(t *testing.T) {
+	a := serviceAlloc{
+		portAssignments: map[string]int{"TCP_PORT": 40001, "UDP_PORT": 40002},
+		portProtocols:   map[string]string{"TCP_PORT": "tcp", "UDP_PORT": "udp"},
+	}
+	got := probePortsFor(a)
+	if len(got) != 1 || got[0] != 40001 {
+		t.Errorf("probePortsFor() = %v, want [40001] (UDP port excluded)", got)
+	}
+}
+
+func TestStartMultiPortServiceSkipsRegistrationWhenProxyZero(t *testing.T) {
+	// A port mapping with proxy:0 (such as a UDP-only allocation or an
+	// internal-only port) must not call Register — otherwise EnsureProxy(0)
+	// would spin up an ephemeral proxy that nothing ever reaches.
+	swapTimeouts(t, 100*time.Millisecond, 10*time.Millisecond)
+	swapTCPCheck(t, func(int) bool { return true })
+	swapFinders(t, 31000)
+
+	cfg := &config.Config{
+		PortRange: "10000-60000",
+		Services: map[string]config.ServiceConfig{
+			"infra": {
+				Command: "sleep 30",
+				Env:     map[string]string{"UDP_PORT": "auto"},
+				Ports:   []config.PortMapping{{Env: "UDP_PORT", Protocol: "udp"}},
+			},
+		},
+	}
+	o := New(cfg, "")
+	ctx, cancel := context.WithCancel(context.Background())
+	t.Cleanup(cancel)
+
+	done := make(chan struct{})
+	go func() {
+		_ = o.StartConfigServices(ctx, "test")
+		close(done)
+	}()
+
+	select {
+	case <-done:
+	case <-time.After(3 * time.Second):
+		t.Fatal("StartConfigServices did not return")
+	}
+
+	// No proxy should have been created. ListProxies returns all proxy
+	// instances ever created by the orchestrator.
+	if got := len(o.ListProxies()); got != 0 {
+		t.Errorf("ListProxies() = %d, want 0 (UDP mapping should not create a proxy)", got)
 	}
 }

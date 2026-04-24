@@ -150,10 +150,15 @@ func runBatchMode(cmd *cobra.Command, controlPort int, groupFlag string) error {
 		}
 
 		if len(svc.Ports) > 0 {
+			envProtocols := svc.EnvProtocols()
 			portAssignments := make(map[string]int)
 			for envName, value := range svc.Env {
 				if value == "auto" {
-					port, err := ports.FindFreePort(portRange, assignedPorts)
+					finder := ports.FindFreePort
+					if envProtocols[envName] == "udp" {
+						finder = ports.FindFreeUDPPort
+					}
+					port, err := finder(portRange, assignedPorts)
 					if err != nil {
 						return fmt.Errorf("find free port for %q.%s: %w", name, envName, err)
 					}
@@ -166,7 +171,7 @@ func runBatchMode(cmd *cobra.Command, controlPort int, groupFlag string) error {
 				svcPorts[k] = v
 			}
 			portMap[name] = svcPorts
-			allocations = append(allocations, batchAlloc{name: name, svc: svc, svcGroup: svcGroup, portAssignments: portAssignments})
+			allocations = append(allocations, batchAlloc{name: name, svc: svc, svcGroup: svcGroup, portAssignments: portAssignments, portProtocols: envProtocols})
 			continue
 		}
 
@@ -244,9 +249,10 @@ type batchAlloc struct {
 	name            string
 	svc             config.ServiceConfig
 	svcGroup        string
-	assignedPort    int            // single-port only
-	portAssignments map[string]int // multi-port only
-	env             []string       // populated by exportBatchEnvFiles before fan-out
+	assignedPort    int               // single-port only
+	portAssignments map[string]int    // multi-port only
+	portProtocols   map[string]string // env → "tcp"/"udp"; only populated for multi-port
+	env             []string          // populated by exportBatchEnvFiles before fan-out
 }
 
 // launchBatchService is the per-service batch-mode launcher: it waits for the
@@ -299,6 +305,9 @@ func launchBatchService(
 					port:       port,
 					proxyPort:  pm.Proxy,
 				})
+			}
+			if pm.Protocol == "udp" {
+				continue
 			}
 			probePorts = append(probePorts, port)
 		}

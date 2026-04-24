@@ -8,6 +8,8 @@ global:
       ref: api-main.env.PORT
     DB_PORT:
       ref: db-main.env.DB_PORT
+    UDP_PORT:
+      ref: udp-echo-main.env.UDP_PORT
     # Scalar form — any string with ${svc.key} or ${svc.env.VAR} refs.
     API_URL: "http://localhost:${api-main.PORT}"
     DB_URL:  "postgres://localhost:${db-main.env.DB_PORT}/app"
@@ -43,6 +45,24 @@ services:
       DB_PORT: auto
     ports:
       - env: DB_PORT
+
+  # UDP echo: demonstrates `protocol: udp` — mdp allocates a UDP-bindable
+  # free port (via UDP-aware check, not TCP) and skips it in the depends_on
+  # readiness probe (TCP probes never succeed on UDP). Multi-worktree
+  # parallelism: each worktree gets its own random UDP_PORT and nothing
+  # collides on the host.
+  #
+  # Exercise it:
+  #   printf 'hello' | socat -t1 - UDP:127.0.0.1:$UDP_PORT
+  udp-echo-main:
+    command: ./udp-echo/udp-echo
+    group: main
+    env:
+      UDP_PORT: auto
+      NAME: "udp-echo / main"
+    ports:
+      - env: UDP_PORT
+        protocol: udp
 
   api-main:
     command: docker compose up --build --wait

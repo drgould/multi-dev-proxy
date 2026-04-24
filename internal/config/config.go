@@ -148,9 +148,28 @@ func (h *HealthCheck) Validate() error {
 // need a free port allocated for ${svc.env} interpolation but should not be
 // registered with an HTTP reverse-proxy listener.
 type PortMapping struct {
-	Env   string `yaml:"env"`
-	Proxy int    `yaml:"proxy"`
-	Name  string `yaml:"name"`
+	Env      string `yaml:"env"`
+	Proxy    int    `yaml:"proxy"`
+	Name     string `yaml:"name"`
+	Protocol string `yaml:"protocol"` // "tcp" (default) or "udp"
+}
+
+// EnvProtocols returns a {env var → normalized protocol} map for every entry
+// in Ports. Empty protocols are normalized to "tcp". Allocators use this to
+// decide whether a port should be verified via TCP or UDP probes.
+func (s ServiceConfig) EnvProtocols() map[string]string {
+	if len(s.Ports) == 0 {
+		return nil
+	}
+	m := make(map[string]string, len(s.Ports))
+	for _, pm := range s.Ports {
+		proto := strings.ToLower(pm.Protocol)
+		if proto == "" {
+			proto = "tcp"
+		}
+		m[pm.Env] = proto
+	}
+	return m
 }
 
 // Load reads and parses the config file at the given path.
@@ -181,6 +200,24 @@ func Load(path string) (*Config, error) {
 		// Infer scheme from cert presence.
 		if svc.Scheme == "" && svc.TLSCert != "" {
 			svc.Scheme = "https"
+		}
+		// Normalize + validate port mapping protocols.
+		for i, pm := range svc.Ports {
+			proto := strings.ToLower(pm.Protocol)
+			switch proto {
+			case "", "tcp":
+				// ok
+			case "udp":
+				if pm.Proxy > 0 {
+					return nil, fmt.Errorf("service %q: protocol: udp is incompatible with a non-zero proxy port (env %q)", name, pm.Env)
+				}
+				if pm.Name != "" {
+					return nil, fmt.Errorf("service %q: name: has no effect on UDP port mappings (env %q)", name, pm.Env)
+				}
+			default:
+				return nil, fmt.Errorf("service %q: unknown protocol %q for port mapping %q (expected \"tcp\" or \"udp\")", name, pm.Protocol, pm.Env)
+			}
+			svc.Ports[i].Protocol = proto
 		}
 		if svc.HealthCheck != nil {
 			if err := svc.HealthCheck.Validate(); err != nil {

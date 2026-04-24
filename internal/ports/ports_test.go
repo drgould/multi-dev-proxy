@@ -2,6 +2,7 @@ package ports
 
 import (
 	"net"
+	"strconv"
 	"testing"
 )
 
@@ -238,6 +239,50 @@ func TestFindFreePortExhausted(t *testing.T) {
 	}
 	if err != nil && !contains(err.Error(), "no free port found") {
 		t.Errorf("FindFreePort() error = %v, want error containing 'no free port found'", err)
+	}
+}
+
+func TestIsUDPPortFree(t *testing.T) {
+	t.Run("port is free when nothing is listening", func(t *testing.T) {
+		pc, err := net.ListenPacket("udp", ":0")
+		if err != nil {
+			t.Fatalf("failed to find free udp port: %v", err)
+		}
+		port := pc.LocalAddr().(*net.UDPAddr).Port
+		pc.Close()
+		if !IsUDPPortFree(port) {
+			t.Errorf("IsUDPPortFree(%d) = false, want true", port)
+		}
+	})
+
+	t.Run("port is not free when something is listening", func(t *testing.T) {
+		pc, err := net.ListenPacket("udp", ":0")
+		if err != nil {
+			t.Fatalf("failed to bind udp: %v", err)
+		}
+		defer pc.Close()
+		port := pc.LocalAddr().(*net.UDPAddr).Port
+		if IsUDPPortFree(port) {
+			t.Errorf("IsUDPPortFree(%d) = true, want false (port is in use)", port)
+		}
+	})
+}
+
+func TestFindFreeUDPPort(t *testing.T) {
+	r := PortRange{Start: 20000, End: 30000}
+	port, err := FindFreeUDPPort(r, nil)
+	if err != nil {
+		t.Fatalf("FindFreeUDPPort() error = %v", err)
+	}
+	if port < r.Start || port > r.End {
+		t.Errorf("FindFreeUDPPort() = %d, want port in range [%d, %d]", port, r.Start, r.End)
+	}
+	// The returned port should actually be UDP-bindable.
+	pc, err := net.ListenPacket("udp", ":"+strconv.Itoa(port))
+	if err != nil {
+		t.Errorf("FindFreeUDPPort() returned port %d that is not UDP-bindable: %v", port, err)
+	} else {
+		pc.Close()
 	}
 }
 

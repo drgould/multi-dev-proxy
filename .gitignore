@@ -36,6 +36,7 @@ go.work.sum
 testbed/mdp
 testbed/go-websocket/go-websocket
 testbed/echo-api/echo-api
+testbed/udp-echo/udp-echo
 testbed/.certs/
 
 # Testbed Node.js
