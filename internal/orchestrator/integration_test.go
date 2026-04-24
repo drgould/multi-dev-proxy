@@ -140,17 +140,6 @@ func registerViaControlAPI(t *testing.T, o *Orchestrator, payload map[string]any
 	}
 }
 
-// noRedirectClient returns an http.Client that surfaces redirects instead of
-// following them, so tests can assert on 302→/__mdp/switch behavior.
-func noRedirectClient() *http.Client {
-	return &http.Client{
-		Timeout: 2 * time.Second,
-		CheckRedirect: func(*http.Request, []*http.Request) error {
-			return http.ErrUseLastResponse
-		},
-	}
-}
-
 func writeSelfSignedCert(t *testing.T) (certPath, keyPath, commonName string) {
 	t.Helper()
 	commonName = "localhost"
