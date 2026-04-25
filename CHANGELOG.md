@@ -1,5 +1,20 @@
 # Changelog
 
+## [1.6.0](https://github.com/drgould/multi-dev-proxy/compare/v1.5.2...v1.6.0) (2026-04-25)
+
+
+### Features
+
+* add protocol: udp to port mappings ([#35](https://github.com/drgould/multi-dev-proxy/issues/35)) ([1e281db](https://github.com/drgould/multi-dev-proxy/commit/1e281db71ba458a0701a4d7a8d2b05c3300fb1e8))
+* cross-repo @&lt;repo&gt; env references via orchestrator ([#37](https://github.com/drgould/multi-dev-proxy/issues/37)) ([ce5e90a](https://github.com/drgould/multi-dev-proxy/commit/ce5e90aced5a1bb6e1ac22c6149608afbc7a22ae))
+* health check fallback for detached services ([#34](https://github.com/drgould/multi-dev-proxy/issues/34)) ([2d08c82](https://github.com/drgould/multi-dev-proxy/commit/2d08c82720f212b1caf3428a1018e5e0272942c4))
+* split combined-stream logs for compose and regex prefixes ([#36](https://github.com/drgould/multi-dev-proxy/issues/36)) ([0ca73b8](https://github.com/drgould/multi-dev-proxy/commit/0ca73b80174d9d77db3a19049fd62e96531c36c1))
+
+
+### Bug Fixes
+
+* auto-shutdown empty proxies to release their port ([#32](https://github.com/drgould/multi-dev-proxy/issues/32)) ([c63d971](https://github.com/drgould/multi-dev-proxy/commit/c63d97136157ab23f38631379f97b62c5ee678b1))
+
 ## [1.5.2](https://github.com/drgould/multi-dev-proxy/compare/v1.5.1...v1.5.2) (2026-04-23)
 
 
