@@ -375,7 +375,10 @@ func TestMultiPortServiceRegistersAll(t *testing.T) {
 		Services: map[string]config.ServiceConfig{
 			"myapp": {
 				Command: "true", // exits immediately; registration happens after cmd.Start
-				Env:     map[string]string{"API_PORT": "auto", "WS_PORT": "auto"},
+				Env: map[string]config.EnvValue{
+					"API_PORT": {Value: "auto"},
+					"WS_PORT":  {Value: "auto"},
+				},
 				Ports: []config.PortMapping{
 					{Env: "API_PORT", Proxy: proxyA, Name: "api"},
 					{Env: "WS_PORT", Proxy: proxyB, Name: "ws"},

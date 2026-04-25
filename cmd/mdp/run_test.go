@@ -220,9 +220,9 @@ func TestLaunchBatchServiceSkipsUDPPortsFromProbe(t *testing.T) {
 		svcGroup: "main",
 		svc: config.ServiceConfig{
 			// Commandless → external service code path.
-			Env: map[string]string{
-				"API_PORT":          "auto",
-				"JAEGER_AGENT_PORT": "auto",
+			Env: map[string]config.EnvValue{
+				"API_PORT":          {Value: "auto"},
+				"JAEGER_AGENT_PORT": {Value: "auto"},
 			},
 			Ports: []config.PortMapping{
 				{Env: "API_PORT", Proxy: 4000, Name: "api"},
@@ -236,7 +236,7 @@ func TestLaunchBatchServiceSkipsUDPPortsFromProbe(t *testing.T) {
 	bt := &batchTracker{}
 	bt.wg.Add(1)
 	states := depwait.NewStates([]string{"infra"})
-	launchBatchService(context.Background(), bt, http.DefaultClient, srv.URL, "client-1", a, states, rt)
+	launchBatchService(context.Background(), bt, http.DefaultClient, srv.URL, "client-1", "test-repo", &a, states, rt, envexpand.PortMap{}, nil)
 
 	probeMu.Lock()
 	defer probeMu.Unlock()
@@ -283,9 +283,9 @@ func TestLaunchBatchServiceSkipsProxylessPorts(t *testing.T) {
 		svcGroup: "main",
 		svc: config.ServiceConfig{
 			// Command empty → no process launched.
-			Env: map[string]string{
-				"API_PORT": "auto",
-				"DB_PORT":  "auto",
+			Env: map[string]config.EnvValue{
+				"API_PORT": {Value: "auto"},
+				"DB_PORT":  {Value: "auto"},
 			},
 			Ports: []config.PortMapping{
 				{Env: "API_PORT", Proxy: 4000, Name: "api"},
@@ -298,7 +298,7 @@ func TestLaunchBatchServiceSkipsProxylessPorts(t *testing.T) {
 	bt := &batchTracker{}
 	bt.wg.Add(1)
 	states := depwait.NewStates([]string{"infra"})
-	launchBatchService(context.Background(), bt, http.DefaultClient, srv.URL, "client-1", a, states, rt)
+	launchBatchService(context.Background(), bt, http.DefaultClient, srv.URL, "client-1", "test-repo", &a, states, rt, envexpand.PortMap{}, nil)
 
 	registerMu.Lock()
 	defer registerMu.Unlock()
@@ -370,7 +370,7 @@ func TestLaunchBatchServiceWaitsForDependencies(t *testing.T) {
 
 	for _, a := range allocs {
 		bt.wg.Add(1)
-		go launchBatchService(ctx, bt, http.DefaultClient, srv.URL, "c1", a, states, rt)
+		go launchBatchService(ctx, bt, http.DefaultClient, srv.URL, "c1", "test-repo", &a, states, rt, envexpand.PortMap{}, nil)
 	}
 
 	waitFor := func(name string, dur time.Duration) bool {
@@ -440,7 +440,7 @@ func TestLaunchBatchServiceReturnsOnContextCancel(t *testing.T) {
 	bt.wg.Add(1)
 	done := make(chan struct{})
 	go func() {
-		launchBatchService(ctx, bt, http.DefaultClient, srv.URL, "c1", a, states, rt)
+		launchBatchService(ctx, bt, http.DefaultClient, srv.URL, "c1", "test-repo", &a, states, rt, envexpand.PortMap{}, nil)
 		close(done)
 	}()
 
@@ -497,7 +497,7 @@ func TestLaunchBatchServiceHookOrdering(t *testing.T) {
 	bt := &batchTracker{}
 	bt.wg.Add(1)
 	states := depwait.NewStates([]string{"web"})
-	launchBatchService(context.Background(), bt, http.DefaultClient, srv.URL, "c1", a, states, rt)
+	launchBatchService(context.Background(), bt, http.DefaultClient, srv.URL, "c1", "test-repo", &a, states, rt, envexpand.PortMap{}, nil)
 
 	data, err := os.ReadFile(logPath)
 	if err != nil {
@@ -550,7 +550,7 @@ func TestLaunchBatchServiceSetupFailureSkipsRegistration(t *testing.T) {
 	bt := &batchTracker{}
 	bt.wg.Add(1)
 	states := depwait.NewStates([]string{"web"})
-	launchBatchService(context.Background(), bt, http.DefaultClient, srv.URL, "c1", a, states, rt)
+	launchBatchService(context.Background(), bt, http.DefaultClient, srv.URL, "c1", "test-repo", &a, states, rt, envexpand.PortMap{}, nil)
 
 	regMu.Lock()
 	defer regMu.Unlock()
@@ -689,6 +689,169 @@ func TestRunProxiedSetsMDPEnv(t *testing.T) {
 	}
 }
 
+func TestBuildBatchEnvCrossRepoResolverHits(t *testing.T) {
+	resolver := func(repo, svc string, isEnv bool, key string) (string, bool) {
+		if repo == "backend" && svc == "api" && !isEnv && key == "port" {
+			return "9999", true
+		}
+		if repo == "backend" && svc == "api" && isEnv && key == "URL" {
+			return "http://backend", true
+		}
+		return "", false
+	}
+	a := batchAlloc{
+		name:         "frontend",
+		svcGroup:     "test",
+		assignedPort: 3000,
+		svc: config.ServiceConfig{
+			Env: map[string]config.EnvValue{
+				"API_URL":     {Value: "http://localhost:${@backend.api.port}"},
+				"AUTH":        {Ref: "@backend.api.env.URL"},
+				"FALLBACK":    {Value: "${@backend.unknown.port:-7777}"},
+				"OMIT":        {Ref: "@backend.unknown.port"},
+				"OMIT_INTERP": {Value: "x=${@backend.unknown.env.X:-}"},
+			},
+		},
+	}
+	env, err := buildBatchEnv(a, envexpand.PortMap{}, resolver)
+	if err != nil {
+		t.Fatalf("buildBatchEnv: %v", err)
+	}
+	got := map[string]string{}
+	for _, kv := range env {
+		if i := strings.IndexByte(kv, '='); i >= 0 {
+			got[kv[:i]] = kv[i+1:]
+		}
+	}
+	if got["API_URL"] != "http://localhost:9999" {
+		t.Errorf("API_URL = %q", got["API_URL"])
+	}
+	if got["AUTH"] != "http://backend" {
+		t.Errorf("AUTH = %q", got["AUTH"])
+	}
+	if got["FALLBACK"] != "7777" {
+		t.Errorf("FALLBACK = %q", got["FALLBACK"])
+	}
+	if _, exists := got["OMIT"]; exists {
+		t.Errorf("OMIT should be omitted; got %q", got["OMIT"])
+	}
+	if got["OMIT_INTERP"] != "x=" {
+		t.Errorf("OMIT_INTERP = %q, want x=", got["OMIT_INTERP"])
+	}
+}
+
+func TestSuperviseProcessRestartsOnPeerChange(t *testing.T) {
+	// Stand up a fake control API that returns a port we can flip.
+	var port atomic.Int64
+	port.Store(9001)
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.URL.Path == "/__mdp/peers" {
+			json.NewEncoder(w).Encode(map[string]any{
+				"port": port.Load(),
+				"env":  map[string]string{},
+			})
+			return
+		}
+		w.WriteHeader(http.StatusOK)
+	}))
+	defer srv.Close()
+
+	// Speed up the watcher so the test stays fast.
+	prev := peerWatchInterval
+	peerWatchInterval = 20 * time.Millisecond
+	t.Cleanup(func() { peerWatchInterval = prev })
+
+	dir := t.TempDir()
+	logPath := filepath.Join(dir, "log")
+	// `exec sleep` replaces the shell so SIGKILL targets the sleep directly,
+	// otherwise cmd.Wait blocks on the inherited stdout pipe until sleep exits.
+	command := "sh -c 'echo $TARGET_PORT >> " + logPath + "; exec sleep 60'"
+
+	a := &batchAlloc{
+		name:     "frontend",
+		svcGroup: "dev",
+		svc: config.ServiceConfig{
+			Command: command,
+			Env: map[string]config.EnvValue{
+				"TARGET_PORT": {Ref: "@backend.api.port"},
+			},
+		},
+	}
+	resolver := newPeerResolver(http.DefaultClient, srv.URL, "dev")
+	initialEnv, err := buildBatchEnv(*a, envexpand.PortMap{}, resolver)
+	if err != nil {
+		t.Fatalf("initial env: %v", err)
+	}
+	a.env = initialEnv
+
+	bt := &batchTracker{}
+	pw := newPrefixWriter("test", "0;0", os.Stdout)
+	pwErr := newPrefixWriter("test", "0;0", os.Stderr)
+	cmd, err := startBatchCommand(bt, command, "", initialEnv, pw, pwErr)
+	if err != nil {
+		t.Fatalf("startBatchCommand: %v", err)
+	}
+
+	registerAll := func() ([]string, error) { return nil, nil }
+
+	ctx, cancel := context.WithCancel(context.Background())
+	done := make(chan struct{})
+	go func() {
+		superviseProcess(ctx, cmd, bt, http.DefaultClient, srv.URL, a, nil, registerAll, envexpand.PortMap{}, resolver, pw, pwErr)
+		close(done)
+	}()
+	t.Cleanup(func() {
+		cancel()
+		<-done
+		bt.killAll()
+		bt.wg.Wait()
+	})
+
+	// Wait for the initial run to write 9001.
+	waitFor := func(want string, dur time.Duration) bool {
+		deadline := time.Now().Add(dur)
+		for time.Now().Before(deadline) {
+			data, _ := os.ReadFile(logPath)
+			if strings.Contains(string(data), want) {
+				return true
+			}
+			time.Sleep(20 * time.Millisecond)
+		}
+		return false
+	}
+	if !waitFor("9001", 2*time.Second) {
+		t.Fatalf("initial cmd never wrote 9001; log=%q", readFile(t, logPath))
+	}
+
+	// Flip the peer port; the supervisor should kill the cmd and relaunch
+	// with TARGET_PORT=9999.
+	port.Store(9999)
+
+	if !waitFor("9999", 3*time.Second) {
+		t.Fatalf("restart cmd never wrote 9999; log=%q", readFile(t, logPath))
+	}
+}
+
+func readFile(t *testing.T, path string) string {
+	t.Helper()
+	data, _ := os.ReadFile(path)
+	return string(data)
+}
+
+func TestBuildBatchEnvLocalRefMissingErrors(t *testing.T) {
+	a := batchAlloc{
+		name: "x",
+		svc: config.ServiceConfig{
+			Env: map[string]config.EnvValue{
+				"BAD": {Ref: "nope.port"}, // local; not present in portMap
+			},
+		},
+	}
+	if _, err := buildBatchEnv(a, envexpand.PortMap{}, nil); err == nil {
+		t.Fatal("expected error for unresolved local ref")
+	}
+}
+
 func TestExportBatchEnvFilesWritesGlobalAndPerService(t *testing.T) {
 	tmp := t.TempDir()
 	globalPath := filepath.Join(tmp, "global.env")
@@ -698,7 +861,7 @@ func TestExportBatchEnvFilesWritesGlobalAndPerService(t *testing.T) {
 	cfg := &config.Config{
 		Global: config.GlobalConfig{
 			EnvFile: globalPath,
-			Env: map[string]config.GlobalEnvValue{
+			Env: map[string]config.EnvValue{
 				"API_PORT": {Ref: "api.env.PORT"},
 				"API_URL":  {Value: "http://localhost:${api.PORT}"},
 				"WEB_MODE": {Ref: "web.env.MODE"},
@@ -713,7 +876,7 @@ func TestExportBatchEnvFilesWritesGlobalAndPerService(t *testing.T) {
 			assignedPort: 40100,
 			svc: config.ServiceConfig{
 				EnvFile: apiEnvPath,
-				Env:     map[string]string{"NAME": "api"},
+				Env:     map[string]config.EnvValue{"NAME": {Value: "api"}},
 			},
 		},
 		{
@@ -722,7 +885,7 @@ func TestExportBatchEnvFilesWritesGlobalAndPerService(t *testing.T) {
 			assignedPort: 40101,
 			svc: config.ServiceConfig{
 				EnvFile: webEnvPath,
-				Env:     map[string]string{"MODE": "dev"},
+				Env:     map[string]config.EnvValue{"MODE": {Value: "dev"}},
 			},
 		},
 	}
@@ -731,7 +894,7 @@ func TestExportBatchEnvFilesWritesGlobalAndPerService(t *testing.T) {
 		"web": {"port": 40101, "PORT": 40101},
 	}
 
-	if err := exportBatchEnvFiles(cfg, allocations, portMap); err != nil {
+	if err := exportBatchEnvFiles(cfg, allocations, portMap, nil, nil); err != nil {
 		t.Fatalf("exportBatchEnvFiles: %v", err)
 	}
 
@@ -785,10 +948,10 @@ func TestExportBatchEnvFilesSkipsWhenNoEnvFile(t *testing.T) {
 			name:         "api",
 			svcGroup:     "test",
 			assignedPort: 40200,
-			svc:          config.ServiceConfig{Env: map[string]string{"X": "y"}},
+			svc:          config.ServiceConfig{Env: map[string]config.EnvValue{"X": {Value: "y"}}},
 		},
 	}
-	if err := exportBatchEnvFiles(cfg, allocations, envexpand.PortMap{}); err != nil {
+	if err := exportBatchEnvFiles(cfg, allocations, envexpand.PortMap{}, nil, nil); err != nil {
 		t.Fatalf("exportBatchEnvFiles: %v", err)
 	}
 	entries, _ := os.ReadDir(tmp)
@@ -805,7 +968,7 @@ func TestExportBatchEnvFilesPropagatesExpansionError(t *testing.T) {
 	cfg := &config.Config{
 		Global: config.GlobalConfig{
 			EnvFile: filepath.Join(tmp, "global.env"),
-			Env:     map[string]config.GlobalEnvValue{"X": {Ref: "nope.env.MISSING"}},
+			Env:     map[string]config.EnvValue{"X": {Ref: "nope.env.MISSING"}},
 		},
 	}
 	allocations := []batchAlloc{
@@ -813,14 +976,79 @@ func TestExportBatchEnvFilesPropagatesExpansionError(t *testing.T) {
 			name:         "api",
 			svcGroup:     "test",
 			assignedPort: 40300,
-			svc:          config.ServiceConfig{Env: map[string]string{"A": "b"}},
+			svc:          config.ServiceConfig{Env: map[string]config.EnvValue{"A": {Value: "b"}}},
 		},
 	}
-	err := exportBatchEnvFiles(cfg, allocations, envexpand.PortMap{"api": {"port": 40300, "PORT": 40300}})
+	err := exportBatchEnvFiles(cfg, allocations, envexpand.PortMap{"api": {"port": 40300, "PORT": 40300}}, nil, nil)
 	if err == nil {
 		t.Fatal("expected error from unresolved ref")
 	}
 	if !strings.Contains(err.Error(), "write global env file") {
 		t.Errorf("expected wrapped global env file error, got: %v", err)
 	}
+}
+
+// TestExportBatchEnvFilesUsesPerAllocResolver verifies that each allocation's
+// resolver is the one used to resolve its env — i.e. a service overriding its
+// `group:` resolves cross-repo refs against that override, not the workspace's
+// top-level group. Regression test for a bug where one shared resolver was
+// reused for every allocation.
+func TestExportBatchEnvFilesUsesPerAllocResolver(t *testing.T) {
+	allocations := []batchAlloc{
+		{
+			name:     "frontend",
+			svcGroup: "feature-x",
+			svc: config.ServiceConfig{
+				Env: map[string]config.EnvValue{
+					"BACKEND_PORT": {Ref: "@backend.api.port"},
+				},
+			},
+		},
+		{
+			name:     "infra",
+			svcGroup: "shared",
+			svc: config.ServiceConfig{
+				Env: map[string]config.EnvValue{
+					"BACKEND_PORT": {Ref: "@backend.api.port"},
+				},
+			},
+		},
+	}
+
+	allocResolvers := []envexpand.Resolver{
+		// frontend resolver: only finds the peer in feature-x.
+		func(repo, svc string, isEnv bool, key string) (string, bool) {
+			if repo == "backend" && svc == "api" && key == "port" {
+				return "8001", true
+			}
+			return "", false
+		},
+		// infra resolver: only finds the peer in shared.
+		func(repo, svc string, isEnv bool, key string) (string, bool) {
+			if repo == "backend" && svc == "api" && key == "port" {
+				return "9001", true
+			}
+			return "", false
+		},
+	}
+
+	if err := exportBatchEnvFiles(&config.Config{}, allocations, envexpand.PortMap{}, allocResolvers, nil); err != nil {
+		t.Fatalf("exportBatchEnvFiles: %v", err)
+	}
+
+	if !contains(allocations[0].env, "BACKEND_PORT=8001") {
+		t.Errorf("frontend env did not get its own resolver's value 8001; got: %v", allocations[0].env)
+	}
+	if !contains(allocations[1].env, "BACKEND_PORT=9001") {
+		t.Errorf("infra env did not get its own resolver's value 9001; got: %v", allocations[1].env)
+	}
+}
+
+func contains(env []string, want string) bool {
+	for _, e := range env {
+		if e == want {
+			return true
+		}
+	}
+	return false
 }

@@ -15,6 +15,16 @@ import (
 	"github.com/derekgould/multi-dev-proxy/internal/ports"
 )
 
+// scalarEnv builds a config.EnvValue map from a plain string map; every value
+// becomes a literal scalar entry (no `ref:` form).
+func scalarEnv(m map[string]string) map[string]config.EnvValue {
+	out := make(map[string]config.EnvValue, len(m))
+	for k, v := range m {
+		out[k] = config.EnvValue{Value: v}
+	}
+	return out
+}
+
 func TestSplitHookArgs(t *testing.T) {
 	tests := []struct {
 		in      string
@@ -100,7 +110,7 @@ func TestBuildEnv(t *testing.T) {
 	}
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
-			env, err := buildEnv(tt.configEnv, tt.ports, tt.portMap)
+			env, err := buildEnv(scalarEnv(tt.configEnv), tt.ports, tt.portMap)
 			if err != nil {
 				t.Fatalf("unexpected error: %v", err)
 			}
@@ -121,7 +131,7 @@ func TestBuildEnv(t *testing.T) {
 }
 
 func TestBuildEnvUnresolvedReferenceErrors(t *testing.T) {
-	_, err := buildEnv(map[string]string{"X": "${nope.port}"}, nil, envexpand.PortMap{})
+	_, err := buildEnv(scalarEnv(map[string]string{"X": "${nope.port}"}), nil, envexpand.PortMap{})
 	if err == nil {
 		t.Fatal("expected error for unresolved reference, got nil")
 	}
@@ -129,11 +139,11 @@ func TestBuildEnvUnresolvedReferenceErrors(t *testing.T) {
 
 func TestBuildEnvMultiPortWithCrossServiceRef(t *testing.T) {
 	env, err := buildEnv(
-		map[string]string{
+		scalarEnv(map[string]string{
 			"API_PORT":  "auto",
 			"AUTH_PORT": "auto",
 			"DB_URL":    "postgres://localhost:${db.port}/app",
-		},
+		}),
 		map[string]int{"API_PORT": 4001, "AUTH_PORT": 5001},
 		envexpand.PortMap{"db": {"port": 5432, "PORT": 5432}},
 	)
@@ -141,9 +151,9 @@ func TestBuildEnvMultiPortWithCrossServiceRef(t *testing.T) {
 		t.Fatalf("unexpected error: %v", err)
 	}
 	want := map[string]bool{
-		"API_PORT=4001":                              true,
-		"AUTH_PORT=5001":                             true,
-		"DB_URL=postgres://localhost:5432/app":       true,
+		"API_PORT=4001":                        true,
+		"AUTH_PORT=5001":                       true,
+		"DB_URL=postgres://localhost:5432/app": true,
 	}
 	for _, e := range env {
 		delete(want, e)
@@ -155,7 +165,7 @@ func TestBuildEnvMultiPortWithCrossServiceRef(t *testing.T) {
 
 func TestBuildEnvAutoWithoutAssignmentIsSkipped(t *testing.T) {
 	env, err := buildEnv(
-		map[string]string{"PORT": "auto"},
+		scalarEnv(map[string]string{"PORT": "auto"}),
 		map[string]int{},
 		envexpand.PortMap{},
 	)
@@ -185,7 +195,7 @@ func TestStartConfigServicesWritesEnvFiles(t *testing.T) {
 		PortRange: "30000-31000",
 		Global: config.GlobalConfig{
 			EnvFile: globalEnvPath,
-			Env: map[string]config.GlobalEnvValue{
+			Env: map[string]config.EnvValue{
 				"API_PORT": {Ref: "api.env.PORT"},
 				"API_URL":  {Value: "http://localhost:${api.PORT}"},
 				"WEB_MODE": {Ref: "web.env.MODE"},
@@ -196,12 +206,12 @@ func TestStartConfigServicesWritesEnvFiles(t *testing.T) {
 				Port:    30123,
 				Dir:     apiEnvDir,
 				EnvFile: apiEnvPath,
-				Env:     map[string]string{"NAME": "api", "MODE": "test"},
+				Env:     scalarEnv(map[string]string{"NAME": "api", "MODE": "test"}),
 			},
 			"web": {
 				Port:    30124,
 				EnvFile: webEnvPath,
-				Env:     map[string]string{"MODE": "dev"},
+				Env:     scalarEnv(map[string]string{"MODE": "dev"}),
 			},
 		},
 	}
@@ -259,7 +269,7 @@ func TestStartConfigServicesSkipsWhenNoEnvFile(t *testing.T) {
 	cfg := &config.Config{
 		PortRange: "30000-31000",
 		Services: map[string]config.ServiceConfig{
-			"api": {Port: 30125, Env: map[string]string{"X": "y"}},
+			"api": {Port: 30125, Env: scalarEnv(map[string]string{"X": "y"})},
 		},
 	}
 	o := New(cfg, "")
@@ -281,10 +291,10 @@ func TestStartConfigServicesGlobalRefErrorFailsFast(t *testing.T) {
 		PortRange: "30000-31000",
 		Global: config.GlobalConfig{
 			EnvFile: globalEnvPath,
-			Env:     map[string]config.GlobalEnvValue{"X": {Ref: "nope.env.MISSING"}},
+			Env:     map[string]config.EnvValue{"X": {Ref: "nope.env.MISSING"}},
 		},
 		Services: map[string]config.ServiceConfig{
-			"api": {Port: 30126, Env: map[string]string{"A": "b"}},
+			"api": {Port: 30126, Env: scalarEnv(map[string]string{"A": "b"})},
 		},
 	}
 	o := New(cfg, "")
@@ -578,10 +588,10 @@ func TestStartConfigServicesDispatchesUDPAllocator(t *testing.T) {
 		Services: map[string]config.ServiceConfig{
 			"infra": {
 				Command: "sleep 30",
-				Env: map[string]string{
+				Env: scalarEnv(map[string]string{
 					"TCP_PORT": "auto",
 					"UDP_PORT": "auto",
-				},
+				}),
 				Ports: []config.PortMapping{
 					{Env: "TCP_PORT"},
 					{Env: "UDP_PORT", Protocol: "udp"},
@@ -637,7 +647,7 @@ func TestStartMultiPortServiceSkipsRegistrationWhenProxyZero(t *testing.T) {
 		Services: map[string]config.ServiceConfig{
 			"infra": {
 				Command: "sleep 30",
-				Env:     map[string]string{"UDP_PORT": "auto"},
+				Env:     scalarEnv(map[string]string{"UDP_PORT": "auto"}),
 				Ports:   []config.PortMapping{{Env: "UDP_PORT", Protocol: "udp"}},
 			},
 		},

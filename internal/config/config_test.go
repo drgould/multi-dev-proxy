@@ -42,7 +42,7 @@ services:
 	if fe.Dir != expectedDir {
 		t.Errorf("frontend dir = %q, want %q", fe.Dir, expectedDir)
 	}
-	if fe.Env["NEXT_PUBLIC_API_URL"] != "https://localhost:4000" {
+	if fe.Env["NEXT_PUBLIC_API_URL"].Value != "https://localhost:4000" {
 		t.Errorf("frontend env = %v", fe.Env)
 	}
 }
@@ -504,18 +504,55 @@ func TestLoadGlobalEnvRejectsEmptyRef(t *testing.T) {
 	}
 }
 
-func TestLoadGlobalEnvRejectsExtraKeys(t *testing.T) {
+func TestLoadGlobalEnvAcceptsRefAndDefault(t *testing.T) {
 	dir := t.TempDir()
 	path := filepath.Join(dir, "mdp.yaml")
 	os.WriteFile(path, []byte(`
 global:
   env:
     FOO:
-      ref: api.env.PORT
-      default: 1234
+      ref: "@backend.api.port"
+      default: "1234"
 `), 0644)
-	if _, err := Load(path); err == nil {
-		t.Fatal("expected error for extra key, got nil")
+	cfg, err := Load(path)
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	got := cfg.Global.Env["FOO"]
+	if got.Ref != "@backend.api.port" {
+		t.Errorf("ref = %q", got.Ref)
+	}
+	if !got.HasDefault() || got.DefaultValue() != "1234" {
+		t.Errorf("default = %v / %q", got.HasDefault(), got.DefaultValue())
+	}
+}
+
+func TestLoadServiceEnvAcceptsRefAndDefault(t *testing.T) {
+	dir := t.TempDir()
+	path := filepath.Join(dir, "mdp.yaml")
+	os.WriteFile(path, []byte(`
+services:
+  frontend:
+    command: ./serve
+    env:
+      API_URL:
+        ref: "@backend.api.env.URL"
+        default: "http://localhost:3001"
+      PLAIN: "literal value"
+`), 0644)
+	cfg, err := Load(path)
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	fe := cfg.Services["frontend"]
+	if fe.Env["API_URL"].Ref != "@backend.api.env.URL" {
+		t.Errorf("ref = %q", fe.Env["API_URL"].Ref)
+	}
+	if fe.Env["API_URL"].DefaultValue() != "http://localhost:3001" {
+		t.Errorf("default = %q", fe.Env["API_URL"].DefaultValue())
+	}
+	if fe.Env["PLAIN"].Value != "literal value" {
+		t.Errorf("plain = %q", fe.Env["PLAIN"].Value)
 	}
 }
 

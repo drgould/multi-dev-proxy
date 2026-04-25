@@ -478,6 +478,27 @@ func (o *Orchestrator) groupsLocked() map[string][]string {
 	return groups
 }
 
+// findPeer searches every proxy's registry for a service matching the given
+// (group, repo, service) tuple. The service argument may be the bare service
+// name as it appears in mdp.yaml (e.g. "api") or the registered "<group>/<svc>"
+// form. Returns nil if no match exists.
+func (o *Orchestrator) findPeer(group, repo, service string) *registry.ServerEntry {
+	o.mu.RLock()
+	defer o.mu.RUnlock()
+	for _, pi := range o.proxies {
+		for _, entry := range pi.Registry.List() {
+			if entry.Group != group || entry.Repo != repo {
+				continue
+			}
+			if entry.Name == service || entry.Name == group+"/"+service {
+				e := entry
+				return &e
+			}
+		}
+	}
+	return nil
+}
+
 // SwitchGroup sets the default upstream on every proxy that has a service
 // in the named group.
 func (o *Orchestrator) SwitchGroup(groupName string) error {

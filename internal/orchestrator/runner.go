@@ -67,7 +67,7 @@ func (o *Orchestrator) StartConfigServices(ctx context.Context, group string) er
 			envProtocols := svc.EnvProtocols()
 			portAssignments := make(map[string]int)
 			for envName, value := range svc.Env {
-				if value == "auto" {
+				if value.Ref == "" && value.Value == "auto" {
 					finder := ports.FindFreePort
 					if envProtocols[envName] == "udp" {
 						finder = ports.FindFreeUDPPort
@@ -393,16 +393,33 @@ func (o *Orchestrator) launchProcess(ctx context.Context, name string, svc confi
 	return nil
 }
 
-func buildEnv(configEnv map[string]string, portAssignments map[string]int, portMap envexpand.PortMap) ([]string, error) {
+func buildEnv(configEnv map[string]config.EnvValue, portAssignments map[string]int, portMap envexpand.PortMap) ([]string, error) {
 	var env []string
-	for k, v := range configEnv {
-		if v == "auto" {
+	for k, entry := range configEnv {
+		if entry.Ref != "" {
+			val, err := envexpand.LookupRefWith(entry.Ref, entry.DefaultValue(), entry.HasDefault(), portMap, nil, nil)
+			if err != nil {
+				if entry.HasDefault() {
+					env = append(env, k+"="+entry.DefaultValue())
+					continue
+				}
+				if envexpand.IsCrossRepoBareRef(entry.Ref) {
+					// Cross-repo refs not supported in orchestrator-managed
+					// services (yet); silently omit when unresolved.
+					continue
+				}
+				return nil, fmt.Errorf("env %q: %w", k, err)
+			}
+			env = append(env, k+"="+val)
+			continue
+		}
+		if entry.Value == "auto" {
 			if port, ok := portAssignments[k]; ok {
 				env = append(env, k+"="+strconv.Itoa(port))
 			}
 			continue
 		}
-		expanded, err := envexpand.Expand(v, portMap)
+		expanded, err := envexpand.Expand(entry.Value, portMap)
 		if err != nil {
 			return nil, fmt.Errorf("env %q: %w", k, err)
 		}

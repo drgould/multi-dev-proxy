@@ -35,24 +35,38 @@ func WritePerService(path string, env []string) error {
 }
 
 // WriteGlobal resolves each entry in globalEnv against pm/em and writes the
-// result to path. `ref:` entries are resolved via envexpand.LookupRef; scalar
-// entries are run through envexpand.ExpandAll.
-func WriteGlobal(path string, globalEnv map[string]config.GlobalEnvValue, pm envexpand.PortMap, em envexpand.EnvMap) error {
+// result to path. Cross-repo @-references are not supported; use
+// WriteGlobalWith to enable them.
+func WriteGlobal(path string, globalEnv map[string]config.EnvValue, pm envexpand.PortMap, em envexpand.EnvMap) error {
+	return WriteGlobalWith(path, globalEnv, pm, em, nil)
+}
+
+// WriteGlobalWith is WriteGlobal with a Resolver for cross-repo @-references.
+// Unresolved cross-repo refs without a default are omitted from the output
+// (graceful degradation); unresolved local refs without a default error.
+func WriteGlobalWith(path string, globalEnv map[string]config.EnvValue, pm envexpand.PortMap, em envexpand.EnvMap, resolver envexpand.Resolver) error {
 	pairs := make(map[string]string, len(globalEnv))
 	for k, entry := range globalEnv {
-		var (
-			v   string
-			err error
-		)
 		if entry.Ref != "" {
-			v, err = envexpand.LookupRef(entry.Ref, pm, em)
-		} else {
-			v, err = envexpand.ExpandAll(entry.Value, pm, em)
+			val, err := envexpand.LookupRefWith(entry.Ref, entry.DefaultValue(), entry.HasDefault(), pm, em, resolver)
+			if err != nil {
+				if entry.HasDefault() {
+					pairs[k] = entry.DefaultValue()
+					continue
+				}
+				if envexpand.IsCrossRepoBareRef(entry.Ref) {
+					continue // omit unresolved cross-repo refs without default
+				}
+				return fmt.Errorf("global env %q: %w", k, err)
+			}
+			pairs[k] = val
+			continue
 		}
+		val, err := envexpand.ExpandWith(entry.Value, pm, em, resolver)
 		if err != nil {
 			return fmt.Errorf("global env %q: %w", k, err)
 		}
-		pairs[k] = v
+		pairs[k] = val
 	}
 	return writeFile(path, pairs)
 }

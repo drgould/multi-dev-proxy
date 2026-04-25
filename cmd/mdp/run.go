@@ -161,7 +161,7 @@ func runBatchMode(cmd *cobra.Command, controlPort int, groupFlag string) error {
 			envProtocols := svc.EnvProtocols()
 			portAssignments := make(map[string]int)
 			for envName, value := range svc.Env {
-				if value == "auto" {
+				if value.Ref == "" && value.Value == "auto" {
 					finder := ports.FindFreePort
 					if envProtocols[envName] == "udp" {
 						finder = ports.FindFreeUDPPort
@@ -195,7 +195,20 @@ func runBatchMode(cmd *cobra.Command, controlPort int, groupFlag string) error {
 		allocations = append(allocations, batchAlloc{name: name, svc: svc, svcGroup: svcGroup, assignedPort: assignedPort})
 	}
 
-	if err := exportBatchEnvFiles(cfg, allocations, portMap); err != nil {
+	repo := detect.DetectRepo(filepath.Dir(configPath))
+
+	// Build a resolver per allocation so that services with a `group:` override
+	// query the orchestrator under their own group, not the workspace's
+	// top-level group. The watcher already keys on a.svcGroup, so a mismatched
+	// startup resolver would silently produce stale env values that never
+	// self-correct.
+	allocResolvers := make([]envexpand.Resolver, len(allocations))
+	for i := range allocations {
+		allocResolvers[i] = newPeerResolver(client, controlURL, allocations[i].svcGroup)
+	}
+	globalResolver := newPeerResolver(client, controlURL, group)
+
+	if err := exportBatchEnvFiles(cfg, allocations, portMap, allocResolvers, globalResolver); err != nil {
 		return err
 	}
 
@@ -209,9 +222,9 @@ func runBatchMode(cmd *cobra.Command, controlPort int, groupFlag string) error {
 	states := depwait.NewStates(names)
 
 	rt := defaultBatchRuntime()
-	for _, a := range allocations {
+	for i := range allocations {
 		bt.wg.Add(1)
-		go launchBatchService(batchCtx, bt, client, controlURL, clientID, a, states, rt)
+		go launchBatchService(batchCtx, bt, client, controlURL, clientID, repo, &allocations[i], states, rt, portMap, allocResolvers[i])
 	}
 
 	slog.Info("batch services started", "group", group)
@@ -267,14 +280,20 @@ type batchAlloc struct {
 // service's declared dependencies, registers upstreams with the orchestrator,
 // starts the process, polls TCP readiness, and signals its depwait.State.
 // Runs inside bt.wg so shutdown blocks until each service's cmd exits.
+//
+// If the service references cross-repo peers via @<repo>.<svc>... refs, this
+// function also supervises peer state and restarts the cmd whenever a watched
+// peer's port or env value changes.
 func launchBatchService(
 	ctx context.Context,
 	bt *batchTracker,
 	client *http.Client,
-	controlURL, clientID string,
-	a batchAlloc,
+	controlURL, clientID, repo string,
+	a *batchAlloc,
 	states map[string]*depwait.State,
 	rt batchRuntime,
+	portMap envexpand.PortMap,
+	resolver envexpand.Resolver,
 ) {
 	defer bt.wg.Done()
 	state := states[a.name]
@@ -335,13 +354,16 @@ func launchBatchService(
 
 	registerAll := func() ([]string, error) {
 		registered := make([]string, 0, len(registrations))
+		envMap := envSliceToMap(a.env)
 		for _, r := range registrations {
 			payload := map[string]any{
 				"name":      r.serverName,
 				"port":      r.port,
 				"proxyPort": r.proxyPort,
 				"group":     a.svcGroup,
+				"repo":      repo,
 				"clientID":  clientID,
+				"env":       envMap,
 			}
 			if a.svc.Scheme != "" {
 				payload["scheme"] = a.svc.Scheme
@@ -467,12 +489,11 @@ func launchBatchService(
 		}
 	}
 
-	// Signal dependents now; the rest of this goroutine just drains the cmd.
+	// Signal dependents now; the rest of this goroutine just drains the cmd
+	// and (if this service has cross-repo peers) restarts it on peer change.
 	signalReady()
 
-	if waitErr := cmd.Wait(); waitErr != nil {
-		slog.Error("service process exited", "name", a.name, "command", a.svc.Command, "err", waitErr)
-	}
+	superviseProcess(ctx, cmd, bt, client, controlURL, a, registered, registerAll, portMap, resolver, pw, pwErr)
 
 	for i, raw := range a.svc.Shutdown {
 		parts, err := orchestrator.SplitHookArgs(raw)
@@ -486,7 +507,7 @@ func launchBatchService(
 		slog.Info("service hook", "name", a.name, "phase", "shutdown", "step", i+1, "cmd", raw)
 		hCtx, hCancel := context.WithTimeout(context.Background(), shutdownHookTimeout)
 		h := exec.CommandContext(hCtx, parts[0], parts[1:]...)
-		h.Env = append(os.Environ(), env...)
+		h.Env = append(os.Environ(), a.env...)
 		if a.svc.Dir != "" {
 			h.Dir = a.svc.Dir
 		}
@@ -510,20 +531,133 @@ func launchBatchService(
 
 const shutdownHookTimeout = 30 * time.Second
 
-// buildBatchEnv builds the environment for a batch-mode service.
-func buildBatchEnv(a batchAlloc, portMap envexpand.PortMap) ([]string, error) {
+// peerWatchInterval is how often supervisor goroutines poll the orchestrator
+// for cross-repo peer state changes. Package-level so tests can shorten it.
+var peerWatchInterval = 2 * time.Second
+
+// superviseProcess waits for cmd to exit, restarting it whenever a watched
+// cross-repo peer's port or env value changes. Returns when the cmd exits
+// without a peer-triggered restart, or when ctx is cancelled.
+func superviseProcess(
+	ctx context.Context,
+	cmd *exec.Cmd,
+	bt *batchTracker,
+	client *http.Client,
+	controlURL string,
+	a *batchAlloc,
+	registered []string,
+	registerAll func() ([]string, error),
+	portMap envexpand.PortMap,
+	resolver envexpand.Resolver,
+	pw, pwErr *prefixWriter,
+) {
+	peerRefs := extractPeerRefs(a.svc)
+	// Seed peerRefs with the values we resolved at startup so the watcher
+	// only fires on a *change*, not on first sight.
+	if len(peerRefs) > 0 {
+		_, peerRefs = refreshPeerRefs(client, controlURL, a.svcGroup, peerRefs)
+	}
+
+	for {
+		watchCtx, watchCancel := context.WithCancel(ctx)
+		peerCh := make(chan []peerRef, 1)
+		if len(peerRefs) > 0 {
+			go watchPeerRefs(watchCtx, client, controlURL, a.svcGroup, peerRefs, peerWatchInterval, peerCh)
+		}
+
+		cmdExit := make(chan error, 1)
+		go func(c *exec.Cmd) { cmdExit <- c.Wait() }(cmd)
+
+		var restart bool
+		select {
+		case <-ctx.Done():
+			watchCancel()
+			cmd.Process.Signal(syscall.SIGTERM)
+			<-cmdExit
+		case waitErr := <-cmdExit:
+			watchCancel()
+			if waitErr != nil {
+				slog.Error("service process exited", "name", a.name, "command", a.svc.Command, "err", waitErr)
+			}
+		case updated := <-peerCh:
+			watchCancel()
+			slog.Info("peer changed; restarting service", "name", a.name)
+			cmd.Process.Signal(syscall.SIGTERM)
+			select {
+			case <-cmdExit:
+			case <-time.After(5 * time.Second):
+				cmd.Process.Kill()
+				<-cmdExit
+			}
+			peerRefs = updated
+			restart = true
+		}
+
+		if !restart {
+			return
+		}
+
+		newEnv, err := buildBatchEnv(*a, portMap, resolver)
+		if err != nil {
+			slog.Error("rebuild env failed; not restarting", "name", a.name, "err", err)
+			return
+		}
+		a.env = newEnv
+		if a.svc.EnvFile != "" {
+			if err := envexport.WritePerService(a.svc.EnvFile, newEnv); err != nil {
+				slog.Warn("rewrite env file failed", "name", a.name, "err", err)
+			}
+		}
+		if _, err := registerAll(); err != nil {
+			slog.Error("re-register failed; not restarting", "name", a.name, "err", err)
+			return
+		}
+		newCmd, err := startBatchCommand(bt, a.svc.Command, a.svc.Dir, newEnv, pw, pwErr)
+		if err != nil {
+			slog.Error("restart failed", "name", a.name, "err", err)
+			return
+		}
+		for _, sn := range registered {
+			updatePIDWithOrchestrator(controlURL, sn, newCmd.Process.Pid)
+		}
+		cmd = newCmd
+	}
+}
+
+// buildBatchEnv builds the environment for a batch-mode service. resolver is
+// invoked for cross-repo @-references; pass nil to forbid them (any @ ref
+// without an inline default will then error).
+func buildBatchEnv(a batchAlloc, portMap envexpand.PortMap, resolver envexpand.Resolver) ([]string, error) {
 	env := []string{"MDP=1"}
 	if len(a.svc.Ports) == 0 && a.assignedPort > 0 {
 		env = append(env, fmt.Sprintf("PORT=%d", a.assignedPort))
 	}
-	for k, v := range a.svc.Env {
-		if v == "auto" {
+	for k, entry := range a.svc.Env {
+		if entry.Ref != "" {
+			val, err := envexpand.LookupRefWith(entry.Ref, entry.DefaultValue(), entry.HasDefault(), portMap, nil, resolver)
+			if err != nil {
+				if entry.HasDefault() {
+					env = append(env, k+"="+entry.DefaultValue())
+					continue
+				}
+				if envexpand.IsCrossRepoBareRef(entry.Ref) {
+					// Cross-repo peer not running and no default — omit
+					// (graceful degradation per user spec).
+					slog.Warn("peer ref unresolved; omitting env var", "service", a.name, "key", k, "ref", entry.Ref)
+					continue
+				}
+				return nil, fmt.Errorf("env %s.%s: %w", a.name, k, err)
+			}
+			env = append(env, k+"="+val)
+			continue
+		}
+		if entry.Value == "auto" {
 			if port, ok := a.portAssignments[k]; ok {
 				env = append(env, fmt.Sprintf("%s=%d", k, port))
 			}
 			continue
 		}
-		expanded, err := envexpand.Expand(v, portMap)
+		expanded, err := envexpand.ExpandWith(entry.Value, portMap, nil, resolver)
 		if err != nil {
 			return nil, fmt.Errorf("env expansion for %s.%s: %w", a.name, k, err)
 		}
@@ -535,10 +669,20 @@ func buildBatchEnv(a batchAlloc, portMap envexpand.PortMap) ([]string, error) {
 // exportBatchEnvFiles builds each allocation's env up front and writes the
 // global + per-service env files before any service launches. Env is stored
 // on allocations[i].env for the launch goroutine to consume.
-func exportBatchEnvFiles(cfg *config.Config, allocations []batchAlloc, portMap envexpand.PortMap) error {
+//
+// allocResolvers[i] is the cross-repo @-ref resolver for allocations[i] (built
+// from that allocation's own group so a per-service `group:` override resolves
+// against the right peers). globalResolver is used for global env entries,
+// which sit at the workspace level and use the top-level group. Either may be
+// nil to disable cross-repo resolution.
+func exportBatchEnvFiles(cfg *config.Config, allocations []batchAlloc, portMap envexpand.PortMap, allocResolvers []envexpand.Resolver, globalResolver envexpand.Resolver) error {
 	envMap := envexpand.EnvMap{}
 	for i, a := range allocations {
-		env, err := buildBatchEnv(a, portMap)
+		var r envexpand.Resolver
+		if i < len(allocResolvers) {
+			r = allocResolvers[i]
+		}
+		env, err := buildBatchEnv(a, portMap, r)
 		if err != nil {
 			return err
 		}
@@ -546,7 +690,7 @@ func exportBatchEnvFiles(cfg *config.Config, allocations []batchAlloc, portMap e
 		envMap[a.name] = envSliceToMap(env)
 	}
 	if cfg.Global.EnvFile != "" {
-		if err := envexport.WriteGlobal(cfg.Global.EnvFile, cfg.Global.Env, portMap, envMap); err != nil {
+		if err := envexport.WriteGlobalWith(cfg.Global.EnvFile, cfg.Global.Env, portMap, envMap, globalResolver); err != nil {
 			return fmt.Errorf("write global env file: %w", err)
 		}
 	}
@@ -596,24 +740,24 @@ func startBatchCommand(bt *batchTracker, command, dir string, env []string, stdo
 }
 
 var serviceColors = []string{
-	"1;34",  // blue
-	"1;32",  // green
-	"1;35",  // purple
-	"1;33",  // yellow
-	"1;31",  // red
-	"0;96",  // teal
-	"1;95",  // pink
-	"1;36",  // cyan
-	"0;93",  // bright yellow
-	"0;92",  // bright green
-	"0;94",  // bright blue
-	"0;91",  // bright red
-	"0;95",  // bright magenta
-	"0;33",  // dark yellow / orange
-	"0;35",  // dark magenta
-	"0;36",  // dark cyan
-	"0;34",  // dark blue
-	"0;32",  // dark green
+	"1;34",     // blue
+	"1;32",     // green
+	"1;35",     // purple
+	"1;33",     // yellow
+	"1;31",     // red
+	"0;96",     // teal
+	"1;95",     // pink
+	"1;36",     // cyan
+	"0;93",     // bright yellow
+	"0;92",     // bright green
+	"0;94",     // bright blue
+	"0;91",     // bright red
+	"0;95",     // bright magenta
+	"0;33",     // dark yellow / orange
+	"0;35",     // dark magenta
+	"0;36",     // dark cyan
+	"0;34",     // dark blue
+	"0;32",     // dark green
 	"38;5;208", // orange 256-color
 	"38;5;171", // orchid
 	"38;5;81",  // sky blue

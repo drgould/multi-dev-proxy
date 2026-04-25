@@ -18,15 +18,16 @@ type ServerEntry struct {
 	TLSKeyPath          string // optional: key file path forwarded by mdp run
 	ClientID            string // identifies the mdp run process that registered this server
 	RegisteredAt        time.Time
-	ConsecutiveFailures int          // TCP liveness check failure counter (PID=0 servers only)
-	HealthCheck         func() bool  // optional; nil falls back to TCPCheck(Port)
+	ConsecutiveFailures int               // TCP liveness check failure counter (PID=0 servers only)
+	HealthCheck         func() bool       // optional; nil falls back to TCPCheck(Port)
+	Env                 map[string]string // resolved env vars exposed for cross-repo @-references
 }
 
 // Registry holds all registered dev servers in memory.
 type Registry struct {
-	mu             sync.RWMutex
-	servers        map[string]*ServerEntry
-	defaultServer  string
+	mu            sync.RWMutex
+	servers       map[string]*ServerEntry
+	defaultServer string
 }
 
 // New creates a new empty Registry.
