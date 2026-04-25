@@ -22,65 +22,94 @@ type GlobalConfig struct {
 	// EnvFile, if non-empty, is a path where an aggregate .env file is written
 	// at startup. Values are resolved from Env (below).
 	EnvFile string `yaml:"env_file"`
-	// Env is an explicit map of env vars to write to EnvFile. Values may be
-	// scalar strings (supporting ${svc.key} and ${svc.env.VAR} interpolation)
-	// or mappings with a single `ref:` key that pass through another service's
-	// env var or port without string-wrapping it.
-	Env map[string]GlobalEnvValue `yaml:"env"`
+	// Env is an explicit map of env vars to write to EnvFile. See EnvValue.
+	Env map[string]EnvValue `yaml:"env"`
 }
 
-// GlobalEnvValue is either a literal value (possibly with ${...} refs) or a
-// pass-through reference to another service's env var or port.
-type GlobalEnvValue struct {
-	Value string // set when the YAML entry is a scalar string
-	Ref   string // set when the YAML entry is a mapping with `ref:`
+// EnvValue is one entry in either a global or per-service `env:` map.
+//
+// In YAML it accepts two shapes:
+//   - a scalar string — placed in Value and treated as a literal (with ${...}
+//     interpolation applied at resolve time)
+//   - a mapping with `ref:` and optional `default:` keys — placed in Ref
+//     (a bare reference like "svc.port" or "@repo.svc.env.VAR") and Default
+//     (used as a fallback when ref cannot be resolved)
+type EnvValue struct {
+	Value   string  // set when the YAML entry is a scalar string
+	Ref     string  // set when the YAML entry is a mapping with `ref:`
+	Default *string // optional fallback used when Ref cannot be resolved (nil = absent)
 }
 
-// UnmarshalYAML accepts either a scalar string or a mapping with a single
-// `ref:` key. Any other shape is a parse error so typos surface early.
-func (g *GlobalEnvValue) UnmarshalYAML(node *yaml.Node) error {
+// UnmarshalYAML accepts either a scalar string or a mapping with `ref:` and
+// optional `default:` keys. Any other shape is a parse error so typos surface
+// early.
+func (g *EnvValue) UnmarshalYAML(node *yaml.Node) error {
 	switch node.Kind {
 	case yaml.ScalarNode:
 		g.Value = node.Value
 		return nil
 	case yaml.MappingNode:
-		if len(node.Content) != 2 {
-			return fmt.Errorf("line %d: global env mapping must have exactly one key (`ref`)", node.Line)
+		var sawRef bool
+		for i := 0; i+1 < len(node.Content); i += 2 {
+			keyNode := node.Content[i]
+			valNode := node.Content[i+1]
+			switch keyNode.Value {
+			case "ref":
+				var refStr string
+				if err := valNode.Decode(&refStr); err != nil {
+					return fmt.Errorf("line %d: `ref:` value must be a string: %w", valNode.Line, err)
+				}
+				if refStr == "" {
+					return fmt.Errorf("line %d: `ref:` value must not be empty", valNode.Line)
+				}
+				g.Ref = refStr
+				sawRef = true
+			case "default":
+				var defStr string
+				if err := valNode.Decode(&defStr); err != nil {
+					return fmt.Errorf("line %d: `default:` value must be a string: %w", valNode.Line, err)
+				}
+				g.Default = &defStr
+			default:
+				return fmt.Errorf("line %d: unknown key %q in env entry (only `ref` and `default` are supported)", keyNode.Line, keyNode.Value)
+			}
 		}
-		key := node.Content[0].Value
-		if key != "ref" {
-			return fmt.Errorf("line %d: unknown key %q in global env entry (only `ref` is supported)", node.Line, key)
+		if !sawRef {
+			return fmt.Errorf("line %d: env mapping must include `ref:`", node.Line)
 		}
-		val := node.Content[1]
-		var refStr string
-		if err := val.Decode(&refStr); err != nil {
-			return fmt.Errorf("line %d: `ref:` value must be a string: %w", val.Line, err)
-		}
-		if refStr == "" {
-			return fmt.Errorf("line %d: `ref:` value must not be empty", val.Line)
-		}
-		g.Ref = refStr
 		return nil
 	default:
-		return fmt.Errorf("line %d: global env entry must be a string or mapping with `ref:`", node.Line)
+		return fmt.Errorf("line %d: env entry must be a string or mapping with `ref:`", node.Line)
 	}
+}
+
+// HasDefault reports whether a fallback was explicitly set in YAML.
+func (g EnvValue) HasDefault() bool { return g.Default != nil }
+
+// DefaultValue returns the fallback string, or "" if no default was set.
+// Use HasDefault to distinguish the absent case.
+func (g EnvValue) DefaultValue() string {
+	if g.Default == nil {
+		return ""
+	}
+	return *g.Default
 }
 
 // ServiceConfig defines a single service in the config file.
 type ServiceConfig struct {
-	Command  string            `yaml:"command"`
-	Setup    []string          `yaml:"setup"`    // commands run sequentially before Command
-	Shutdown []string          `yaml:"shutdown"` // commands run sequentially after Command exits
-	Dir      string            `yaml:"dir"`
-	Proxy    int               `yaml:"proxy"`
-	Port     int               `yaml:"port"`
-	Group    string            `yaml:"group"`
-	Scheme   string            `yaml:"scheme"`   // "http" or "https"; defaults to "http"
-	TLSCert  string            `yaml:"tls_cert"` // path to TLS certificate file
-	TLSKey   string            `yaml:"tls_key"`  // path to TLS key file
-	EnvFile  string            `yaml:"env_file"` // optional path for exported .env file
-	Env      map[string]string `yaml:"env"`
-	Ports    []PortMapping     `yaml:"ports"`
+	Command  string              `yaml:"command"`
+	Setup    []string            `yaml:"setup"`    // commands run sequentially before Command
+	Shutdown []string            `yaml:"shutdown"` // commands run sequentially after Command exits
+	Dir      string              `yaml:"dir"`
+	Proxy    int                 `yaml:"proxy"`
+	Port     int                 `yaml:"port"`
+	Group    string              `yaml:"group"`
+	Scheme   string              `yaml:"scheme"`   // "http" or "https"; defaults to "http"
+	TLSCert  string              `yaml:"tls_cert"` // path to TLS certificate file
+	TLSKey   string              `yaml:"tls_key"`  // path to TLS key file
+	EnvFile  string              `yaml:"env_file"` // optional path for exported .env file
+	Env      map[string]EnvValue `yaml:"env"`
+	Ports    []PortMapping       `yaml:"ports"`
 
 	// DependsOn names other services that must be ready before this service
 	// starts. Names must match keys in the top-level services map.

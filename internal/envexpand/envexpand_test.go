@@ -282,10 +282,10 @@ func TestExpandFirstUnresolvedReferenceWins(t *testing.T) {
 func TestExpandRefAtStartMiddleEnd(t *testing.T) {
 	pm := PortMap{"svc": {"port": 7777, "PORT": 7777}}
 	cases := map[string]string{
-		"${svc.port} end":       "7777 end",
-		"start ${svc.port}":     "start 7777",
-		"a ${svc.port} b":       "a 7777 b",
-		"${svc.port}":           "7777",
+		"${svc.port} end":   "7777 end",
+		"start ${svc.port}": "start 7777",
+		"a ${svc.port} b":   "a 7777 b",
+		"${svc.port}":       "7777",
 	}
 	for in, want := range cases {
 		t.Run(in, func(t *testing.T) {
@@ -318,5 +318,162 @@ func TestExpandMultiPortNoPortKeyErrors(t *testing.T) {
 	_, err := Expand("${infra.port}", pm)
 	if err == nil {
 		t.Fatal("expected error: multi-port service with no 'port' or 'PORT' entry should not resolve ${svc.port}")
+	}
+}
+
+func TestExpandWithCrossRepoRefs(t *testing.T) {
+	resolver := func(repo, svc string, isEnv bool, key string) (string, bool) {
+		// Stand-in for the orchestrator: returns canned data for repo "backend"
+		// and rejects everything else.
+		if repo != "backend" {
+			return "", false
+		}
+		if svc == "api" && !isEnv && key == "port" {
+			return "9999", true
+		}
+		if svc == "api" && isEnv && key == "AUTH_TOKEN" {
+			return "secret-xyz", true
+		}
+		return "", false
+	}
+
+	tests := []struct {
+		name string
+		in   string
+		want string
+	}{
+		{"@repo.svc.port", "${@backend.api.port}", "9999"},
+		{"@repo.svc.env.VAR", "token=${@backend.api.env.AUTH_TOKEN}", "token=secret-xyz"},
+		{"missing peer with default", "${@backend.unknown.port:-3001}", "3001"},
+		{"missing peer empty default", "${@unknown.x.port:-}", ""},
+		{"mixed local and remote", "L=${api.port} R=${@backend.api.port}", "L=8080 R=9999"},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			got, err := ExpandWith(tt.in, PortMap{"api": {"PORT": 8080}}, EnvMap{}, resolver)
+			if err != nil {
+				t.Fatalf("unexpected error: %v", err)
+			}
+			if got != tt.want {
+				t.Errorf("got %q, want %q", got, tt.want)
+			}
+		})
+	}
+}
+
+func TestExpandWithCrossRepoUnresolvedErrors(t *testing.T) {
+	resolver := func(repo, svc string, isEnv bool, key string) (string, bool) {
+		return "", false
+	}
+	_, err := ExpandWith("${@backend.api.port}", PortMap{}, EnvMap{}, resolver)
+	if err == nil {
+		t.Fatal("expected error for unresolved cross-repo ref without default")
+	}
+	if !strings.Contains(err.Error(), "peer not found") {
+		t.Errorf("unexpected error: %v", err)
+	}
+}
+
+func TestExpandWithCrossRepoNoResolverErrors(t *testing.T) {
+	_, err := ExpandWith("${@backend.api.port}", PortMap{}, EnvMap{}, nil)
+	if err == nil {
+		t.Fatal("expected error: nil resolver should reject @-refs without default")
+	}
+	if !strings.Contains(err.Error(), "cross-repo") {
+		t.Errorf("unexpected error: %v", err)
+	}
+}
+
+func TestExpandLocalRefDefault(t *testing.T) {
+	got, err := Expand("${missing.port:-1234}", PortMap{})
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if got != "1234" {
+		t.Errorf("got %q, want 1234", got)
+	}
+}
+
+func TestExpandAllLocalEnvDefault(t *testing.T) {
+	got, err := ExpandAll("${api.env.MISSING:-fallback}", PortMap{}, EnvMap{"api": {}})
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if got != "fallback" {
+		t.Errorf("got %q, want fallback", got)
+	}
+}
+
+func TestLookupRefWithCrossRepo(t *testing.T) {
+	resolver := func(repo, svc string, isEnv bool, key string) (string, bool) {
+		if repo == "backend" && svc == "api" && !isEnv && key == "port" {
+			return "9999", true
+		}
+		return "", false
+	}
+	got, err := LookupRefWith("@backend.api.port", "", false, PortMap{}, EnvMap{}, resolver)
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if got != "9999" {
+		t.Errorf("got %q, want 9999", got)
+	}
+}
+
+func TestLookupRefWithFallback(t *testing.T) {
+	resolver := func(repo, svc string, isEnv bool, key string) (string, bool) {
+		return "", false
+	}
+	got, err := LookupRefWith("@backend.api.port", "3001", true, PortMap{}, EnvMap{}, resolver)
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if got != "3001" {
+		t.Errorf("got %q, want 3001 (fallback)", got)
+	}
+}
+
+func TestLookupRefRejectsInvalid(t *testing.T) {
+	cases := []string{"@.svc.port", "@repo.svc", "@repo..port", "@repo.svc."}
+	for _, in := range cases {
+		t.Run(in, func(t *testing.T) {
+			if _, err := LookupRefWith(in, "", false, PortMap{}, EnvMap{}, nil); err == nil {
+				t.Errorf("expected error for %q", in)
+			}
+		})
+	}
+}
+
+func TestHasCrossRepoRef(t *testing.T) {
+	cases := map[string]bool{
+		"plain":                     false,
+		"${api.port}":               false,
+		"${api.env.VAR}":            false,
+		"${@backend.api.port}":      true,
+		"L=${api.port} R=${@b.x.y}": true,
+		"${@b.x.y:-default}":        true,
+	}
+	for in, want := range cases {
+		t.Run(in, func(t *testing.T) {
+			if got := HasCrossRepoRef(in); got != want {
+				t.Errorf("HasCrossRepoRef(%q) = %v, want %v", in, got, want)
+			}
+		})
+	}
+}
+
+func TestIsCrossRepoBareRef(t *testing.T) {
+	cases := map[string]bool{
+		"api.port":             false,
+		"api.env.VAR":          false,
+		"@backend.api.port":    true,
+		"@backend.api.env.VAR": true,
+	}
+	for in, want := range cases {
+		t.Run(in, func(t *testing.T) {
+			if got := IsCrossRepoBareRef(in); got != want {
+				t.Errorf("IsCrossRepoBareRef(%q) = %v, want %v", in, got, want)
+			}
+		})
 	}
 }

@@ -71,7 +71,7 @@ func TestWriteGlobalResolvesRefsAndInterpolations(t *testing.T) {
 		"api": {"PORT": "8080", "NAME": "api"},
 		"db":  {"DB_PORT": "5432"},
 	}
-	global := map[string]config.GlobalEnvValue{
+	global := map[string]config.EnvValue{
 		"API_PORT": {Ref: "api.env.PORT"},
 		"DB_PORT":  {Ref: "db.env.DB_PORT"},
 		"API_URL":  {Value: "http://localhost:${api.PORT}"},
@@ -97,7 +97,7 @@ func TestWriteGlobalResolvesRefsAndInterpolations(t *testing.T) {
 func TestWriteGlobalFailsOnUnresolvedRef(t *testing.T) {
 	dir := t.TempDir()
 	path := filepath.Join(dir, ".env")
-	global := map[string]config.GlobalEnvValue{
+	global := map[string]config.EnvValue{
 		"FOO": {Ref: "nope.env.MISSING"},
 	}
 	err := WriteGlobal(path, global, envexpand.PortMap{}, envexpand.EnvMap{})
@@ -112,7 +112,7 @@ func TestWriteGlobalFailsOnUnresolvedRef(t *testing.T) {
 func TestWriteGlobalFailsOnBadInterpolation(t *testing.T) {
 	dir := t.TempDir()
 	path := filepath.Join(dir, ".env")
-	global := map[string]config.GlobalEnvValue{
+	global := map[string]config.EnvValue{
 		"FOO": {Value: "${nope.port}"},
 	}
 	err := WriteGlobal(path, global, envexpand.PortMap{}, envexpand.EnvMap{})

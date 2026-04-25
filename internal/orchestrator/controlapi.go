@@ -40,6 +40,7 @@ func (c *ControlAPI) Handler() http.Handler {
 	mux.HandleFunc("GET /__mdp/groups", c.handleListGroups)
 	mux.HandleFunc("POST /__mdp/groups/{name}/switch", c.handleSwitchGroup)
 	mux.HandleFunc("GET /__mdp/services", c.handleListServices)
+	mux.HandleFunc("GET /__mdp/peers", c.handlePeerLookup)
 	mux.HandleFunc("POST /__mdp/heartbeat", c.handleHeartbeat)
 	mux.HandleFunc("POST /__mdp/disconnect", c.handleDisconnect)
 	mux.HandleFunc("GET /__mdp/shutdown/watch", c.handleShutdownWatch)
@@ -85,11 +86,11 @@ func (c *ControlAPI) handleHealth(w http.ResponseWriter, r *http.Request) {
 func (c *ControlAPI) handleListProxies(w http.ResponseWriter, r *http.Request) {
 	proxies := c.orch.ListProxies()
 	type proxyJSON struct {
-		Port       int                      `json:"port"`
-		Label      string                   `json:"label"`
-		CookieName string                   `json:"cookieName"`
-		Default    string                   `json:"default"`
-		Servers    []map[string]any         `json:"servers"`
+		Port       int              `json:"port"`
+		Label      string           `json:"label"`
+		CookieName string           `json:"cookieName"`
+		Default    string           `json:"default"`
+		Servers    []map[string]any `json:"servers"`
 	}
 	result := make([]proxyJSON, 0, len(proxies))
 	for _, pi := range proxies {
@@ -115,16 +116,17 @@ func (c *ControlAPI) handleListProxies(w http.ResponseWriter, r *http.Request) {
 }
 
 type controlRegisterBody struct {
-	Name        string `json:"name"`
-	Port        int    `json:"port"`
-	PID         int    `json:"pid"`
-	ProxyPort   int    `json:"proxyPort"`
-	Group       string `json:"group"`
-	Repo        string `json:"repo"`
-	Scheme      string `json:"scheme"`
-	TLSCertPath string `json:"tlsCertPath"`
-	TLSKeyPath  string `json:"tlsKeyPath"`
-	ClientID    string `json:"clientID"`
+	Name        string            `json:"name"`
+	Port        int               `json:"port"`
+	PID         int               `json:"pid"`
+	ProxyPort   int               `json:"proxyPort"`
+	Group       string            `json:"group"`
+	Repo        string            `json:"repo"`
+	Scheme      string            `json:"scheme"`
+	TLSCertPath string            `json:"tlsCertPath"`
+	TLSKeyPath  string            `json:"tlsKeyPath"`
+	ClientID    string            `json:"clientID"`
+	Env         map[string]string `json:"env"`
 }
 
 func (c *ControlAPI) handleRegister(w http.ResponseWriter, r *http.Request) {
@@ -173,6 +175,7 @@ func (c *ControlAPI) handleRegister(w http.ResponseWriter, r *http.Request) {
 		TLSCertPath: body.TLSCertPath,
 		TLSKeyPath:  body.TLSKeyPath,
 		ClientID:    body.ClientID,
+		Env:         body.Env,
 	}
 	if err := c.orch.Register(body.ProxyPort, entry); err != nil {
 		writeJSON(w, http.StatusInternalServerError, map[string]string{"error": err.Error()})
@@ -283,6 +286,28 @@ func (c *ControlAPI) handleListServices(w http.ResponseWriter, r *http.Request) 
 		})
 	}
 	writeJSON(w, http.StatusOK, result)
+}
+
+// handlePeerLookup answers cross-repo @-references by returning the matching
+// service's port and exposed env vars. Lookup keys are (group, repo, service);
+// service may be the bare service name or "<group>/<service>" form (the way
+// it was registered by mdp run).
+func (c *ControlAPI) handlePeerLookup(w http.ResponseWriter, r *http.Request) {
+	q := r.URL.Query()
+	group, repo, service := q.Get("group"), q.Get("repo"), q.Get("service")
+	if group == "" || repo == "" || service == "" {
+		writeJSON(w, http.StatusBadRequest, map[string]string{"error": "group, repo, and service query params are required"})
+		return
+	}
+	entry := c.orch.findPeer(group, repo, service)
+	if entry == nil {
+		writeJSON(w, http.StatusNotFound, map[string]string{"error": "peer not found"})
+		return
+	}
+	writeJSON(w, http.StatusOK, map[string]any{
+		"port": entry.Port,
+		"env":  entry.Env,
+	})
 }
 
 func (c *ControlAPI) handleHeartbeat(w http.ResponseWriter, r *http.Request) {

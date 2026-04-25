@@ -129,14 +129,14 @@ func TestControlAPIRegisterAtomicOnTLSFailure(t *testing.T) {
 	o, handler := setupControlAPI(t)
 
 	payload := map[string]any{
-		"name":         "api/main",
-		"port":         5001,
-		"pid":          300,
-		"proxyPort":    3000,
-		"group":        "dev",
-		"scheme":       "https",
-		"tlsCertPath":  "/nonexistent/cert.pem",
-		"tlsKeyPath":   "/nonexistent/key.pem",
+		"name":        "api/main",
+		"port":        5001,
+		"pid":         300,
+		"proxyPort":   3000,
+		"group":       "dev",
+		"scheme":      "https",
+		"tlsCertPath": "/nonexistent/cert.pem",
+		"tlsKeyPath":  "/nonexistent/key.pem",
 	}
 	body, _ := json.Marshal(payload)
 	req := httptest.NewRequest("POST", "/__mdp/register", bytes.NewReader(body))
@@ -323,6 +323,92 @@ func TestControlAPIShutdown(t *testing.T) {
 	json.NewDecoder(rec.Body).Decode(&body)
 	if body["ok"] != true {
 		t.Error("expected ok: true")
+	}
+}
+
+func TestControlAPIPeerLookup(t *testing.T) {
+	o := New(&config.Config{}, "")
+	o.mu.Lock()
+	reg := registry.New()
+	reg.Register(&registry.ServerEntry{
+		Name:  "dev/api",
+		Repo:  "backend",
+		Group: "dev",
+		Port:  9001,
+		Env:   map[string]string{"AUTH_TOKEN": "secret-xyz", "MODE": "test"},
+	})
+	o.proxies[4000] = &ProxyInstance{Port: 4000, Registry: reg, CookieName: "__mdp_upstream_4000", cancel: func() {}}
+	o.mu.Unlock()
+	handler := NewControlAPI(o, nil).Handler()
+
+	t.Run("port and env lookup", func(t *testing.T) {
+		req := httptest.NewRequest("GET", "/__mdp/peers?group=dev&repo=backend&service=api", nil)
+		rec := httptest.NewRecorder()
+		handler.ServeHTTP(rec, req)
+		if rec.Code != http.StatusOK {
+			t.Fatalf("expected 200, got %d; body: %s", rec.Code, rec.Body.String())
+		}
+		var body map[string]any
+		json.NewDecoder(rec.Body).Decode(&body)
+		if got, _ := body["port"].(float64); int(got) != 9001 {
+			t.Errorf("port = %v, want 9001", body["port"])
+		}
+		envBody, _ := body["env"].(map[string]any)
+		if envBody["AUTH_TOKEN"] != "secret-xyz" {
+			t.Errorf("env.AUTH_TOKEN = %v, want secret-xyz", envBody["AUTH_TOKEN"])
+		}
+	})
+
+	t.Run("missing peer 404", func(t *testing.T) {
+		req := httptest.NewRequest("GET", "/__mdp/peers?group=dev&repo=other&service=api", nil)
+		rec := httptest.NewRecorder()
+		handler.ServeHTTP(rec, req)
+		if rec.Code != http.StatusNotFound {
+			t.Errorf("expected 404, got %d", rec.Code)
+		}
+	})
+
+	t.Run("missing required params", func(t *testing.T) {
+		req := httptest.NewRequest("GET", "/__mdp/peers?group=dev", nil)
+		rec := httptest.NewRecorder()
+		handler.ServeHTTP(rec, req)
+		if rec.Code != http.StatusBadRequest {
+			t.Errorf("expected 400, got %d", rec.Code)
+		}
+	})
+}
+
+func TestControlAPIRegisterAcceptsRepoAndEnv(t *testing.T) {
+	o := New(&config.Config{}, "")
+	handler := NewControlAPI(o, nil).Handler()
+
+	body := bytes.NewBufferString(`{
+		"name": "dev/api",
+		"port": 9001,
+		"proxyPort": 4000,
+		"group": "dev",
+		"repo": "backend",
+		"env": {"AUTH_TOKEN": "secret"}
+	}`)
+	req := httptest.NewRequest("POST", "/__mdp/register", body)
+	rec := httptest.NewRecorder()
+	handler.ServeHTTP(rec, req)
+	if rec.Code != http.StatusOK {
+		t.Fatalf("expected 200, got %d; body: %s", rec.Code, rec.Body.String())
+	}
+	pi := o.GetProxy(4000)
+	if pi == nil {
+		t.Fatal("proxy not created")
+	}
+	entry := pi.Registry.Get("dev/api")
+	if entry == nil {
+		t.Fatal("entry not registered")
+	}
+	if entry.Repo != "backend" {
+		t.Errorf("repo = %q, want backend", entry.Repo)
+	}
+	if entry.Env["AUTH_TOKEN"] != "secret" {
+		t.Errorf("env.AUTH_TOKEN = %q, want secret", entry.Env["AUTH_TOKEN"])
 	}
 }
 

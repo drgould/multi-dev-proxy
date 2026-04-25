@@ -58,7 +58,7 @@ services:
 | Key | Type | Default | Notes |
 |---|---|---|---|
 | `global.env_file` | string path | `""` (none) | Aggregate `.env` file to write at startup. Relative paths resolve against the `mdp.yaml` directory. `~` is expanded. Empty = no file written. |
-| `global.env` | map of name → scalar \| `{ref: …}` | `{}` | Env vars to write to `env_file`. Scalar values support `${svc.port}` / `${svc.env.VAR}` interpolation. The mapping form `{ref: svc.port}` or `{ref: svc.env.VAR}` passes the referenced value through without string-wrapping. Any other shape is a parse error. |
+| `global.env` | map of name → scalar \| `{ref: …, default: …}` | `{}` | Env vars to write to `env_file`. Scalar values support `${svc.port}` / `${svc.env.VAR}` / `${@repo.svc...}` interpolation with optional `:-default` fallback. The mapping form takes a `ref:` (e.g. `svc.port`, `@repo.svc.port`) and an optional `default:` used when the ref cannot be resolved. |
 
 ### Writing an aggregate `.env` for external tools
 
@@ -108,7 +108,7 @@ Keys under `services.<name>`.
 | `tls_cert` | string path | `""` | TLS certificate path. Relative paths resolve against the `mdp.yaml` directory. `~` is expanded. Setting this auto-infers `scheme: https`. |
 | `tls_key` | string path | `""` | TLS key path. Paired with `tls_cert`. |
 | `env_file` | string path | `""` | Path to write this service's resolved env vars as a `.env` file. Relative paths resolve against the service's `dir` if set, else the `mdp.yaml` directory. `~` is expanded. |
-| `env` | map of name → string | `{}` | Env vars for `command`, `setup`, and `shutdown`. Values support: literal strings, `auto` (allocates a port in the corresponding `ports[]` entry), `${svc.port}` (another service's primary port), and `${svc.NAMED_PORT}` (a named port from another service's `ports[]`). `${svc.env.VAR}` is **not** supported here — it only works in `global.env`. |
+| `env` | map of name → scalar \| `{ref: …, default: …}` | `{}` | Env vars for `command`, `setup`, and `shutdown`. Scalar values support: literal strings, `auto` (allocates a port in the corresponding `ports[]` entry), `${svc.port}` / `${svc.NAMED_PORT}` (own-mdp.yaml port references), `${@repo.svc.port}` / `${@repo.svc.env.VAR}` (cross-repo lookups via the orchestrator) with optional `:-default` fallback. The mapping form takes a `ref:` (e.g. `api.port`, `@backend.api.env.URL`) plus an optional `default:`. Cross-repo refs without a default are silently omitted when the peer is not registered. |
 | `ports` | list of [port mapping](#port-mapping) | `[]` | Multi-port mode. When present, `port` is ignored and ports are allocated per entry. |
 | `depends_on` | list of service names | `[]` | Wait for each dependency to be TCP-reachable on its assigned port(s) before starting. 60s per-dependency timeout. Unknown names and cycles are rejected at config load. |
 | `health_check` | [health check](#health_check) \| `"docker"` | nil (TCP on `port`) | Liveness probe used by the registry pruner. When unset, the default is a TCP dial of the service's registered port. See [Detached services and health checks](#detached-services-and-health-checks). |
@@ -439,9 +439,9 @@ global:
     ADMIN_TOKEN: "${api.env.ADMIN_TOKEN}"
 ```
 
-### `ref:` mapping form (global only)
+### `ref:` mapping form
 
-Scalar strings work in any `env`. The `ref:` mapping form is only valid inside `global.env` — use it when you want the referenced value without string-wrapping:
+Scalar strings work in any `env`. The `ref:` mapping form passes the referenced value through without string-wrapping. It works in both `global.env` and per-service `env`:
 
 ```yaml
 global:
@@ -457,7 +457,38 @@ global:
       ref: api.env.ADMIN_TOKEN
 ```
 
-Using `ref:` inside a service-level `env` is a parse error.
+### Cross-repo `@<repo>` references
+
+`mdp run` instances in different repos all register with the same singleton orchestrator. To reference a service running in *another* repo, prefix the reference with `@<repo-name>.`. The lookup is implicitly scoped to the same group (typically the git branch).
+
+```yaml
+# In frontend's mdp.yaml
+services:
+  web:
+    command: npm run dev
+    env:
+      # Interpolation form with optional :-default fallback.
+      API_URL: "http://localhost:${@backend.api.port:-3001}"
+
+      # Ref form with optional default: field.
+      AUTH_TOKEN:
+        ref: "@backend.api.env.AUTH_TOKEN"
+        default: "dev-token"
+```
+
+Resolution semantics:
+
+- The frontend resolves `@backend.*` against the orchestrator at startup. Whatever the backend is registered as (port, exposed env vars), the frontend gets — *for the same group*.
+- If the peer is unresolved AND a default is provided, the default is used.
+- If the peer is unresolved AND no default is provided:
+    - For `ref:` form, the env var is silently omitted (graceful "ignored" behavior).
+    - For `${...}` interpolation form, you must supply `:-default`; otherwise it is a hard error.
+- The supervisor watches each cross-repo peer for changes. When the peer's port or any referenced env var changes (or the peer (de)registers), the dependent service is killed and relaunched with refreshed values.
+
+Notes:
+
+- `@self` and other reserved names have no special meaning — `@<repo>` is just whichever string was registered as the peer's repo (typically the basename of the directory containing the peer's `mdp.yaml`).
+- Cross-group references are not supported. The peer must be in the same group as the resolver.
 
 ## Path resolution
 
