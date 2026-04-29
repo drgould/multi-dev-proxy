@@ -1,5 +1,12 @@
 # Changelog
 
+## [1.7.0](https://github.com/drgould/multi-dev-proxy/compare/v1.6.0...v1.7.0) (2026-04-29)
+
+
+### Features
+
+* --link flag to override peer-lookup group per repo ([#38](https://github.com/drgould/multi-dev-proxy/issues/38)) ([2bd59ab](https://github.com/drgould/multi-dev-proxy/commit/2bd59abd0bd30337612bcb2c17988c85978aff5b))
+
 ## [1.6.0](https://github.com/drgould/multi-dev-proxy/compare/v1.5.2...v1.6.0) (2026-04-25)
 
 
