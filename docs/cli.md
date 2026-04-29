@@ -140,6 +140,7 @@ mdp --stop
 | `--tls-key`        |               | TLS key file (paired with `--tls-cert`)          |
 | `--auto-tls`       | `false`       | Auto-detect TLS certs from mkcert                |
 | `--control-port`   | `13100`       | Orchestrator control port                        |
+| `--link`           |               | Override peer-lookup group: `repo=group` (repeatable). See [cross-repo refs](./mdp-yaml-reference.md#cross-group-lookups-via---link). |
 
 
 `**mdp register` flags:**

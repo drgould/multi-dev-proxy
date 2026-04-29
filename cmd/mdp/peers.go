@@ -67,12 +67,23 @@ func extractPeerRefs(svc config.ServiceConfig) []peerRef {
 	return out
 }
 
+// effectiveGroup returns the group to query for a given peer repo. linkMap
+// overrides the caller's group on a per-repo basis when --link <repo>=<group>
+// was passed at startup.
+func effectiveGroup(repo, defaultGroup string, linkMap map[string]string) string {
+	if g, ok := linkMap[repo]; ok && g != "" {
+		return g
+	}
+	return defaultGroup
+}
+
 // resolvePeer queries the orchestrator for one peer reference. Returns
 // (value, true) when the peer is registered and the requested key resolves;
-// (zero, false) otherwise.
-func resolvePeer(client *http.Client, controlURL, group string, ref peerRef) (string, bool) {
+// (zero, false) otherwise. defaultGroup is the caller's group; linkMap
+// (optional, may be nil) overrides the lookup group for specific peer repos.
+func resolvePeer(client *http.Client, controlURL, defaultGroup string, linkMap map[string]string, ref peerRef) (string, bool) {
 	q := url.Values{}
-	q.Set("group", group)
+	q.Set("group", effectiveGroup(ref.repo, defaultGroup, linkMap))
 	q.Set("repo", ref.repo)
 	q.Set("svc", ref.svc) // unused by current handler, kept for future indexing
 	q.Set("service", ref.svc)
@@ -102,20 +113,21 @@ func resolvePeer(client *http.Client, controlURL, group string, ref peerRef) (st
 }
 
 // newPeerResolver returns an envexpand.Resolver bound to one (group, controlURL)
-// pair. It is safe to call concurrently.
-func newPeerResolver(client *http.Client, controlURL, group string) envexpand.Resolver {
+// pair. linkMap (optional) routes cross-repo refs to a different group on a
+// per-repo basis. It is safe to call concurrently.
+func newPeerResolver(client *http.Client, controlURL, group string, linkMap map[string]string) envexpand.Resolver {
 	return func(repo, svc string, isEnv bool, key string) (string, bool) {
-		return resolvePeer(client, controlURL, group, peerRef{repo: repo, svc: svc, isEnv: isEnv, key: key})
+		return resolvePeer(client, controlURL, group, linkMap, peerRef{repo: repo, svc: svc, isEnv: isEnv, key: key})
 	}
 }
 
 // refreshPeerRefs queries the orchestrator for every ref and writes the
 // current/found fields. Returns whether any value changed since the last
-// refresh.
-func refreshPeerRefs(client *http.Client, controlURL, group string, refs []peerRef) (changed bool, updated []peerRef) {
+// refresh. linkMap (optional) overrides the lookup group per peer repo.
+func refreshPeerRefs(client *http.Client, controlURL, defaultGroup string, linkMap map[string]string, refs []peerRef) (changed bool, updated []peerRef) {
 	updated = make([]peerRef, len(refs))
 	for i, r := range refs {
-		val, ok := resolvePeer(client, controlURL, group, r)
+		val, ok := resolvePeer(client, controlURL, defaultGroup, linkMap, r)
 		if val != r.current || ok != r.found {
 			changed = true
 		}
@@ -128,8 +140,9 @@ func refreshPeerRefs(client *http.Client, controlURL, group string, refs []peerR
 
 // watchPeerRefs polls the orchestrator on interval. When ANY watched ref's
 // resolved value changes, it sends on changed once and exits. The caller
-// re-invokes the watcher after restarting the dependent service.
-func watchPeerRefs(ctx context.Context, client *http.Client, controlURL, group string, refs []peerRef, interval time.Duration, changed chan<- []peerRef) {
+// re-invokes the watcher after restarting the dependent service. linkMap
+// (optional) overrides the lookup group per peer repo.
+func watchPeerRefs(ctx context.Context, client *http.Client, controlURL, defaultGroup string, linkMap map[string]string, refs []peerRef, interval time.Duration, changed chan<- []peerRef) {
 	if len(refs) == 0 {
 		return
 	}
@@ -141,7 +154,7 @@ func watchPeerRefs(ctx context.Context, client *http.Client, controlURL, group s
 		case <-ctx.Done():
 			return
 		case <-ticker.C:
-			didChange, next := refreshPeerRefs(client, controlURL, group, current)
+			didChange, next := refreshPeerRefs(client, controlURL, defaultGroup, linkMap, current)
 			if didChange {
 				slog.Info("peer state changed", "refs", peerRefSignatures(next))
 				select {

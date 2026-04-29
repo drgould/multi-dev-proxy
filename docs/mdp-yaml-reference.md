@@ -507,7 +507,7 @@ global:
 
 ### Cross-repo `@<repo>` references
 
-`mdp run` instances in different repos all register with the same singleton orchestrator. To reference a service running in *another* repo, prefix the reference with `@<repo-name>.`. The lookup is implicitly scoped to the same group (typically the git branch).
+`mdp run` instances in different repos all register with the same singleton orchestrator. To reference a service running in *another* repo, prefix the reference with `@<repo-name>.`. The lookup is scoped to the same group as the caller by default (typically the git branch); use `--link` to override the lookup group per peer repo (see below).
 
 ```yaml
 # In frontend's mdp.yaml
@@ -536,7 +536,27 @@ Resolution semantics:
 Notes:
 
 - `@self` and other reserved names have no special meaning — `@<repo>` is just whichever string was registered as the peer's repo (typically the basename of the directory containing the peer's `mdp.yaml`).
-- Cross-group references are not supported. The peer must be in the same group as the resolver.
+- Cross-group references require `--link <repo>=<group>`. Without it, the peer must be in the same group as the resolver.
+
+#### Cross-group lookups via `--link`
+
+Use `mdp run --link <repo>=<group>` to redirect cross-repo `@<repo>.*` references to a different group than the caller's. The flag is repeatable and last-wins per repo. Common case: a frontend on a feature branch wiring to a backend that runs on `main`.
+
+```sh
+# Frontend on branch derek/foo, backend on main:
+mdp run --link api=main
+```
+
+```yaml
+# In the frontend's mdp.yaml, no change needed:
+services:
+  web:
+    command: npm run dev
+    env:
+      VITE_API_URL: "http://localhost:${@api.server.port}"
+```
+
+The override applies to all `@<repo>.*` references resolved during this `mdp run` invocation, both at startup and during peer-change watching.
 
 ## Path resolution
 

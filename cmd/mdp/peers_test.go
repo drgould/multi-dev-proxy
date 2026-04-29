@@ -65,17 +65,17 @@ func TestResolvePeerSucceedsAndFails(t *testing.T) {
 	}))
 	defer srv.Close()
 
-	got, ok := resolvePeer(http.DefaultClient, srv.URL, "dev", peerRef{repo: "backend", svc: "api", isEnv: false, key: "port"})
+	got, ok := resolvePeer(http.DefaultClient, srv.URL, "dev", nil, peerRef{repo: "backend", svc: "api", isEnv: false, key: "port"})
 	if !ok || got != "9001" {
 		t.Errorf("port lookup: got=%q ok=%v, want 9001 true", got, ok)
 	}
 
-	got, ok = resolvePeer(http.DefaultClient, srv.URL, "dev", peerRef{repo: "backend", svc: "api", isEnv: true, key: "AUTH_TOKEN"})
+	got, ok = resolvePeer(http.DefaultClient, srv.URL, "dev", nil, peerRef{repo: "backend", svc: "api", isEnv: true, key: "AUTH_TOKEN"})
 	if !ok || got != "secret" {
 		t.Errorf("env lookup: got=%q ok=%v, want secret true", got, ok)
 	}
 
-	_, ok = resolvePeer(http.DefaultClient, srv.URL, "dev", peerRef{repo: "missing", svc: "api", isEnv: false, key: "port"})
+	_, ok = resolvePeer(http.DefaultClient, srv.URL, "dev", nil, peerRef{repo: "missing", svc: "api", isEnv: false, key: "port"})
 	if ok {
 		t.Error("expected 404 to return ok=false")
 	}
@@ -98,7 +98,7 @@ func TestWatchPeerRefsFiresOnChange(t *testing.T) {
 	ctx, cancel := context.WithTimeout(context.Background(), 2*time.Second)
 	defer cancel()
 	changed := make(chan []peerRef, 1)
-	go watchPeerRefs(ctx, http.DefaultClient, srv.URL, "dev", refs, 20*time.Millisecond, changed)
+	go watchPeerRefs(ctx, http.DefaultClient, srv.URL, "dev", nil, refs, 20*time.Millisecond, changed)
 
 	// Confirm watcher does NOT fire while the value is unchanged.
 	select {
@@ -129,11 +129,56 @@ func TestNewPeerResolverIntegratesWithEnvexpand(t *testing.T) {
 	}))
 	defer srv.Close()
 
-	resolver := newPeerResolver(http.DefaultClient, srv.URL, "dev")
+	resolver := newPeerResolver(http.DefaultClient, srv.URL, "dev", nil)
 	if val, ok := resolver("backend", "api", false, "port"); !ok || val != "9001" {
 		t.Errorf("port: got=%q ok=%v", val, ok)
 	}
 	if val, ok := resolver("backend", "api", true, "URL"); !ok || val != "http://backend" {
 		t.Errorf("env: got=%q ok=%v", val, ok)
+	}
+}
+
+func TestEffectiveGroup(t *testing.T) {
+	links := map[string]string{"backend": "main", "auth": "stable"}
+
+	if g := effectiveGroup("backend", "feature-x", links); g != "main" {
+		t.Errorf("override: got %q, want main", g)
+	}
+	if g := effectiveGroup("auth", "feature-x", links); g != "stable" {
+		t.Errorf("override: got %q, want stable", g)
+	}
+	if g := effectiveGroup("other", "feature-x", links); g != "feature-x" {
+		t.Errorf("no override: got %q, want feature-x", g)
+	}
+	if g := effectiveGroup("backend", "feature-x", nil); g != "feature-x" {
+		t.Errorf("nil map: got %q, want feature-x", g)
+	}
+	// Empty override value should not shadow the default — guards against
+	// `--link foo=` slipping past the parser somehow.
+	if g := effectiveGroup("backend", "feature-x", map[string]string{"backend": ""}); g != "feature-x" {
+		t.Errorf("empty override: got %q, want feature-x", g)
+	}
+}
+
+func TestResolvePeerUsesLinkMap(t *testing.T) {
+	var gotGroup atomic.Value // string
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		gotGroup.Store(r.URL.Query().Get("group"))
+		json.NewEncoder(w).Encode(map[string]any{"port": 9001, "env": map[string]string{}})
+	}))
+	defer srv.Close()
+
+	links := map[string]string{"backend": "main"}
+
+	// Override applies for repo "backend".
+	resolvePeer(http.DefaultClient, srv.URL, "feature-x", links, peerRef{repo: "backend", svc: "api", key: "port"})
+	if g := gotGroup.Load().(string); g != "main" {
+		t.Errorf("backend lookup: queried group %q, want main", g)
+	}
+
+	// No override for repo "other" — falls back to caller's group.
+	resolvePeer(http.DefaultClient, srv.URL, "feature-x", links, peerRef{repo: "other", svc: "api", key: "port"})
+	if g := gotGroup.Load().(string); g != "feature-x" {
+		t.Errorf("other lookup: queried group %q, want feature-x", g)
 	}
 }
