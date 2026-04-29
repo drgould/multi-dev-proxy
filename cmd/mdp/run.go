@@ -72,14 +72,43 @@ func init() {
 	runCmd.Flags().String("env", "PORT", "Environment variable name for the assigned port")
 	runCmd.Flags().Int("control-port", 13100, "Orchestrator control port")
 	runCmd.Flags().String("log-split", "", `Demultiplex combined-stream logs. Values: "compose" (docker-compose format) or "regex:<pattern>" with named captures 'name' and 'msg'.`)
+	runCmd.Flags().StringArray("link", nil, "Override the lookup group for cross-repo @<repo>.* env refs: repo=group (repeatable, last-wins per repo). Used when a peer service runs in a different group than the caller (e.g. backend on main, frontend on a feature branch).")
+}
+
+// parseLinks converts repeated `--link repo=group` values into a map. Empty
+// repo or group is rejected with a clear error. Last value wins on duplicate
+// repo keys.
+func parseLinks(values []string) (map[string]string, error) {
+	if len(values) == 0 {
+		return nil, nil
+	}
+	out := make(map[string]string, len(values))
+	for _, v := range values {
+		idx := strings.IndexByte(v, '=')
+		if idx <= 0 || idx == len(v)-1 {
+			return nil, fmt.Errorf("--link %q must be in form repo=group", v)
+		}
+		repo := strings.TrimSpace(v[:idx])
+		group := strings.TrimSpace(v[idx+1:])
+		if repo == "" || group == "" {
+			return nil, fmt.Errorf("--link %q must be in form repo=group", v)
+		}
+		out[repo] = group
+	}
+	return out, nil
 }
 
 func runRun(cmd *cobra.Command, args []string) error {
 	controlPort, _ := cmd.Flags().GetInt("control-port")
 	groupFlag, _ := cmd.Flags().GetString("group")
+	linkValues, _ := cmd.Flags().GetStringArray("link")
+	linkMap, err := parseLinks(linkValues)
+	if err != nil {
+		return err
+	}
 
 	if len(args) == 0 {
-		return runBatchMode(cmd, controlPort, groupFlag)
+		return runBatchMode(cmd, controlPort, groupFlag, linkMap)
 	}
 
 	tlsCert, _ := cmd.Flags().GetString("tls-cert")
@@ -104,7 +133,7 @@ func runRun(cmd *cobra.Command, args []string) error {
 	return runSingleMode(cmd, args, controlPort, groupFlag, tlsCert, tlsKey, logSplit)
 }
 
-func runBatchMode(cmd *cobra.Command, controlPort int, groupFlag string) error {
+func runBatchMode(cmd *cobra.Command, controlPort int, groupFlag string, linkMap map[string]string) error {
 	cwd, err := os.Getwd()
 	if err != nil {
 		return fmt.Errorf("cannot determine working directory: %w", err)
@@ -204,9 +233,9 @@ func runBatchMode(cmd *cobra.Command, controlPort int, groupFlag string) error {
 	// self-correct.
 	allocResolvers := make([]envexpand.Resolver, len(allocations))
 	for i := range allocations {
-		allocResolvers[i] = newPeerResolver(client, controlURL, allocations[i].svcGroup)
+		allocResolvers[i] = newPeerResolver(client, controlURL, allocations[i].svcGroup, linkMap)
 	}
-	globalResolver := newPeerResolver(client, controlURL, group)
+	globalResolver := newPeerResolver(client, controlURL, group, linkMap)
 
 	if err := exportBatchEnvFiles(cfg, allocations, portMap, allocResolvers, globalResolver); err != nil {
 		return err
@@ -224,7 +253,7 @@ func runBatchMode(cmd *cobra.Command, controlPort int, groupFlag string) error {
 	rt := defaultBatchRuntime()
 	for i := range allocations {
 		bt.wg.Add(1)
-		go launchBatchService(batchCtx, bt, client, controlURL, clientID, repo, &allocations[i], states, rt, portMap, allocResolvers[i])
+		go launchBatchService(batchCtx, bt, client, controlURL, clientID, repo, &allocations[i], states, rt, portMap, allocResolvers[i], linkMap)
 	}
 
 	slog.Info("batch services started", "group", group)
@@ -294,6 +323,7 @@ func launchBatchService(
 	rt batchRuntime,
 	portMap envexpand.PortMap,
 	resolver envexpand.Resolver,
+	linkMap map[string]string,
 ) {
 	defer bt.wg.Done()
 	state := states[a.name]
@@ -493,7 +523,7 @@ func launchBatchService(
 	// and (if this service has cross-repo peers) restarts it on peer change.
 	signalReady()
 
-	superviseProcess(ctx, cmd, bt, client, controlURL, a, registered, registerAll, portMap, resolver, pw, pwErr)
+	superviseProcess(ctx, cmd, bt, client, controlURL, a, registered, registerAll, portMap, resolver, linkMap, pw, pwErr)
 
 	for i, raw := range a.svc.Shutdown {
 		parts, err := orchestrator.SplitHookArgs(raw)
@@ -549,20 +579,21 @@ func superviseProcess(
 	registerAll func() ([]string, error),
 	portMap envexpand.PortMap,
 	resolver envexpand.Resolver,
+	linkMap map[string]string,
 	pw, pwErr *prefixWriter,
 ) {
 	peerRefs := extractPeerRefs(a.svc)
 	// Seed peerRefs with the values we resolved at startup so the watcher
 	// only fires on a *change*, not on first sight.
 	if len(peerRefs) > 0 {
-		_, peerRefs = refreshPeerRefs(client, controlURL, a.svcGroup, peerRefs)
+		_, peerRefs = refreshPeerRefs(client, controlURL, a.svcGroup, linkMap, peerRefs)
 	}
 
 	for {
 		watchCtx, watchCancel := context.WithCancel(ctx)
 		peerCh := make(chan []peerRef, 1)
 		if len(peerRefs) > 0 {
-			go watchPeerRefs(watchCtx, client, controlURL, a.svcGroup, peerRefs, peerWatchInterval, peerCh)
+			go watchPeerRefs(watchCtx, client, controlURL, a.svcGroup, linkMap, peerRefs, peerWatchInterval, peerCh)
 		}
 
 		cmdExit := make(chan error, 1)

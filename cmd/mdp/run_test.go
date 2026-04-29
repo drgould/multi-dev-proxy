@@ -236,7 +236,7 @@ func TestLaunchBatchServiceSkipsUDPPortsFromProbe(t *testing.T) {
 	bt := &batchTracker{}
 	bt.wg.Add(1)
 	states := depwait.NewStates([]string{"infra"})
-	launchBatchService(context.Background(), bt, http.DefaultClient, srv.URL, "client-1", "test-repo", &a, states, rt, envexpand.PortMap{}, nil)
+	launchBatchService(context.Background(), bt, http.DefaultClient, srv.URL, "client-1", "test-repo", &a, states, rt, envexpand.PortMap{}, nil, nil)
 
 	probeMu.Lock()
 	defer probeMu.Unlock()
@@ -298,7 +298,7 @@ func TestLaunchBatchServiceSkipsProxylessPorts(t *testing.T) {
 	bt := &batchTracker{}
 	bt.wg.Add(1)
 	states := depwait.NewStates([]string{"infra"})
-	launchBatchService(context.Background(), bt, http.DefaultClient, srv.URL, "client-1", "test-repo", &a, states, rt, envexpand.PortMap{}, nil)
+	launchBatchService(context.Background(), bt, http.DefaultClient, srv.URL, "client-1", "test-repo", &a, states, rt, envexpand.PortMap{}, nil, nil)
 
 	registerMu.Lock()
 	defer registerMu.Unlock()
@@ -370,7 +370,7 @@ func TestLaunchBatchServiceWaitsForDependencies(t *testing.T) {
 
 	for _, a := range allocs {
 		bt.wg.Add(1)
-		go launchBatchService(ctx, bt, http.DefaultClient, srv.URL, "c1", "test-repo", &a, states, rt, envexpand.PortMap{}, nil)
+		go launchBatchService(ctx, bt, http.DefaultClient, srv.URL, "c1", "test-repo", &a, states, rt, envexpand.PortMap{}, nil, nil)
 	}
 
 	waitFor := func(name string, dur time.Duration) bool {
@@ -440,7 +440,7 @@ func TestLaunchBatchServiceReturnsOnContextCancel(t *testing.T) {
 	bt.wg.Add(1)
 	done := make(chan struct{})
 	go func() {
-		launchBatchService(ctx, bt, http.DefaultClient, srv.URL, "c1", "test-repo", &a, states, rt, envexpand.PortMap{}, nil)
+		launchBatchService(ctx, bt, http.DefaultClient, srv.URL, "c1", "test-repo", &a, states, rt, envexpand.PortMap{}, nil, nil)
 		close(done)
 	}()
 
@@ -497,7 +497,7 @@ func TestLaunchBatchServiceHookOrdering(t *testing.T) {
 	bt := &batchTracker{}
 	bt.wg.Add(1)
 	states := depwait.NewStates([]string{"web"})
-	launchBatchService(context.Background(), bt, http.DefaultClient, srv.URL, "c1", "test-repo", &a, states, rt, envexpand.PortMap{}, nil)
+	launchBatchService(context.Background(), bt, http.DefaultClient, srv.URL, "c1", "test-repo", &a, states, rt, envexpand.PortMap{}, nil, nil)
 
 	data, err := os.ReadFile(logPath)
 	if err != nil {
@@ -550,7 +550,7 @@ func TestLaunchBatchServiceSetupFailureSkipsRegistration(t *testing.T) {
 	bt := &batchTracker{}
 	bt.wg.Add(1)
 	states := depwait.NewStates([]string{"web"})
-	launchBatchService(context.Background(), bt, http.DefaultClient, srv.URL, "c1", "test-repo", &a, states, rt, envexpand.PortMap{}, nil)
+	launchBatchService(context.Background(), bt, http.DefaultClient, srv.URL, "c1", "test-repo", &a, states, rt, envexpand.PortMap{}, nil, nil)
 
 	regMu.Lock()
 	defer regMu.Unlock()
@@ -777,7 +777,7 @@ func TestSuperviseProcessRestartsOnPeerChange(t *testing.T) {
 			},
 		},
 	}
-	resolver := newPeerResolver(http.DefaultClient, srv.URL, "dev")
+	resolver := newPeerResolver(http.DefaultClient, srv.URL, "dev", nil)
 	initialEnv, err := buildBatchEnv(*a, envexpand.PortMap{}, resolver)
 	if err != nil {
 		t.Fatalf("initial env: %v", err)
@@ -797,7 +797,7 @@ func TestSuperviseProcessRestartsOnPeerChange(t *testing.T) {
 	ctx, cancel := context.WithCancel(context.Background())
 	done := make(chan struct{})
 	go func() {
-		superviseProcess(ctx, cmd, bt, http.DefaultClient, srv.URL, a, nil, registerAll, envexpand.PortMap{}, resolver, pw, pwErr)
+		superviseProcess(ctx, cmd, bt, http.DefaultClient, srv.URL, a, nil, registerAll, envexpand.PortMap{}, resolver, nil, pw, pwErr)
 		close(done)
 	}()
 	t.Cleanup(func() {
@@ -1051,4 +1051,45 @@ func contains(env []string, want string) bool {
 		}
 	}
 	return false
+}
+
+func TestParseLinks(t *testing.T) {
+	t.Run("nil and empty", func(t *testing.T) {
+		m, err := parseLinks(nil)
+		if err != nil || m != nil {
+			t.Errorf("nil input: got (%v, %v), want (nil, nil)", m, err)
+		}
+		m, err = parseLinks([]string{})
+		if err != nil || m != nil {
+			t.Errorf("empty input: got (%v, %v), want (nil, nil)", m, err)
+		}
+	})
+
+	t.Run("valid", func(t *testing.T) {
+		m, err := parseLinks([]string{"backend=main", "auth=derek/foo"})
+		if err != nil {
+			t.Fatalf("unexpected error: %v", err)
+		}
+		if m["backend"] != "main" || m["auth"] != "derek/foo" {
+			t.Errorf("got %v, want backend=main auth=derek/foo", m)
+		}
+	})
+
+	t.Run("last wins", func(t *testing.T) {
+		m, err := parseLinks([]string{"backend=stale", "backend=main"})
+		if err != nil {
+			t.Fatalf("unexpected error: %v", err)
+		}
+		if m["backend"] != "main" {
+			t.Errorf("last-wins failed: got %q, want main", m["backend"])
+		}
+	})
+
+	t.Run("invalid forms", func(t *testing.T) {
+		for _, v := range []string{"", "backend", "=main", "backend=", " =main", "backend= "} {
+			if _, err := parseLinks([]string{v}); err == nil {
+				t.Errorf("%q: expected error, got nil", v)
+			}
+		}
+	})
 }
