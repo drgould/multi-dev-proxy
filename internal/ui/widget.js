@@ -193,16 +193,42 @@
 	let open = false;
 	let servers = {};
 
+	// In single-mode name=`repo/branch` and group=branch, so the returned
+	// service equals the group; pillLabel collapses the display in that case.
+	function serviceFromName(fullName, repo, group) {
+		if (group && fullName.startsWith(`${group}/`)) {
+			return fullName.slice(group.length + 1);
+		}
+		if (repo && fullName.startsWith(`${repo}/`)) {
+			return fullName.slice(repo.length + 1);
+		}
+		const i = fullName.lastIndexOf("/");
+		return i >= 0 ? fullName.slice(i + 1) : fullName;
+	}
+
 	function pillLabel(data, activeName, allNames) {
 		if (allNames.length === 0) return "";
 		const name =
 			activeName && allNames.includes(activeName) ? activeName : allNames[0];
 		for (const repo of Object.keys(data)) {
-			if (data[repo][name]) {
-				const branch = name.startsWith(`${repo}/`)
-					? name.slice(repo.length + 1)
-					: name.split("/").pop();
-				return `${repo} \u00b7 ${branch}`;
+			const info = data[repo][name];
+			if (info) {
+				const group = info.group || "";
+				// Single-mode: name = `<actualRepo>/<group>` (group may contain
+				// "/"). The server-side parser splits `repo` at the last slash,
+				// so for branches like "feature/foo" the API-given `repo`
+				// includes part of the branch; derive it from name instead.
+				if (group && name.endsWith(`/${group}`)) {
+					const derivedRepo = name.slice(0, name.length - group.length - 1);
+					if (derivedRepo === repo || repo.startsWith(`${derivedRepo}/`)) {
+						return `${derivedRepo} \u00b7 ${group}`;
+					}
+				}
+				const service = serviceFromName(name, repo, group);
+				if (group && service && service !== group) {
+					return `${repo} \u00b7 ${group} \u00b7 ${service}`;
+				}
+				return `${repo} \u00b7 ${group || service}`;
 			}
 		}
 		const i = name.lastIndexOf("/");
@@ -217,9 +243,7 @@
 				const info = data[repo][fullName];
 				const g = info.group || "";
 				if (!groups[g]) groups[g] = [];
-				const branch = fullName.startsWith(`${repo}/`)
-					? fullName.slice(repo.length + 1)
-					: fullName.split("/").pop();
+				const branch = serviceFromName(fullName, repo, g);
 				groups[g].push({ name: fullName, repo, branch, scheme: info.scheme });
 			}
 		}
