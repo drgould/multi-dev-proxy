@@ -291,12 +291,14 @@
 			item.innerHTML = `<span class="item-dot ${groupActive ? "green" : "gray"}"></span>${gname}`;
 			item.onclick = () => switchGroup(gname);
 			dropdownEl.appendChild(item);
-			for (const svc of members.sort((a, b) => a.name.localeCompare(b.name))) {
-				const isActive = svc.name === activeName;
-				const sub = document.createElement("div");
-				sub.className = "sub-item";
-				sub.innerHTML = `<span class="item-dot ${isActive ? "green" : "gray"}"></span>${svc.repo} / ${svc.branch}`;
-				dropdownEl.appendChild(sub);
+			if (members.length > 1) {
+				for (const svc of members.sort((a, b) => a.name.localeCompare(b.name))) {
+					const isActive = svc.name === activeName;
+					const sub = document.createElement("div");
+					sub.className = "sub-item";
+					sub.innerHTML = `<span class="item-dot ${isActive ? "green" : "gray"}"></span>${svc.repo} / ${svc.branch}`;
+					dropdownEl.appendChild(sub);
+				}
 			}
 		}
 
