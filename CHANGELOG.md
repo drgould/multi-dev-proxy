@@ -1,5 +1,14 @@
 # Changelog
 
+## [1.7.1](https://github.com/drgould/multi-dev-proxy/compare/v1.7.0...v1.7.1) (2026-05-07)
+
+
+### Bug Fixes
+
+* hide single-service child rows in switcher pill dropdown ([#43](https://github.com/drgould/multi-dev-proxy/issues/43)) ([fb3eb4e](https://github.com/drgould/multi-dev-proxy/commit/fb3eb4ea91c9e88515aeee7766553f4773e6011f))
+* show branch and service on switch page for mdp.yaml services ([#44](https://github.com/drgould/multi-dev-proxy/issues/44)) ([61d3ca9](https://github.com/drgould/multi-dev-proxy/commit/61d3ca96529f2f0b8a3ef97a79463802beb19eba))
+* show branch/group in switcher pill for mdp.yaml services ([#41](https://github.com/drgould/multi-dev-proxy/issues/41)) ([21beacb](https://github.com/drgould/multi-dev-proxy/commit/21beacbbceeaabf8dab1ab8e965c0d13a5e91b73))
+
 ## [1.7.0](https://github.com/drgould/multi-dev-proxy/compare/v1.6.0...v1.7.0) (2026-04-29)
 
 
