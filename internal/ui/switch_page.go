@@ -143,6 +143,17 @@ func renderSwitchPage() string {
       });
     }
 
+    function serviceFromName(fullName, repo, group) {
+      if (group && fullName.indexOf(group + '/') === 0) {
+        return fullName.slice(group.length + 1);
+      }
+      if (repo && fullName.indexOf(repo + '/') === 0) {
+        return fullName.slice(repo.length + 1);
+      }
+      var i = fullName.lastIndexOf('/');
+      return i >= 0 ? fullName.slice(i + 1) : fullName;
+    }
+
     function render(servers) {
       // Build local server names list
       localServerNames = [];
@@ -174,8 +185,30 @@ func renderSwitchPage() string {
           '<thead><tr><th>Branch</th><th>Port</th><th>PID</th><th></th></tr></thead><tbody>';
         Object.keys(servers[repo]).sort().forEach(function(fullName) {
           var info = servers[repo][fullName];
-          var branch = fullName.indexOf('/') >= 0 ? fullName.split('/').pop() : fullName;
-          html += '<tr><td>' + esc(branch) + '</td>' +
+          var group = info.group || '';
+          var label;
+          // Single-mode: name is "<actualRepo>/<group>" and group may contain
+          // slashes (e.g. "feature/nav"). The API splits repo at the last
+          // slash, so the API-given repo can include part of the branch;
+          // detect this and collapse the label to just the group.
+          var sep = '/' + group;
+          if (group && fullName.length > sep.length && fullName.slice(-sep.length) === sep) {
+            var derivedRepo = fullName.slice(0, fullName.length - sep.length);
+            if (derivedRepo === repo || repo.indexOf(derivedRepo + '/') === 0) {
+              label = group;
+            }
+          }
+          if (label === undefined) {
+            var service = serviceFromName(fullName, repo, group);
+            if (group && service && service !== group) {
+              label = group + ' / ' + service;
+            } else if (group) {
+              label = group;
+            } else {
+              label = service;
+            }
+          }
+          html += '<tr><td>' + esc(label) + '</td>' +
             '<td class="mono">:' + info.port + '</td>' +
             '<td class="mono">' + (info.pid || '0') + '</td>' +
             '<td><button class="btn" onclick="window.__switchServer(\'' + esc(fullName).replace(/'/g, "\\'") + '\')">Switch</button></td></tr>';
