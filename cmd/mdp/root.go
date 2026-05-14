@@ -7,6 +7,7 @@ import (
 	"net/http"
 	"os"
 	"os/signal"
+	"path/filepath"
 	"strconv"
 	"strings"
 	"syscall"
@@ -16,6 +17,7 @@ import (
 	"github.com/spf13/cobra"
 
 	"github.com/derekgould/multi-dev-proxy/internal/config"
+	"github.com/derekgould/multi-dev-proxy/internal/detect"
 	"github.com/derekgould/multi-dev-proxy/internal/orchestrator"
 	"github.com/derekgould/multi-dev-proxy/internal/tui"
 )
@@ -83,6 +85,7 @@ func runDaemonProcess(cmd *cobra.Command, controlPort int) error {
 			configPath = config.Find(cwd)
 		}
 	}
+	var repo string
 	if configPath != "" {
 		var err error
 		cfg, err = config.Load(configPath)
@@ -91,9 +94,10 @@ func runDaemonProcess(cmd *cobra.Command, controlPort int) error {
 		} else {
 			slog.Info("loaded config", "path", configPath)
 		}
+		repo = detect.DetectRepo(filepath.Dir(configPath))
 	}
 
-	orch := orchestrator.New(cfg, host)
+	orch := orchestrator.New(cfg, host, repo)
 
 	ctx, cancel := context.WithCancel(context.Background())
 	defer cancel()

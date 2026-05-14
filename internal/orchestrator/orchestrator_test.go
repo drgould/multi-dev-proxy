@@ -12,11 +12,11 @@ import (
 )
 
 func newTestOrch() *Orchestrator {
-	return New(&config.Config{}, "")
+	return New(&config.Config{}, "", "")
 }
 
 func TestNewSetsDefaults(t *testing.T) {
-	o := New(nil, "")
+	o := New(nil, "", "")
 	if o.host != "0.0.0.0" {
 		t.Errorf("expected default host 0.0.0.0, got %q", o.host)
 	}
@@ -26,7 +26,7 @@ func TestNewSetsDefaults(t *testing.T) {
 }
 
 func TestNewCustomHost(t *testing.T) {
-	o := New(nil, "127.0.0.1")
+	o := New(nil, "127.0.0.1", "")
 	if o.host != "127.0.0.1" {
 		t.Errorf("expected host 127.0.0.1, got %q", o.host)
 	}

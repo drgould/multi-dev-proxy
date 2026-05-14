@@ -287,13 +287,14 @@ func (o *Orchestrator) startSingleService(ctx context.Context, name string, svc 
 		}
 		entry := &registry.ServerEntry{
 			Name:        serverName,
-			Repo:        name,
+			Repo:        o.repo,
 			Group:       group,
 			Port:        assignedPort,
 			Scheme:      scheme,
 			TLSCertPath: svc.TLSCert,
 			TLSKeyPath:  svc.TLSKey,
 			HealthCheck: health.Build(svc.HealthCheck, assignedPort, svc.Dir),
+			Env:         envSliceToMap(env),
 		}
 		if err := o.Register(svc.Proxy, entry); err != nil {
 			return fmt.Errorf("register %s: %w", serverName, err)
@@ -333,10 +334,11 @@ func (o *Orchestrator) startMultiPortService(ctx context.Context, name string, s
 		serverName := fmt.Sprintf("%s/%s", group, serviceName)
 		entry := &registry.ServerEntry{
 			Name:        serverName,
-			Repo:        name,
+			Repo:        o.repo,
 			Group:       group,
 			Port:        port,
 			HealthCheck: health.Build(svc.HealthCheck, port, svc.Dir),
+			Env:         envSliceToMap(env),
 		}
 		if err := o.Register(pm.Proxy, entry); err != nil {
 			slog.Error("register multi-port service", "name", serverName, "err", err)

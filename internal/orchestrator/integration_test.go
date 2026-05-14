@@ -35,7 +35,7 @@ func TestRegisterTLSEndToEnd(t *testing.T) {
 	certPath, keyPath, wantCN := writeSelfSignedCert(t)
 
 	proxyPort := freeTCPPort(t)
-	o := New(&config.Config{}, "127.0.0.1")
+	o := New(&config.Config{}, "127.0.0.1", "")
 	pi, err := o.EnsureProxy(proxyPort)
 	if err != nil {
 		t.Fatalf("EnsureProxy: %v", err)
@@ -115,7 +115,7 @@ func waitPortFree(t *testing.T, port int, timeout time.Duration) {
 func startOrchProxy(t *testing.T) (*Orchestrator, int) {
 	t.Helper()
 	port := freeTCPPort(t)
-	o := New(&config.Config{}, "127.0.0.1")
+	o := New(&config.Config{}, "127.0.0.1", "")
 	pi, err := o.EnsureProxy(port)
 	if err != nil {
 		t.Fatalf("EnsureProxy: %v", err)
@@ -386,7 +386,7 @@ func TestMultiPortServiceRegistersAll(t *testing.T) {
 			},
 		},
 	}
-	o := New(cfg, "127.0.0.1")
+	o := New(cfg, "127.0.0.1", "")
 	t.Cleanup(func() { o.Shutdown(context.Background()) })
 
 	ctx, cancel := context.WithCancel(context.Background())
