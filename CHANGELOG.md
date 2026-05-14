@@ -1,5 +1,12 @@
 # Changelog
 
+## [1.7.3](https://github.com/drgould/multi-dev-proxy/compare/v1.7.2...v1.7.3) (2026-05-14)
+
+
+### Bug Fixes
+
+* cross-repo @-refs against orchestrator-managed services ([#47](https://github.com/drgould/multi-dev-proxy/issues/47)) ([a4e2087](https://github.com/drgould/multi-dev-proxy/commit/a4e208797f30282cfd4b95b647ca0c3ccdcc6f5c))
+
 ## [1.7.2](https://github.com/drgould/multi-dev-proxy/compare/v1.7.1...v1.7.2) (2026-05-14)
 
 
