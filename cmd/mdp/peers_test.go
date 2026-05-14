@@ -1,10 +1,13 @@
 package main
 
 import (
+	"bytes"
 	"context"
 	"encoding/json"
+	"log/slog"
 	"net/http"
 	"net/http/httptest"
+	"strings"
 	"sync/atomic"
 	"testing"
 	"time"
@@ -98,7 +101,7 @@ func TestWatchPeerRefsFiresOnChange(t *testing.T) {
 	ctx, cancel := context.WithTimeout(context.Background(), 2*time.Second)
 	defer cancel()
 	changed := make(chan []peerRef, 1)
-	go watchPeerRefs(ctx, http.DefaultClient, srv.URL, "dev", nil, refs, 20*time.Millisecond, changed)
+	go watchPeerRefs(ctx, http.DefaultClient, srv.URL, "svc-a", "dev", nil, refs, 20*time.Millisecond, changed)
 
 	// Confirm watcher does NOT fire while the value is unchanged.
 	select {
@@ -157,6 +160,155 @@ func TestEffectiveGroup(t *testing.T) {
 	// `--link foo=` slipping past the parser somehow.
 	if g := effectiveGroup("backend", "feature-x", map[string]string{"backend": ""}); g != "feature-x" {
 		t.Errorf("empty override: got %q, want feature-x", g)
+	}
+}
+
+func TestRefreshPeerRefsLogsConnectDisconnect(t *testing.T) {
+	var available atomic.Bool
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if !available.Load() {
+			w.WriteHeader(http.StatusNotFound)
+			return
+		}
+		json.NewEncoder(w).Encode(map[string]any{
+			"port": 9001,
+			"env":  map[string]string{},
+		})
+	}))
+	defer srv.Close()
+
+	var buf bytes.Buffer
+	prev := slog.Default()
+	slog.SetDefault(slog.New(slog.NewTextHandler(&buf, &slog.HandlerOptions{Level: slog.LevelInfo})))
+	t.Cleanup(func() { slog.SetDefault(prev) })
+
+	refs := []peerRef{{repo: "backend", svc: "api", key: "port"}}
+	links := map[string]string{"backend": "main"}
+
+	// 1. Peer not yet up — no transition, no log.
+	_, refs = refreshPeerRefs(http.DefaultClient, srv.URL, "svc-a", "feature-x", links, refs)
+	if buf.Len() != 0 {
+		t.Fatalf("expected no log while peer absent, got: %s", buf.String())
+	}
+
+	// 2. Peer comes up — expect "connected" line.
+	available.Store(true)
+	_, refs = refreshPeerRefs(http.DefaultClient, srv.URL, "svc-a", "feature-x", links, refs)
+	out := buf.String()
+	buf.Reset()
+	if !strings.Contains(out, "cross-repo link connected") {
+		t.Errorf("expected 'cross-repo link connected' log, got: %s", out)
+	}
+	for _, want := range []string{`service=svc-a`, `ref=@backend.api.port.port`, `group=main`, `value=9001`} {
+		if !strings.Contains(out, want) {
+			t.Errorf("connect log missing %q; got: %s", want, out)
+		}
+	}
+
+	// 3. Peer stays up at same value — no log.
+	_, refs = refreshPeerRefs(http.DefaultClient, srv.URL, "svc-a", "feature-x", links, refs)
+	if buf.Len() != 0 {
+		t.Fatalf("expected no log on no-op refresh, got: %s", buf.String())
+	}
+
+	// 4. Peer goes down — expect "disconnected" line.
+	available.Store(false)
+	_, refs = refreshPeerRefs(http.DefaultClient, srv.URL, "svc-a", "feature-x", links, refs)
+	out = buf.String()
+	buf.Reset()
+	if !strings.Contains(out, "cross-repo link disconnected") {
+		t.Errorf("expected 'cross-repo link disconnected' log, got: %s", out)
+	}
+	for _, want := range []string{`service=svc-a`, `ref=@backend.api.port.port`, `group=main`, `value=9001`} {
+		if !strings.Contains(out, want) {
+			t.Errorf("disconnect log missing %q; got: %s", want, out)
+		}
+	}
+	_ = refs
+}
+
+func TestRefreshPeerRefsRedactsEnvRefValues(t *testing.T) {
+	const secret = "sk_live_super_secret_token_value"
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		json.NewEncoder(w).Encode(map[string]any{
+			"port": 9001,
+			"env":  map[string]string{"AUTH_TOKEN": secret},
+		})
+	}))
+	defer srv.Close()
+
+	var buf bytes.Buffer
+	prev := slog.Default()
+	slog.SetDefault(slog.New(slog.NewTextHandler(&buf, &slog.HandlerOptions{Level: slog.LevelInfo})))
+	t.Cleanup(func() { slog.SetDefault(prev) })
+
+	// Connect transition: env ref. Value MUST NOT appear in the log.
+	refs := []peerRef{{repo: "backend", svc: "api", isEnv: true, key: "AUTH_TOKEN"}}
+	_, refs = refreshPeerRefs(http.DefaultClient, srv.URL, "svc-a", "dev", nil, refs)
+	connectOut := buf.String()
+	buf.Reset()
+	if !strings.Contains(connectOut, "cross-repo link connected") {
+		t.Fatalf("expected connect log, got: %s", connectOut)
+	}
+	if strings.Contains(connectOut, secret) {
+		t.Errorf("env ref secret leaked into connect log: %s", connectOut)
+	}
+	if strings.Contains(connectOut, "value=") {
+		t.Errorf("env ref connect log should omit value attr; got: %s", connectOut)
+	}
+
+	// Disconnect transition: still must not emit the value.
+	srv.Close()
+	_, _ = refreshPeerRefs(http.DefaultClient, srv.URL, "svc-a", "dev", nil, refs)
+	disconnectOut := buf.String()
+	if !strings.Contains(disconnectOut, "cross-repo link disconnected") {
+		t.Fatalf("expected disconnect log, got: %s", disconnectOut)
+	}
+	if strings.Contains(disconnectOut, secret) {
+		t.Errorf("env ref secret leaked into disconnect log: %s", disconnectOut)
+	}
+	if strings.Contains(disconnectOut, "value=") {
+		t.Errorf("env ref disconnect log should omit value attr; got: %s", disconnectOut)
+	}
+}
+
+func TestRefreshPeerRefsLogsValueChangeAsDisconnectReconnect(t *testing.T) {
+	var port atomic.Int64
+	port.Store(9001)
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		json.NewEncoder(w).Encode(map[string]any{
+			"port": port.Load(),
+			"env":  map[string]string{},
+		})
+	}))
+	defer srv.Close()
+
+	var buf bytes.Buffer
+	prev := slog.Default()
+	slog.SetDefault(slog.New(slog.NewTextHandler(&buf, &slog.HandlerOptions{Level: slog.LevelInfo})))
+	t.Cleanup(func() { slog.SetDefault(prev) })
+
+	refs := []peerRef{{repo: "backend", svc: "api", key: "port", current: "9001", found: true}}
+
+	// Change the port value; expect both a disconnect (old value) and a
+	// connect (new value) line.
+	port.Store(9999)
+	_, _ = refreshPeerRefs(http.DefaultClient, srv.URL, "svc-a", "dev", nil, refs)
+
+	out := buf.String()
+	disc := strings.Index(out, "cross-repo link disconnected")
+	conn := strings.Index(out, "cross-repo link connected")
+	if disc < 0 || conn < 0 {
+		t.Fatalf("expected both disconnect and connect logs, got: %s", out)
+	}
+	if disc > conn {
+		t.Errorf("expected disconnect before connect in log output: %s", out)
+	}
+	if !strings.Contains(out[:conn], "value=9001") {
+		t.Errorf("disconnect log should carry old value=9001, got: %s", out)
+	}
+	if !strings.Contains(out[conn:], "value=9999") {
+		t.Errorf("connect log should carry new value=9999, got: %s", out)
 	}
 }
 

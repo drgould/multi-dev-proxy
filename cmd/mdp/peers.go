@@ -121,14 +121,41 @@ func newPeerResolver(client *http.Client, controlURL, group string, linkMap map[
 	}
 }
 
+// logLinkTransition emits a "cross-repo link connected"/"disconnected"
+// slog.Info line. The resolved value is included only for port refs; env
+// refs may resolve to secrets (e.g. @backend.api.env.AUTH_TOKEN) so the
+// value is omitted in that case — the ref signature still identifies which
+// env var transitioned.
+func logLinkTransition(msg, serviceName string, r peerRef, group, value string) {
+	if r.isEnv {
+		slog.Info(msg, "service", serviceName, "ref", r.signature(), "group", group)
+		return
+	}
+	slog.Info(msg, "service", serviceName, "ref", r.signature(), "group", group, "value", value)
+}
+
 // refreshPeerRefs queries the orchestrator for every ref and writes the
 // current/found fields. Returns whether any value changed since the last
-// refresh. linkMap (optional) overrides the lookup group per peer repo.
-func refreshPeerRefs(client *http.Client, controlURL, defaultGroup string, linkMap map[string]string, refs []peerRef) (changed bool, updated []peerRef) {
+// refresh. Emits one slog.Info line per transition: "cross-repo link
+// connected" when a ref becomes resolvable, "cross-repo link disconnected"
+// when it stops resolving, and disconnect+connect (two lines) when the
+// resolved value changes. linkMap (optional) overrides the lookup group per
+// peer repo.
+func refreshPeerRefs(client *http.Client, controlURL, serviceName, defaultGroup string, linkMap map[string]string, refs []peerRef) (changed bool, updated []peerRef) {
 	updated = make([]peerRef, len(refs))
 	for i, r := range refs {
 		val, ok := resolvePeer(client, controlURL, defaultGroup, linkMap, r)
-		if val != r.current || ok != r.found {
+		group := effectiveGroup(r.repo, defaultGroup, linkMap)
+		switch {
+		case !r.found && ok:
+			logLinkTransition("cross-repo link connected", serviceName, r, group, val)
+			changed = true
+		case r.found && !ok:
+			logLinkTransition("cross-repo link disconnected", serviceName, r, group, r.current)
+			changed = true
+		case r.found && ok && val != r.current:
+			logLinkTransition("cross-repo link disconnected", serviceName, r, group, r.current)
+			logLinkTransition("cross-repo link connected", serviceName, r, group, val)
 			changed = true
 		}
 		r.current = val
@@ -142,7 +169,7 @@ func refreshPeerRefs(client *http.Client, controlURL, defaultGroup string, linkM
 // resolved value changes, it sends on changed once and exits. The caller
 // re-invokes the watcher after restarting the dependent service. linkMap
 // (optional) overrides the lookup group per peer repo.
-func watchPeerRefs(ctx context.Context, client *http.Client, controlURL, defaultGroup string, linkMap map[string]string, refs []peerRef, interval time.Duration, changed chan<- []peerRef) {
+func watchPeerRefs(ctx context.Context, client *http.Client, controlURL, serviceName, defaultGroup string, linkMap map[string]string, refs []peerRef, interval time.Duration, changed chan<- []peerRef) {
 	if len(refs) == 0 {
 		return
 	}
@@ -154,9 +181,8 @@ func watchPeerRefs(ctx context.Context, client *http.Client, controlURL, default
 		case <-ctx.Done():
 			return
 		case <-ticker.C:
-			didChange, next := refreshPeerRefs(client, controlURL, defaultGroup, linkMap, current)
+			didChange, next := refreshPeerRefs(client, controlURL, serviceName, defaultGroup, linkMap, current)
 			if didChange {
-				slog.Info("peer state changed", "refs", peerRefSignatures(next))
 				select {
 				case changed <- next:
 				case <-ctx.Done():

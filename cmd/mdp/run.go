@@ -17,6 +17,7 @@ import (
 	"os/signal"
 	"path/filepath"
 	"regexp"
+	"sort"
 	"strings"
 	"sync"
 	"syscall"
@@ -105,6 +106,14 @@ func runRun(cmd *cobra.Command, args []string) error {
 	linkMap, err := parseLinks(linkValues)
 	if err != nil {
 		return err
+	}
+	if len(linkMap) > 0 {
+		pairs := make([]string, 0, len(linkMap))
+		for repo, group := range linkMap {
+			pairs = append(pairs, repo+"="+group)
+		}
+		sort.Strings(pairs)
+		slog.Info("link flags parsed", "links", pairs)
 	}
 
 	if len(args) == 0 {
@@ -586,14 +595,14 @@ func superviseProcess(
 	// Seed peerRefs with the values we resolved at startup so the watcher
 	// only fires on a *change*, not on first sight.
 	if len(peerRefs) > 0 {
-		_, peerRefs = refreshPeerRefs(client, controlURL, a.svcGroup, linkMap, peerRefs)
+		_, peerRefs = refreshPeerRefs(client, controlURL, a.name, a.svcGroup, linkMap, peerRefs)
 	}
 
 	for {
 		watchCtx, watchCancel := context.WithCancel(ctx)
 		peerCh := make(chan []peerRef, 1)
 		if len(peerRefs) > 0 {
-			go watchPeerRefs(watchCtx, client, controlURL, a.svcGroup, linkMap, peerRefs, peerWatchInterval, peerCh)
+			go watchPeerRefs(watchCtx, client, controlURL, a.name, a.svcGroup, linkMap, peerRefs, peerWatchInterval, peerCh)
 		}
 
 		cmdExit := make(chan error, 1)
