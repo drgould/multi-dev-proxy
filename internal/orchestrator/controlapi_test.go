@@ -14,7 +14,7 @@ import (
 
 func setupControlAPI(t *testing.T) (*Orchestrator, http.Handler) {
 	t.Helper()
-	o := New(&config.Config{}, "")
+	o := New(&config.Config{}, "", "")
 	o.mu.Lock()
 	reg := registry.New()
 	reg.Register(&registry.ServerEntry{Name: "app/dev", Repo: "app", Port: 4001, PID: 100, Group: "dev"})
@@ -98,7 +98,7 @@ func TestControlAPIRegisterDoesNotLoadCertWhenProxyBindFails(t *testing.T) {
 	defer busyLn.Close()
 	busyPort := busyLn.Addr().(*net.TCPAddr).Port
 
-	o := New(&config.Config{}, "127.0.0.1")
+	o := New(&config.Config{}, "127.0.0.1", "")
 	capi := NewControlAPI(o, nil)
 
 	// Use real cert paths so AddCert *would* succeed if it were called.
@@ -327,7 +327,7 @@ func TestControlAPIShutdown(t *testing.T) {
 }
 
 func TestControlAPIPeerLookup(t *testing.T) {
-	o := New(&config.Config{}, "")
+	o := New(&config.Config{}, "", "")
 	o.mu.Lock()
 	reg := registry.New()
 	reg.Register(&registry.ServerEntry{
@@ -379,7 +379,7 @@ func TestControlAPIPeerLookup(t *testing.T) {
 }
 
 func TestControlAPIRegisterAcceptsRepoAndEnv(t *testing.T) {
-	o := New(&config.Config{}, "")
+	o := New(&config.Config{}, "", "")
 	handler := NewControlAPI(o, nil).Handler()
 
 	body := bytes.NewBufferString(`{
@@ -413,7 +413,7 @@ func TestControlAPIRegisterAcceptsRepoAndEnv(t *testing.T) {
 }
 
 func TestControlAPIShutdownCallsCallback(t *testing.T) {
-	o := New(&config.Config{}, "")
+	o := New(&config.Config{}, "", "")
 	called := make(chan bool, 1)
 	capi := NewControlAPI(o, func() { called <- true })
 	handler := capi.Handler()

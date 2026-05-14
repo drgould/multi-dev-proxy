@@ -215,7 +215,7 @@ func TestStartConfigServicesWritesEnvFiles(t *testing.T) {
 			},
 		},
 	}
-	o := New(cfg, "")
+	o := New(cfg, "", "")
 	ctx, cancel := context.WithCancel(context.Background())
 	defer cancel()
 
@@ -272,7 +272,7 @@ func TestStartConfigServicesSkipsWhenNoEnvFile(t *testing.T) {
 			"api": {Port: 30125, Env: scalarEnv(map[string]string{"X": "y"})},
 		},
 	}
-	o := New(cfg, "")
+	o := New(cfg, "", "")
 	ctx, cancel := context.WithCancel(context.Background())
 	defer cancel()
 	if err := o.StartConfigServices(ctx, "test"); err != nil {
@@ -297,7 +297,7 @@ func TestStartConfigServicesGlobalRefErrorFailsFast(t *testing.T) {
 			"api": {Port: 30126, Env: scalarEnv(map[string]string{"A": "b"})},
 		},
 	}
-	o := New(cfg, "")
+	o := New(cfg, "", "")
 	ctx, cancel := context.WithCancel(context.Background())
 	defer cancel()
 	if err := o.StartConfigServices(ctx, "test"); err == nil {
@@ -370,7 +370,7 @@ func TestStartConfigServicesRespectsDependsOn(t *testing.T) {
 			"b": {Command: "sleep 30", Port: 9902, DependsOn: []string{"a"}},
 		},
 	}
-	o := New(cfg, "")
+	o := New(cfg, "", "")
 	ctx, cancel := context.WithCancel(context.Background())
 	t.Cleanup(cancel)
 
@@ -419,7 +419,7 @@ func TestStartConfigServicesParallelForIndependentServices(t *testing.T) {
 			"z": {Command: "sleep 30", Port: 9913},
 		},
 	}
-	o := New(cfg, "")
+	o := New(cfg, "", "")
 	ctx, cancel := context.WithCancel(context.Background())
 	t.Cleanup(cancel)
 
@@ -446,7 +446,7 @@ func TestStartConfigServicesProbesExternalDependency(t *testing.T) {
 			"d":   {Command: "sleep 30", Port: 9952, DependsOn: []string{"ext"}},
 		},
 	}
-	o := New(cfg, "")
+	o := New(cfg, "", "")
 	ctx, cancel := context.WithCancel(context.Background())
 	t.Cleanup(cancel)
 
@@ -485,7 +485,7 @@ func TestStartConfigServicesMarksDependentFailedOnLaunchError(t *testing.T) {
 			},
 		},
 	}
-	o := New(cfg, "")
+	o := New(cfg, "", "")
 	ctx, cancel := context.WithCancel(context.Background())
 	t.Cleanup(cancel)
 
@@ -518,7 +518,7 @@ func TestStartConfigServicesFailsWhenDepTimesOut(t *testing.T) {
 			"b": {Command: "sleep 30", Port: 9922, DependsOn: []string{"a"}},
 		},
 	}
-	o := New(cfg, "")
+	o := New(cfg, "", "")
 	ctx, cancel := context.WithCancel(context.Background())
 	t.Cleanup(cancel)
 
@@ -599,7 +599,7 @@ func TestStartConfigServicesDispatchesUDPAllocator(t *testing.T) {
 			},
 		},
 	}
-	o := New(cfg, "")
+	o := New(cfg, "", "")
 	ctx, cancel := context.WithCancel(context.Background())
 	t.Cleanup(cancel)
 
@@ -652,7 +652,7 @@ func TestStartMultiPortServiceSkipsRegistrationWhenProxyZero(t *testing.T) {
 			},
 		},
 	}
-	o := New(cfg, "")
+	o := New(cfg, "", "")
 	ctx, cancel := context.WithCancel(context.Background())
 	t.Cleanup(cancel)
 
@@ -672,5 +672,52 @@ func TestStartMultiPortServiceSkipsRegistrationWhenProxyZero(t *testing.T) {
 	// instances ever created by the orchestrator.
 	if got := len(o.ListProxies()); got != 0 {
 		t.Errorf("ListProxies() = %d, want 0 (UDP mapping should not create a proxy)", got)
+	}
+}
+
+// Regression: orchestrator-managed services must register with the
+// orchestrator's repo name AND expose their resolved env vars (so cross-repo
+// @<repo>.svc.port and @<repo>.svc.env.VAR lookups from `mdp run` resolvers
+// can match). The pre-fix bug stored the YAML key in Repo and left Env nil.
+func TestStartConfigServicesRegistersWithOrchRepo(t *testing.T) {
+	swapTimeouts(t, 100*time.Millisecond, 10*time.Millisecond)
+	swapTCPCheck(t, func(int) bool { return true })
+
+	proxyPort := freeTCPPort(t)
+	servicePort := freeTCPPort(t)
+	cfg := &config.Config{
+		PortRange: "10000-60000",
+		Services: map[string]config.ServiceConfig{
+			"api": {
+				Port:  servicePort,
+				Proxy: proxyPort,
+				Env:   scalarEnv(map[string]string{"AUTH_TOKEN": "secret-xyz"}),
+			},
+		},
+	}
+	o := New(cfg, "", "backend")
+	ctx, cancel := context.WithCancel(context.Background())
+	t.Cleanup(cancel)
+	t.Cleanup(func() { o.Shutdown(context.Background()) })
+
+	if err := o.StartConfigServices(ctx, "main"); err != nil {
+		t.Fatalf("StartConfigServices: %v", err)
+	}
+
+	entry := o.findPeer("main", "backend", "api")
+	if entry == nil {
+		t.Fatal("findPeer(main, backend, api) returned nil; expected to match registered service")
+	}
+	if entry.Port != servicePort {
+		t.Errorf("findPeer port = %d, want %d", entry.Port, servicePort)
+	}
+	if got := entry.Env["AUTH_TOKEN"]; got != "secret-xyz" {
+		t.Errorf("findPeer Env[AUTH_TOKEN] = %q, want secret-xyz (Env must be populated for @<repo>.svc.env.VAR lookups)", got)
+	}
+
+	// Must NOT match when queried with the service name as the repo —
+	// that's the value the old bug stored in Repo.
+	if entry := o.findPeer("main", "api", "api"); entry != nil {
+		t.Errorf("findPeer(main, api, api) returned %+v; expected nil", entry)
 	}
 }

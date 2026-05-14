@@ -62,6 +62,7 @@ type Orchestrator struct {
 	broadcaster *ui.Broadcaster
 	cfg         *config.Config
 	host        string
+	repo        string // repo name for orchestrator-managed services; "" if no config/remote
 
 	sessions     *SessionTracker
 	shutdownCh   chan struct{}
@@ -71,8 +72,10 @@ type Orchestrator struct {
 	certs  []tls.Certificate // dynamically loaded certs from services
 }
 
-// New creates a new Orchestrator.
-func New(cfg *config.Config, host string) *Orchestrator {
+// New creates a new Orchestrator. repo is the detected repository name for any
+// orchestrator-managed services (used to populate ServerEntry.Repo so cross-repo
+// peer lookups can match); pass "" when there is no config or no git remote.
+func New(cfg *config.Config, host, repo string) *Orchestrator {
 	if host == "" {
 		host = "0.0.0.0"
 	}
@@ -83,6 +86,7 @@ func New(cfg *config.Config, host string) *Orchestrator {
 		broadcaster: ui.NewBroadcaster(),
 		cfg:         cfg,
 		host:        host,
+		repo:        repo,
 		sessions:    NewSessionTracker(),
 		shutdownCh:  make(chan struct{}),
 	}
