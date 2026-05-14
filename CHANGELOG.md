@@ -1,5 +1,17 @@
 # Changelog
 
+## [1.7.2](https://github.com/drgould/multi-dev-proxy/compare/v1.7.1...v1.7.2) (2026-05-14)
+
+
+### Features
+
+* log cross-repo link connect/disconnect during mdp run ([#45](https://github.com/drgould/multi-dev-proxy/issues/45)) ([46e2212](https://github.com/drgould/multi-dev-proxy/commit/46e22120e627566e5bc90e876676be3540e082d2))
+
+
+### Miscellaneous
+
+* release 1.7.2 ([44fad4d](https://github.com/drgould/multi-dev-proxy/commit/44fad4d2e8106c31dd3f88eef9752defea496c45))
+
 ## [1.7.1](https://github.com/drgould/multi-dev-proxy/compare/v1.7.0...v1.7.1) (2026-05-07)
 
 
