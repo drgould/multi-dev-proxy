@@ -214,6 +214,14 @@
 			const info = data[repo][name];
 			if (info) {
 				const group = info.group || "";
+				let groupCount = 0;
+				if (group) {
+					for (const r of Object.keys(data)) {
+						for (const n of Object.keys(data[r])) {
+							if (data[r][n].group === group) groupCount++;
+						}
+					}
+				}
 				// Single-mode: name = `<actualRepo>/<group>` (group may contain
 				// "/"). The server-side parser splits `repo` at the last slash,
 				// so for branches like "feature/foo" the API-given `repo`
@@ -225,7 +233,7 @@
 					}
 				}
 				const service = serviceFromName(name, repo, group);
-				if (group && service && service !== group) {
+				if (group && service && service !== group && groupCount > 1) {
 					return `${repo} \u00b7 ${group} \u00b7 ${service}`;
 				}
 				return `${repo} \u00b7 ${group || service}`;
