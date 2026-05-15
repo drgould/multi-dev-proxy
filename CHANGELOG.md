@@ -1,5 +1,22 @@
 # Changelog
 
+## [1.8.0](https://github.com/drgould/multi-dev-proxy/compare/v1.7.3...v1.8.0) (2026-05-15)
+
+
+### ⚠ BREAKING CHANGES
+
+* register multi-port services under the parent service key ([#49](https://github.com/drgould/multi-dev-proxy/issues/49))
+
+### Bug Fixes
+
+* hide service name in pill for single-service groups ([#51](https://github.com/drgould/multi-dev-proxy/issues/51)) ([492a34e](https://github.com/drgould/multi-dev-proxy/commit/492a34ec6ff9375ceeee09d9031dfd6cac4d105a))
+* register multi-port services under the parent service key ([#49](https://github.com/drgould/multi-dev-proxy/issues/49)) ([051477c](https://github.com/drgould/multi-dev-proxy/commit/051477ca595f98583c3e0d624ca121b544f012d4))
+
+
+### Miscellaneous
+
+* release as 1.8.0 ([#52](https://github.com/drgould/multi-dev-proxy/issues/52)) ([1651067](https://github.com/drgould/multi-dev-proxy/commit/1651067f92cab7f0a4bdeab779e510f2405bba9f))
+
 ## [1.7.3](https://github.com/drgould/multi-dev-proxy/compare/v1.7.2...v1.7.3) (2026-05-14)
 
 
