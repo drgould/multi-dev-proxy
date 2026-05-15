@@ -362,12 +362,8 @@ func launchBatchService(
 				continue
 			}
 			if pm.Proxy > 0 {
-				serviceName := pm.Name
-				if serviceName == "" {
-					serviceName = pm.Env
-				}
 				registrations = append(registrations, regEntry{
-					serverName: fmt.Sprintf("%s/%s", a.svcGroup, serviceName),
+					serverName: fmt.Sprintf("%s/%s", a.svcGroup, a.name),
 					port:       port,
 					proxyPort:  pm.Proxy,
 				})

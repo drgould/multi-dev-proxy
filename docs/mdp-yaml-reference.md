@@ -275,9 +275,10 @@ services:
     ports:
       - env: API_PORT
         proxy: 4000         # HTTP — registered with the 4000 proxy
-        name: api
       - env: DB_PORT        # no proxy — DB port is internal only
 ```
+
+Every proxy-bearing port of a multi-port service registers under the parent service's key (`<group>/<service>`). The registered entry's `env` map carries all of the service's resolved env vars, so cross-repo refs select a specific port by env-var name: `@<repo>.<service>.env.<ENV_VAR>`. The bare form `@<repo>.<service>.port` is ambiguous when a service has more than one proxy-bearing port and will be rejected with a 409 — use the `.env.<KEY>` form. Two ports of the same service cannot share a `proxy:` value (the second would silently overwrite the first; mdp rejects the config at load time).
 
 Other services reference the named ports as `${svc.NAME}`, where `NAME` is the port mapping's `env` key:
 
@@ -309,10 +310,8 @@ services:
     ports:
       - env: API_PORT
         proxy: 4000
-        name: api
       - env: AUTH_PORT
         proxy: 5000
-        name: auth
 ```
 
 **Custom regex mode** (mapping form) — provide any Go-regexp pattern with named captures `name` and `msg`. Useful for kubectl, honcho/foreman, bracket-prefixed tools, or anything else that multiplexes logs over one stream.
@@ -419,9 +418,8 @@ Entries in `services.<name>.ports[]`.
 | Key | Type | Required | Notes |
 |---|---|---|---|
 | `env` | string | yes | Env var name that will hold the allocated port. Reference from other services' `env` with `${svc.NAME}`, or from `global.env` with `${svc.env.NAME}`. |
-| `proxy` | int | no (default `0`) | Proxy port to register this port on. `0` = no proxy (use for DB / non-HTTP ports). |
-| `name` | string | no | Display name in the TUI and server registry. Defaults to the `env` value. Not allowed with `protocol: udp`. |
-| `protocol` | string | no (default `tcp`) | Transport protocol. `udp` marks the port as UDP: allocation uses a UDP-aware free-port check, and the `depends_on` readiness probe skips it (TCP probes never succeed on UDP). Incompatible with `proxy` and `name`. |
+| `proxy` | int | no (default `0`) | Proxy port to register this port on. `0` = no proxy (use for DB / non-HTTP ports). Two ports of the same service cannot share a `proxy:` value. |
+| `protocol` | string | no (default `tcp`) | Transport protocol. `udp` marks the port as UDP: allocation uses a UDP-aware free-port check, and the `depends_on` readiness probe skips it (TCP probes never succeed on UDP). Incompatible with `proxy`. |
 
 ```yaml
 services:
@@ -435,16 +433,14 @@ services:
     ports:
       - env: API_PORT
         proxy: 4000
-        name: api
       - env: WS_PORT
         proxy: 4001
-        name: websocket
       - env: DB_PORT     # internal only, no proxy
       - env: JAEGER_AGENT_PORT
         protocol: udp    # UDP-only; compose publishes "${JAEGER_AGENT_PORT}:6831/udp"
 ```
 
-In the TUI this service appears as `<group>/api`, `<group>/websocket`, and `<group>/DB_PORT` (falling back to the env name when `name` is omitted). UDP mappings are not registered against any proxy and do not appear in the TUI.
+In the TUI this service appears as `<group>/infra` on both the 4000 and 4001 proxies — the parent service key is the registered identity. Internal-only ports (no `proxy:`) and UDP mappings are not registered against any proxy and do not appear in the TUI.
 
 ## Interpolation
 

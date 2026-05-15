@@ -225,7 +225,7 @@ func TestLaunchBatchServiceSkipsUDPPortsFromProbe(t *testing.T) {
 				"JAEGER_AGENT_PORT": {Value: "auto"},
 			},
 			Ports: []config.PortMapping{
-				{Env: "API_PORT", Proxy: 4000, Name: "api"},
+				{Env: "API_PORT", Proxy: 4000},
 				{Env: "JAEGER_AGENT_PORT", Protocol: "udp"},
 			},
 		},
@@ -288,7 +288,7 @@ func TestLaunchBatchServiceSkipsProxylessPorts(t *testing.T) {
 				"DB_PORT":  {Value: "auto"},
 			},
 			Ports: []config.PortMapping{
-				{Env: "API_PORT", Proxy: 4000, Name: "api"},
+				{Env: "API_PORT", Proxy: 4000},
 				{Env: "DB_PORT"}, // no proxy — should be skipped
 			},
 		},
@@ -312,8 +312,8 @@ func TestLaunchBatchServiceSkipsProxylessPorts(t *testing.T) {
 	if got, _ := body["port"].(float64); int(got) != 40001 {
 		t.Errorf("port = %v, want 40001", body["port"])
 	}
-	if got, _ := body["name"].(string); got != "main/api" {
-		t.Errorf("name = %v, want main/api", body["name"])
+	if got, _ := body["name"].(string); got != "main/infra" {
+		t.Errorf("name = %v, want main/infra", body["name"])
 	}
 }
 

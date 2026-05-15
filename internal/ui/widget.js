@@ -60,8 +60,11 @@
 			});
 	}
 
-	// Build port map from config: find the group the active server belongs to,
-	// then map each sibling proxy port to the group member on that port.
+	// Build port map from config: locate the group containing activeName,
+	// then map each proxy port (current + siblings) to the service registered
+	// on that proxy for that group. Driven by config.groupPortMaps so
+	// multi-port services — where one service spans several proxies — pin
+	// the cookie correctly on every relevant proxy.
 	function buildPortMap(activeName) {
 		if (!config || !activeName) return null;
 		const groups = config.groups || {};
@@ -73,18 +76,15 @@
 			}
 		}
 		if (!groupName) return null;
-		const members = groups[groupName];
+		const portMap = (config.groupPortMaps || {})[groupName] || {};
 		const ports = {};
-		// Current proxy port → active server
+		// Current proxy port → active server (may differ from portMap entry
+		// when the user has manually overridden the cookie on this proxy).
 		ports[String(config.port)] = activeName;
-		// Sibling proxy ports → one unique group member per sibling.
-		// Keep assignment stable by iterating members in declared order.
-		const remainingMembers = members.filter((m) => m !== activeName);
 		if (config.siblings) {
 			for (const sib of config.siblings) {
-				const next = remainingMembers.shift();
-				if (!next) break;
-				ports[String(sib.port)] = next;
+				const name = portMap[String(sib.port)];
+				if (name) ports[String(sib.port)] = name;
 			}
 		}
 		return Object.keys(ports).length > 0 ? ports : null;

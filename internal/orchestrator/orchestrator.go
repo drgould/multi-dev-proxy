@@ -11,6 +11,7 @@ import (
 	"log/slog"
 	"net"
 	"net/http"
+	"strconv"
 	"sync"
 	"time"
 
@@ -229,11 +230,12 @@ func (o *Orchestrator) createProxyLocked(port int, label string) (*ProxyInstance
 		o.mu.RLock()
 		defer o.mu.RUnlock()
 		resp := api.ConfigResponse{
-			Port:       port,
-			CookieName: cookieName,
-			Label:      label,
-			Default:    reg.GetDefault(),
-			Groups:     o.groupsLocked(),
+			Port:          port,
+			CookieName:    cookieName,
+			Label:         label,
+			Default:       reg.GetDefault(),
+			Groups:        o.groupsLocked(),
+			GroupPortMaps: o.groupPortMapsLocked(),
 		}
 		for _, pi := range o.proxies {
 			if pi.Port == port {
@@ -482,25 +484,52 @@ func (o *Orchestrator) groupsLocked() map[string][]string {
 	return groups
 }
 
-// findPeer searches every proxy's registry for a service matching the given
+// groupPortMapsLocked returns {group → {proxyPort → serviceName}} for the
+// widget. For each proxy, picks the first registry entry whose Group matches
+// — that's the upstream the proxy would route to if its cookie were set to
+// any member of that group. Multi-port services collapse cleanly: each
+// proxy gets the same service name (and a different backend port), so
+// pinning the cookie on every relevant proxy lands the user on the right
+// upstream regardless of which port they entered through.
+func (o *Orchestrator) groupPortMapsLocked() map[string]map[string]string {
+	out := make(map[string]map[string]string)
+	for _, pi := range o.proxies {
+		seenInProxy := map[string]bool{}
+		for _, entry := range pi.Registry.List() {
+			if entry.Group == "" || seenInProxy[entry.Group] {
+				continue
+			}
+			seenInProxy[entry.Group] = true
+			if out[entry.Group] == nil {
+				out[entry.Group] = map[string]string{}
+			}
+			out[entry.Group][strconv.Itoa(pi.Port)] = entry.Name
+		}
+	}
+	return out
+}
+
+// findPeers searches every proxy's registry for services matching the given
 // (group, repo, service) tuple. The service argument may be the bare service
 // name as it appears in mdp.yaml (e.g. "api") or the registered "<group>/<svc>"
-// form. Returns nil if no match exists.
-func (o *Orchestrator) findPeer(group, repo, service string) *registry.ServerEntry {
+// form. Returns every match — a multi-port service registers one entry per
+// proxy-bearing port, all under the same name, and the caller decides how
+// to handle multiple matches.
+func (o *Orchestrator) findPeers(group, repo, service string) []registry.ServerEntry {
 	o.mu.RLock()
 	defer o.mu.RUnlock()
+	var out []registry.ServerEntry
 	for _, pi := range o.proxies {
 		for _, entry := range pi.Registry.List() {
 			if entry.Group != group || entry.Repo != repo {
 				continue
 			}
 			if entry.Name == service || entry.Name == group+"/"+service {
-				e := entry
-				return &e
+				out = append(out, entry)
 			}
 		}
 	}
-	return nil
+	return out
 }
 
 // SwitchGroup sets the default upstream on every proxy that has a service

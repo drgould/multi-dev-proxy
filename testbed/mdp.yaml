@@ -80,7 +80,6 @@ services:
     ports:
       - env: PORT
         proxy: 3001
-        name: api-main
 
   # === feature-a branch ===
   web-feature-a:

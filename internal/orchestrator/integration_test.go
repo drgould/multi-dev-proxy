@@ -380,8 +380,8 @@ func TestMultiPortServiceRegistersAll(t *testing.T) {
 					"WS_PORT":  {Value: "auto"},
 				},
 				Ports: []config.PortMapping{
-					{Env: "API_PORT", Proxy: proxyA, Name: "api"},
-					{Env: "WS_PORT", Proxy: proxyB, Name: "ws"},
+					{Env: "API_PORT", Proxy: proxyA},
+					{Env: "WS_PORT", Proxy: proxyB},
 				},
 			},
 		},
@@ -396,12 +396,12 @@ func TestMultiPortServiceRegistersAll(t *testing.T) {
 	}
 
 	piA := o.GetProxy(proxyA)
-	if piA == nil || piA.Registry.Get("test/api") == nil {
-		t.Errorf("expected test/api registered on proxy %d", proxyA)
+	if piA == nil || piA.Registry.Get("test/myapp") == nil {
+		t.Errorf("expected test/myapp registered on proxy %d", proxyA)
 	}
 	piB := o.GetProxy(proxyB)
-	if piB == nil || piB.Registry.Get("test/ws") == nil {
-		t.Errorf("expected test/ws registered on proxy %d", proxyB)
+	if piB == nil || piB.Registry.Get("test/myapp") == nil {
+		t.Errorf("expected test/myapp registered on proxy %d", proxyB)
 	}
 }
 

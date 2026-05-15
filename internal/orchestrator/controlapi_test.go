@@ -2,10 +2,13 @@ package orchestrator
 
 import (
 	"bytes"
+	"context"
 	"encoding/json"
+	"fmt"
 	"net"
 	"net/http"
 	"net/http/httptest"
+	"strings"
 	"testing"
 
 	"github.com/derekgould/multi-dev-proxy/internal/config"
@@ -378,25 +381,78 @@ func TestControlAPIPeerLookup(t *testing.T) {
 	})
 }
 
-func TestControlAPIRegisterAcceptsRepoAndEnv(t *testing.T) {
+// A multi-port service registers on >1 proxy under the same name. Bare
+// .port lookups are ambiguous in that case (each registration has a
+// different backend port), so the handler should reject the lookup loudly
+// rather than silently returning whichever entry the proxy map iterates
+// first. Env lookups still succeed because every match shares the parent
+// service's resolved env map.
+func TestControlAPIPeerLookupAmbiguousPort(t *testing.T) {
 	o := New(&config.Config{}, "", "")
+	env := map[string]string{"DASH_PORT": "11111", "JAEGER_PORT": "22222"}
+
+	o.mu.Lock()
+	regA := registry.New()
+	regA.Register(&registry.ServerEntry{Name: "dev/infra", Repo: "platform", Group: "dev", Port: 11111, Env: env})
+	o.proxies[5601] = &ProxyInstance{Port: 5601, Registry: regA, CookieName: "__mdp_upstream_5601", cancel: func() {}}
+
+	regB := registry.New()
+	regB.Register(&registry.ServerEntry{Name: "dev/infra", Repo: "platform", Group: "dev", Port: 22222, Env: env})
+	o.proxies[16686] = &ProxyInstance{Port: 16686, Registry: regB, CookieName: "__mdp_upstream_16686", cancel: func() {}}
+	o.mu.Unlock()
 	handler := NewControlAPI(o, nil).Handler()
 
-	body := bytes.NewBufferString(`{
+	t.Run("bare port lookup is 409", func(t *testing.T) {
+		req := httptest.NewRequest("GET", "/__mdp/peers?group=dev&repo=platform&service=infra&kind=port", nil)
+		rec := httptest.NewRecorder()
+		handler.ServeHTTP(rec, req)
+		if rec.Code != http.StatusConflict {
+			t.Fatalf("expected 409, got %d; body: %s", rec.Code, rec.Body.String())
+		}
+		var body map[string]string
+		json.NewDecoder(rec.Body).Decode(&body)
+		if !strings.Contains(body["error"], "env.<KEY>") {
+			t.Errorf("error = %q, want it to point at env.<KEY> migration", body["error"])
+		}
+	})
+
+	t.Run("env lookup still 200", func(t *testing.T) {
+		req := httptest.NewRequest("GET", "/__mdp/peers?group=dev&repo=platform&service=infra&kind=env", nil)
+		rec := httptest.NewRecorder()
+		handler.ServeHTTP(rec, req)
+		if rec.Code != http.StatusOK {
+			t.Fatalf("expected 200, got %d; body: %s", rec.Code, rec.Body.String())
+		}
+		var body map[string]any
+		json.NewDecoder(rec.Body).Decode(&body)
+		envBody, _ := body["env"].(map[string]any)
+		if envBody["DASH_PORT"] != "11111" {
+			t.Errorf("env.DASH_PORT = %v, want 11111", envBody["DASH_PORT"])
+		}
+	})
+}
+
+func TestControlAPIRegisterAcceptsRepoAndEnv(t *testing.T) {
+	o := New(&config.Config{}, "", "")
+	t.Cleanup(func() { o.Shutdown(context.Background()) })
+	handler := NewControlAPI(o, nil).Handler()
+
+	proxyPort := freeTCPPort(t)
+	body := bytes.NewBufferString(fmt.Sprintf(`{
 		"name": "dev/api",
 		"port": 9001,
-		"proxyPort": 4000,
+		"proxyPort": %d,
 		"group": "dev",
 		"repo": "backend",
 		"env": {"AUTH_TOKEN": "secret"}
-	}`)
+	}`, proxyPort))
 	req := httptest.NewRequest("POST", "/__mdp/register", body)
 	rec := httptest.NewRecorder()
 	handler.ServeHTTP(rec, req)
 	if rec.Code != http.StatusOK {
 		t.Fatalf("expected 200, got %d; body: %s", rec.Code, rec.Body.String())
 	}
-	pi := o.GetProxy(4000)
+	pi := o.GetProxy(proxyPort)
 	if pi == nil {
 		t.Fatal("proxy not created")
 	}

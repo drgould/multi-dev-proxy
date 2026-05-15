@@ -704,20 +704,21 @@ func TestStartConfigServicesRegistersWithOrchRepo(t *testing.T) {
 		t.Fatalf("StartConfigServices: %v", err)
 	}
 
-	entry := o.findPeer("main", "backend", "api")
-	if entry == nil {
-		t.Fatal("findPeer(main, backend, api) returned nil; expected to match registered service")
+	entries := o.findPeers("main", "backend", "api")
+	if len(entries) == 0 {
+		t.Fatal("findPeers(main, backend, api) returned nothing; expected to match registered service")
 	}
+	entry := entries[0]
 	if entry.Port != servicePort {
-		t.Errorf("findPeer port = %d, want %d", entry.Port, servicePort)
+		t.Errorf("findPeers port = %d, want %d", entry.Port, servicePort)
 	}
 	if got := entry.Env["AUTH_TOKEN"]; got != "secret-xyz" {
-		t.Errorf("findPeer Env[AUTH_TOKEN] = %q, want secret-xyz (Env must be populated for @<repo>.svc.env.VAR lookups)", got)
+		t.Errorf("findPeers Env[AUTH_TOKEN] = %q, want secret-xyz (Env must be populated for @<repo>.svc.env.VAR lookups)", got)
 	}
 
 	// Must NOT match when queried with the service name as the repo —
 	// that's the value the old bug stored in Repo.
-	if entry := o.findPeer("main", "api", "api"); entry != nil {
-		t.Errorf("findPeer(main, api, api) returned %+v; expected nil", entry)
+	if got := o.findPeers("main", "api", "api"); len(got) != 0 {
+		t.Errorf("findPeers(main, api, api) returned %d entries; expected 0", len(got))
 	}
 }
