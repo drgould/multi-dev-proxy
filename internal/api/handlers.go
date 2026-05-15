@@ -283,12 +283,18 @@ func DefaultSetHandler(reg *registry.Registry) http.HandlerFunc {
 
 // ConfigResponse is the JSON shape for GET /__mdp/config.
 type ConfigResponse struct {
-	Port       int             `json:"port"`
-	CookieName string          `json:"cookieName"`
-	Label      string          `json:"label"`
-	Default    string          `json:"default"`
-	Siblings   []SiblingProxy  `json:"siblings,omitempty"`
+	Port       int                 `json:"port"`
+	CookieName string              `json:"cookieName"`
+	Label      string              `json:"label"`
+	Default    string              `json:"default"`
+	Siblings   []SiblingProxy      `json:"siblings,omitempty"`
 	Groups     map[string][]string `json:"groups,omitempty"`
+	// GroupPortMaps maps {group → {proxyPort → serviceName}} for use by the
+	// widget when pinning sibling proxies on group switch. Computed
+	// per-proxy-registry so multi-port services (where one service spans
+	// several proxies) resolve deterministically: each proxy reports the
+	// service in that group registered on *that* proxy.
+	GroupPortMaps map[string]map[string]string `json:"groupPortMaps,omitempty"`
 }
 
 // SiblingProxy describes another proxy managed by the same orchestrator.

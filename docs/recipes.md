@@ -19,11 +19,9 @@ services:
       AUTH_PORT: auto
     ports:
       - env: API_PORT
-        proxy: 4000
-        name: api          # registered as "<branch>/api"
+        proxy: 4000        # registered as "<branch>/infra" on the 4000 proxy
       - env: AUTH_PORT
-        proxy: 5000
-        name: auth
+        proxy: 5000        # registered as "<branch>/infra" on the 5000 proxy
 ```
 
 In your `docker-compose.yml`, reference the environment variables:
@@ -51,7 +49,7 @@ mdp run --log-split=compose -- docker compose up
 
 For non-compose multiplexers (kubectl, honcho/foreman, bracket-prefixed tools), use the regex form — see [`log_split`](./mdp-yaml-reference.md#log_split--demultiplex-combined-stream-logs) in the reference.
 
-**Non-HTTP ports (no proxy):** omit `proxy:` (and optionally `name:`) on a `ports:` entry to allocate a free port for `${svc.env.VAR}` interpolation without starting a reverse-proxy listener for it. Useful for databases, caches, and other non-HTTP services other services just need to connect to directly.
+**Non-HTTP ports (no proxy):** omit `proxy:` on a `ports:` entry to allocate a free port for `${svc.env.VAR}` interpolation without starting a reverse-proxy listener for it. Useful for databases, caches, and other non-HTTP services other services just need to connect to directly.
 
 ```yaml
 db:
@@ -84,7 +82,7 @@ services:
       - "${JAEGER_AGENT_PORT}:6831/udp"
 ```
 
-UDP mappings are allocation-only: `proxy:` and `name:` are rejected at config load.
+UDP mappings are allocation-only: `proxy:` is rejected at config load.
 
 ## HTTPS
 

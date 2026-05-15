@@ -327,11 +327,7 @@ func (o *Orchestrator) startMultiPortService(ctx context.Context, name string, s
 			// register against a reverse-proxy listener.
 			continue
 		}
-		serviceName := pm.Name
-		if serviceName == "" {
-			serviceName = pm.Env
-		}
-		serverName := fmt.Sprintf("%s/%s", group, serviceName)
+		serverName := fmt.Sprintf("%s/%s", group, name)
 		entry := &registry.ServerEntry{
 			Name:        serverName,
 			Repo:        o.repo,

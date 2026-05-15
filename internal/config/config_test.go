@@ -60,10 +60,8 @@ services:
     ports:
       - env: API_PORT
         proxy: 4000
-        name: api
       - env: AUTH_PORT
         proxy: 5000
-        name: auth
 `), 0644)
 
 	cfg, err := Load(path)
@@ -74,7 +72,7 @@ services:
 	if len(infra.Ports) != 2 {
 		t.Fatalf("expected 2 port mappings, got %d", len(infra.Ports))
 	}
-	if infra.Ports[0].Name != "api" || infra.Ports[0].Proxy != 4000 {
+	if infra.Ports[0].Env != "API_PORT" || infra.Ports[0].Proxy != 4000 {
 		t.Errorf("ports[0] = %+v", infra.Ports[0])
 	}
 }
@@ -127,7 +125,6 @@ services:
         protocol: UDP
       - env: API_PORT
         proxy: 4000
-        name: api
 `), 0644)
 
 	cfg, err := Load(path)
@@ -193,7 +190,10 @@ services:
 	}
 }
 
-func TestLoadRejectsUDPWithName(t *testing.T) {
+// The `name:` field on port mappings was removed; configs that still set it
+// must fail loudly so users don't silently get re-routed under the parent
+// service key without noticing.
+func TestLoadRejectsRemovedPortName(t *testing.T) {
 	dir := t.TempDir()
 	path := filepath.Join(dir, "mdp.yaml")
 	os.WriteFile(path, []byte(`
@@ -201,19 +201,48 @@ services:
   infra:
     command: docker compose up
     env:
-      X: auto
+      API_PORT: auto
     ports:
-      - env: X
-        protocol: udp
-        name: x
+      - env: API_PORT
+        proxy: 4000
+        name: api
 `), 0644)
 
 	_, err := Load(path)
 	if err == nil {
-		t.Fatal("expected error for udp+name, got nil")
+		t.Fatal("expected error for removed name: field, got nil")
 	}
-	if !strings.Contains(err.Error(), "name") {
-		t.Errorf("error = %v, want it to mention name", err)
+	if !strings.Contains(err.Error(), "name:") {
+		t.Errorf("error = %v, want it to mention the removed name: field", err)
+	}
+}
+
+// Multi-port services register every proxy-bearing port under the parent
+// service's name, so two ports sharing a proxy would silently overwrite each
+// other in the registry. Reject the config instead.
+func TestLoadRejectsSameProxyTwice(t *testing.T) {
+	dir := t.TempDir()
+	path := filepath.Join(dir, "mdp.yaml")
+	os.WriteFile(path, []byte(`
+services:
+  infra:
+    command: docker compose up
+    env:
+      API_PORT: auto
+      DEBUG_PORT: auto
+    ports:
+      - env: API_PORT
+        proxy: 4000
+      - env: DEBUG_PORT
+        proxy: 4000
+`), 0644)
+
+	_, err := Load(path)
+	if err == nil {
+		t.Fatal("expected error for duplicate proxy, got nil")
+	}
+	if !strings.Contains(err.Error(), "4000") {
+		t.Errorf("error = %v, want it to mention the duplicated proxy port", err)
 	}
 }
 

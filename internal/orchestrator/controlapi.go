@@ -292,6 +292,13 @@ func (c *ControlAPI) handleListServices(w http.ResponseWriter, r *http.Request) 
 // service's port and exposed env vars. Lookup keys are (group, repo, service);
 // service may be the bare service name or "<group>/<service>" form (the way
 // it was registered by mdp run).
+//
+// `kind` ("port" or "env") tells the handler which form the caller is using.
+// For "port", a service with multiple registrations (multi-port) is ambiguous
+// because each registration has a different backend Port — 409 Conflict
+// surfaces this loudly instead of silently returning whichever entry the
+// proxy map iterates first. For "env", all matches share the same Env map
+// (it's the parent service's resolved env), so the first match is sufficient.
 func (c *ControlAPI) handlePeerLookup(w http.ResponseWriter, r *http.Request) {
 	q := r.URL.Query()
 	group, repo, service := q.Get("group"), q.Get("repo"), q.Get("service")
@@ -299,14 +306,25 @@ func (c *ControlAPI) handlePeerLookup(w http.ResponseWriter, r *http.Request) {
 		writeJSON(w, http.StatusBadRequest, map[string]string{"error": "group, repo, and service query params are required"})
 		return
 	}
-	entry := c.orch.findPeer(group, repo, service)
-	if entry == nil {
+	kind := q.Get("kind")
+	if kind == "" {
+		kind = "port"
+	}
+	entries := c.orch.findPeers(group, repo, service)
+	if len(entries) == 0 {
 		writeJSON(w, http.StatusNotFound, map[string]string{"error": "peer not found"})
 		return
 	}
+	if kind == "port" && len(entries) > 1 {
+		writeJSON(w, http.StatusConflict, map[string]string{
+			"error": fmt.Sprintf("service %q registers on %d proxies; bare .port ref is ambiguous — use @<repo>.%s.env.<KEY> instead", service, len(entries), service),
+		})
+		return
+	}
+	e := entries[0]
 	writeJSON(w, http.StatusOK, map[string]any{
-		"port": entry.Port,
-		"env":  entry.Env,
+		"port": e.Port,
+		"env":  e.Env,
 	})
 }
 

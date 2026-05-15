@@ -177,15 +177,23 @@ func (h *HealthCheck) Validate() error {
 	return nil
 }
 
-// PortMapping maps an auto-assigned port env var to a proxy and service name.
+// PortMapping declares one auto-assigned port for a multi-port service.
 // Proxy is optional: omit it for non-HTTP ports (databases, caches, etc.) that
 // need a free port allocated for ${svc.env} interpolation but should not be
 // registered with an HTTP reverse-proxy listener.
+//
+// All proxy-bearing ports of a service register under the parent service's
+// key (`<group>/<service-key>`); individual ports are addressed by env-var
+// key via `@<repo>.<svc>.env.<KEY>` for cross-repo refs.
+//
+// Name is no longer supported; it's kept on the struct purely to detect
+// stale configs at Load time and emit a migration error. Remove on the
+// next major bump.
 type PortMapping struct {
 	Env      string `yaml:"env"`
 	Proxy    int    `yaml:"proxy"`
-	Name     string `yaml:"name"`
 	Protocol string `yaml:"protocol"` // "tcp" (default) or "udp"
+	Name     string `yaml:"name"`     // removed; Load errors when set
 }
 
 // EnvProtocols returns a {env var → normalized protocol} map for every entry
@@ -235,8 +243,16 @@ func Load(path string) (*Config, error) {
 		if svc.Scheme == "" && svc.TLSCert != "" {
 			svc.Scheme = "https"
 		}
-		// Normalize + validate port mapping protocols.
+		// Normalize + validate port mapping protocols, and reject same-proxy
+		// duplicates within a service. Without this check, two ports declaring
+		// the same `proxy:` would silently overwrite each other in the registry
+		// (entries are keyed by service name, which is shared across a
+		// service's ports).
+		seenProxy := map[int]string{}
 		for i, pm := range svc.Ports {
+			if pm.Name != "" {
+				return nil, fmt.Errorf("service %q: port %q sets removed `name:` field — drop it; multi-port services now register under the parent service key (e.g. \"<group>/%s\"). See docs/mdp-yaml-reference.md#ports--multi-port-services", name, pm.Env, name)
+			}
 			proto := strings.ToLower(pm.Protocol)
 			switch proto {
 			case "", "tcp":
@@ -245,11 +261,14 @@ func Load(path string) (*Config, error) {
 				if pm.Proxy > 0 {
 					return nil, fmt.Errorf("service %q: protocol: udp is incompatible with a non-zero proxy port (env %q)", name, pm.Env)
 				}
-				if pm.Name != "" {
-					return nil, fmt.Errorf("service %q: name: has no effect on UDP port mappings (env %q)", name, pm.Env)
-				}
 			default:
 				return nil, fmt.Errorf("service %q: unknown protocol %q for port mapping %q (expected \"tcp\" or \"udp\")", name, pm.Protocol, pm.Env)
+			}
+			if pm.Proxy > 0 {
+				if prev, ok := seenProxy[pm.Proxy]; ok {
+					return nil, fmt.Errorf("service %q: ports %q and %q both declare proxy: %d (one proxy per service-port)", name, prev, pm.Env, pm.Proxy)
+				}
+				seenProxy[pm.Proxy] = pm.Env
 			}
 			svc.Ports[i].Protocol = proto
 		}

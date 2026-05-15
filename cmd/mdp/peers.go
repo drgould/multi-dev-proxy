@@ -81,17 +81,36 @@ func effectiveGroup(repo, defaultGroup string, linkMap map[string]string) string
 // (value, true) when the peer is registered and the requested key resolves;
 // (zero, false) otherwise. defaultGroup is the caller's group; linkMap
 // (optional, may be nil) overrides the lookup group for specific peer repos.
+//
+// The `kind` query param distinguishes port vs env lookups so the
+// orchestrator can return 409 on the ambiguous case (bare .port ref against
+// a service with >1 proxy). A 409 is logged at Warn so the user sees a
+// clear migration message instead of silently falling through to the
+// inline :-default.
 func resolvePeer(client *http.Client, controlURL, defaultGroup string, linkMap map[string]string, ref peerRef) (string, bool) {
 	q := url.Values{}
 	q.Set("group", effectiveGroup(ref.repo, defaultGroup, linkMap))
 	q.Set("repo", ref.repo)
 	q.Set("svc", ref.svc) // unused by current handler, kept for future indexing
 	q.Set("service", ref.svc)
+	if ref.isEnv {
+		q.Set("kind", "env")
+	} else {
+		q.Set("kind", "port")
+	}
 	resp, err := client.Get(controlURL + "/__mdp/peers?" + q.Encode())
 	if err != nil {
 		return "", false
 	}
 	defer resp.Body.Close()
+	if resp.StatusCode == http.StatusConflict {
+		var body struct {
+			Error string `json:"error"`
+		}
+		_ = json.NewDecoder(resp.Body).Decode(&body)
+		slog.Warn("cross-repo ref ambiguous", "ref", ref.signature(), "err", body.Error)
+		return "", false
+	}
 	if resp.StatusCode != http.StatusOK {
 		return "", false
 	}
