@@ -1,5 +1,12 @@
 # Changelog
 
+## [1.9.0](https://github.com/drgould/multi-dev-proxy/compare/v1.8.0...v1.9.0) (2026-05-21)
+
+
+### Features
+
+* add Homebrew formula for Linux support ([#53](https://github.com/drgould/multi-dev-proxy/issues/53)) ([b9aadc6](https://github.com/drgould/multi-dev-proxy/commit/b9aadc6fbe1dd665f687ebb80be04d22af283189))
+
 ## [1.8.0](https://github.com/drgould/multi-dev-proxy/compare/v1.7.3...v1.8.0) (2026-05-15)
 
 
