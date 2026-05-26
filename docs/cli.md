@@ -37,7 +37,12 @@ Without a command, reads `mdp.yaml` and batch-starts all configured services:
 ```sh
 mdp run                        # uses current git branch as group
 mdp run --group feature-auth   # override group name
+mdp run --service api          # start only `api` (and its depends_on)
+mdp run --service api,worker   # start a subset (also accepts repeated --service)
+MDP_SERVICES=api,worker mdp run  # same, via env var (flag wins if both are set)
 ```
+
+The `--service` selector restricts batch mode to a subset of the services declared in `mdp.yaml`. Names must match the service keys in the file; transitive `depends_on` entries are auto-included so dependency waits still work. Empty/unset = start everything (default).
 
 When a command is given, `mdp run` picks its mode in this order:
 
@@ -110,6 +115,7 @@ mdp --stop
 | Variable         | Description                                                                         |
 | ---------------- | ----------------------------------------------------------------------------------- |
 | `MDP_PROXY_PORT` | Default proxy port for `mdp run` and `mdp register` (overrides the default of 3000) |
+| `MDP_SERVICES`   | Comma-separated subset of services for `mdp run` batch mode (overridden by `--service`) |
 
 
 `**mdp` flags:**
@@ -141,6 +147,7 @@ mdp --stop
 | `--auto-tls`       | `false`       | Auto-detect TLS certs from mkcert                |
 | `--control-port`   | `13100`       | Orchestrator control port                        |
 | `--link`           |               | Override peer-lookup group: `repo=group` (repeatable). See [cross-repo refs](./mdp-yaml-reference.md#cross-group-lookups-via---link). |
+| `--service`        |               | Batch mode only: start only the listed services (repeatable or comma-separated). Transitive `depends_on` are auto-included. Falls back to `MDP_SERVICES`. |
 
 
 `**mdp register` flags:**
