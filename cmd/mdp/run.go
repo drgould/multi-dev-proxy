@@ -100,11 +100,38 @@ func parseLinks(values []string) (map[string]string, error) {
 	return out, nil
 }
 
+// referencedServices returns the local sibling services that svc needs present
+// to start cleanly: its explicit depends_on, plus any local service whose port
+// or env var it interpolates from its own env without a default fallback.
+// Cross-repo (@repo.) refs and defaulted refs are excluded — those tolerate the
+// target's absence (the orchestrator resolver / the default covers them).
+func referencedServices(svc config.ServiceConfig) []string {
+	refs := append([]string(nil), svc.DependsOn...)
+	for _, entry := range svc.Env {
+		if entry.Ref != "" {
+			if entry.HasDefault() || envexpand.IsCrossRepoBareRef(entry.Ref) {
+				continue
+			}
+			// Local bare ref: svc.key or svc.env.VAR — name is up to first dot.
+			name := entry.Ref
+			if i := strings.IndexByte(name, '.'); i > 0 {
+				name = name[:i]
+			}
+			refs = append(refs, name)
+			continue
+		}
+		refs = append(refs, envexpand.LocalServiceRefs(entry.Value)...)
+	}
+	return refs
+}
+
 // resolveServiceSelection returns the set of service names to start, or nil to
 // mean "all services". Empty selection (after trimming) returns nil. Unknown
 // names return an error listing the valid names. The returned set is extended
-// with the transitive closure of each selected service's depends_on so the
-// existing dependency machinery has something to wait on.
+// with the transitive closure of each selected service's dependencies — both
+// depends_on and the local services it interpolates from env (see
+// referencedServices) — so port allocation and env expansion have every
+// service they reference, not just the ones declared in depends_on.
 func resolveServiceSelection(cfg *config.Config, selection []string) (map[string]bool, error) {
 	cleaned := make([]string, 0, len(selection))
 	for _, s := range selection {
@@ -134,35 +161,31 @@ func resolveServiceSelection(cfg *config.Config, selection []string) (map[string
 	}
 
 	selected := make(map[string]bool, len(cleaned))
-	explicit := make(map[string]bool, len(cleaned))
 	for _, name := range cleaned {
-		explicit[name] = true
 		selected[name] = true
 	}
 
+	var pulled []string
 	queue := append([]string(nil), cleaned...)
 	for len(queue) > 0 {
 		name := queue[0]
 		queue = queue[1:]
-		for _, dep := range cfg.Services[name].DependsOn {
-			if !selected[dep] {
-				if _, ok := cfg.Services[dep]; !ok {
-					// depends_on validation in config.Load already catches
-					// this, but guard anyway so we don't silently skip.
-					return nil, fmt.Errorf("service %q depends on unknown service %q", name, dep)
-				}
-				selected[dep] = true
-				queue = append(queue, dep)
+		for _, ref := range referencedServices(cfg.Services[name]) {
+			if selected[ref] {
+				continue
 			}
+			if _, ok := cfg.Services[ref]; !ok {
+				// depends_on is validated in config.Load; an env ref to a
+				// missing service would fail expansion at full startup too.
+				// Surface it here with the referencing service for context.
+				return nil, fmt.Errorf("service %q references unknown service %q", name, ref)
+			}
+			selected[ref] = true
+			pulled = append(pulled, ref)
+			queue = append(queue, ref)
 		}
 	}
 
-	var pulled []string
-	for name := range selected {
-		if !explicit[name] {
-			pulled = append(pulled, name)
-		}
-	}
 	if len(pulled) > 0 {
 		sort.Strings(pulled)
 		slog.Info("auto-included dependencies", "services", pulled)
@@ -190,7 +213,16 @@ func runRun(cmd *cobra.Command, args []string) error {
 
 	if len(args) == 0 {
 		selection, _ := cmd.Flags().GetStringSlice("service")
-		if len(selection) == 0 {
+		// An explicit but empty flag (e.g. `--service ""`) must not shadow
+		// MDP_SERVICES — treat an all-blank selection as unset.
+		hasService := false
+		for _, s := range selection {
+			if strings.TrimSpace(s) != "" {
+				hasService = true
+				break
+			}
+		}
+		if !hasService {
 			if env := os.Getenv("MDP_SERVICES"); env != "" {
 				selection = strings.Split(env, ",")
 			}
@@ -858,12 +890,7 @@ func filterGlobalEnvForSkipped(globalEnv map[string]config.EnvValue, skipped map
 	out := make(map[string]config.EnvValue, len(globalEnv))
 	for k, entry := range globalEnv {
 		if entry.Ref != "" {
-			if entry.HasDefault() {
-				out[k] = entry
-				continue
-			}
-			if ref, ok := envexpand.ParseCrossRepoBareRef(entry.Ref); ok {
-				_ = ref
+			if entry.HasDefault() || envexpand.IsCrossRepoBareRef(entry.Ref) {
 				out[k] = entry
 				continue
 			}
@@ -880,10 +907,10 @@ func filterGlobalEnvForSkipped(globalEnv map[string]config.EnvValue, skipped map
 			out[k] = entry
 			continue
 		}
-		// Value form may embed ${svc.key} refs without defaults. Scan for any
-		// that point at skipped services.
-		if refsSkippedLocalSvcWithoutDefault(entry.Value, skipped) {
-			slog.Warn("omitting global env entry that references unselected service", "key", k, "value", entry.Value)
+		// Value form may embed ${svc.key} refs without defaults. Omit the entry
+		// if any such ref points at a skipped service.
+		if svc := firstSkippedRef(entry.Value, skipped); svc != "" {
+			slog.Warn("omitting global env entry that references unselected service", "key", k, "value", entry.Value, "service", svc)
 			continue
 		}
 		out[k] = entry
@@ -891,24 +918,16 @@ func filterGlobalEnvForSkipped(globalEnv map[string]config.EnvValue, skipped map
 	return out
 }
 
-// globalEnvRefRE matches embedded ${...} references inside an env value. It is
-// intentionally permissive (a subset of envexpand.refPattern) so we can
-// extract just the service name and detect a :- default.
-var globalEnvRefRE = regexp.MustCompile(`\$\{(@[A-Za-z0-9_-]+\.)?([A-Za-z0-9_-]+)\.(?:env\.)?[A-Za-z0-9_]+(:-[^}]*)?\}`)
-
-func refsSkippedLocalSvcWithoutDefault(value string, skipped map[string]bool) bool {
-	for _, m := range globalEnvRefRE.FindAllStringSubmatch(value, -1) {
-		if m[1] != "" {
-			continue // cross-repo ref — handled by resolver, not by skip filter
-		}
-		if m[3] != "" {
-			continue // has :- default; resolver will fall back
-		}
-		if skipped[m[2]] {
-			return true
+// firstSkippedRef returns the first local service referenced by value (without
+// a default) that is in the skipped set, or "" if none. Cross-repo and
+// defaulted refs are excluded by envexpand.LocalServiceRefs.
+func firstSkippedRef(value string, skipped map[string]bool) string {
+	for _, svc := range envexpand.LocalServiceRefs(value) {
+		if skipped[svc] {
+			return svc
 		}
 	}
-	return false
+	return ""
 }
 
 func envSliceToMap(env []string) map[string]string {

@@ -1113,6 +1113,7 @@ func TestParseLinks(t *testing.T) {
 }
 
 func TestResolveServiceSelection(t *testing.T) {
+	def := "9"
 	cfg := &config.Config{
 		Services: map[string]config.ServiceConfig{
 			"db":       {Command: "db"},
@@ -1121,6 +1122,27 @@ func TestResolveServiceSelection(t *testing.T) {
 			"worker":   {Command: "worker", DependsOn: []string{"db"}},
 			"frontend": {Command: "fe", DependsOn: []string{"api"}},
 			"solo":     {Command: "solo"},
+			// Env-ref services: depend on siblings via env, not depends_on.
+			"metrics": {Command: "m"},
+			"reporter": {Command: "r", Env: map[string]config.EnvValue{
+				"METRICS_URL": {Value: "http://localhost:${metrics.PORT}"},
+			}},
+			"queue": {Command: "q"},
+			"ingest": {Command: "i", Env: map[string]config.EnvValue{
+				"Q": {Ref: "queue.env.ADDR"},
+			}},
+			// Mirrors testbed web-main: depends_on api, env-refs db.
+			"web": {Command: "w", DependsOn: []string{"api"}, Env: map[string]config.EnvValue{
+				"DB_URL": {Value: "postgres://localhost:${db.DB_PORT}/app"},
+			}},
+			// Defaulted ref → tolerates absence, must not pull in (or error).
+			"opt": {Command: "o", Env: map[string]config.EnvValue{
+				"X": {Ref: "absent.PORT", Default: &def},
+			}},
+			// Cross-repo ref → resolved by orchestrator, must not pull in.
+			"xrepo": {Command: "x", Env: map[string]config.EnvValue{
+				"P": {Value: "${@backend.api.PORT}"},
+			}},
 		},
 	}
 
@@ -1201,6 +1223,64 @@ func TestResolveServiceSelection(t *testing.T) {
 		// "API" is not "api" — must error, not silently match.
 		if _, err := resolveServiceSelection(cfg, []string{"API"}); err == nil {
 			t.Error("expected case-sensitive mismatch to error")
+		}
+	})
+
+	t.Run("value-form env ref pulled in", func(t *testing.T) {
+		// reporter references ${metrics.PORT} but doesn't list it in depends_on.
+		got, err := resolveServiceSelection(cfg, []string{"reporter"})
+		if err != nil {
+			t.Fatalf("unexpected error: %v", err)
+		}
+		want := map[string]bool{"reporter": true, "metrics": true}
+		if !reflectEqualSet(got, want) {
+			t.Errorf("got %v, want %v", got, want)
+		}
+	})
+
+	t.Run("bare-ref-form env ref pulled in", func(t *testing.T) {
+		got, err := resolveServiceSelection(cfg, []string{"ingest"})
+		if err != nil {
+			t.Fatalf("unexpected error: %v", err)
+		}
+		want := map[string]bool{"ingest": true, "queue": true}
+		if !reflectEqualSet(got, want) {
+			t.Errorf("got %v, want %v", got, want)
+		}
+	})
+
+	t.Run("depends_on and env ref combine without double-count", func(t *testing.T) {
+		// Mirrors testbed `mdp run --service web-main`: web depends_on api and
+		// env-refs db. db arrives via both api's depends_on and web's env ref.
+		got, err := resolveServiceSelection(cfg, []string{"web"})
+		if err != nil {
+			t.Fatalf("unexpected error: %v", err)
+		}
+		want := map[string]bool{"web": true, "api": true, "db": true, "cache": true}
+		if !reflectEqualSet(got, want) {
+			t.Errorf("got %v, want %v", got, want)
+		}
+	})
+
+	t.Run("defaulted ref does not pull in or error", func(t *testing.T) {
+		// opt's ref targets a nonexistent service but has a default, so it must
+		// neither pull anything in nor error on the missing target.
+		got, err := resolveServiceSelection(cfg, []string{"opt"})
+		if err != nil {
+			t.Fatalf("unexpected error: %v", err)
+		}
+		if !reflectEqualSet(got, map[string]bool{"opt": true}) {
+			t.Errorf("got %v, want {opt}", got)
+		}
+	})
+
+	t.Run("cross-repo ref does not pull in", func(t *testing.T) {
+		got, err := resolveServiceSelection(cfg, []string{"xrepo"})
+		if err != nil {
+			t.Fatalf("unexpected error: %v", err)
+		}
+		if !reflectEqualSet(got, map[string]bool{"xrepo": true}) {
+			t.Errorf("got %v, want {xrepo}", got)
 		}
 	})
 }
