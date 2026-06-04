@@ -17,6 +17,7 @@ import (
 	"os/signal"
 	"path/filepath"
 	"regexp"
+	"slices"
 	"sort"
 	"strings"
 	"sync"
@@ -115,7 +116,7 @@ func pickPort(
 	r ports.PortRange,
 	exclude []int,
 ) (int, error) {
-	if p, ok := remembered[key]; ok && p >= r.Start && p <= r.End && isFree(p) && !intInSlice(p, exclude) {
+	if p, ok := remembered[key]; ok && p >= r.Start && p <= r.End && isFree(p) && !slices.Contains(exclude, p) {
 		if picked != nil {
 			picked[key] = p
 		}
@@ -129,15 +130,6 @@ func pickPort(
 		picked[key] = p
 	}
 	return p, nil
-}
-
-func intInSlice(v int, s []int) bool {
-	for _, x := range s {
-		if x == v {
-			return true
-		}
-	}
-	return false
 }
 
 // referencedServices returns the local sibling services that svc needs present
@@ -411,13 +403,10 @@ func runBatchMode(cmd *cobra.Command, controlPort int, groupFlag string, linkMap
 	}
 
 	if stable {
-		// Merge this run's picks over what was remembered so a service started
-		// via a different mode (single vs batch shares the same repo/group file)
-		// keeps its entry instead of being wiped.
-		for k, v := range picked {
-			remembered[k] = v
-		}
-		if err := portstore.Save(repo, group, remembered); err != nil {
+		// Save merges picked into the on-disk file under a lock, so other
+		// services' entries (and concurrent runs sharing this repo/group file)
+		// survive.
+		if err := portstore.Save(repo, group, picked); err != nil {
 			slog.Warn("failed to persist stable ports", "err", err)
 		}
 	}
@@ -1394,12 +1383,9 @@ func runSingleMode(cmd *cobra.Command, args []string, controlPort int, groupFlag
 		return fmt.Errorf("find free port: %w", err)
 	}
 	if stable {
-		// Merge over remembered so batch-mode services sharing this repo/group
-		// file aren't wiped by an ad-hoc single-command run.
-		for k, v := range picked {
-			remembered[k] = v
-		}
-		if err := portstore.Save(repo, group, remembered); err != nil {
+		// Save merges under a lock, so batch-mode services sharing this
+		// repo/group file aren't wiped by an ad-hoc single-command run.
+		if err := portstore.Save(repo, group, picked); err != nil {
 			slog.Warn("failed to persist stable ports", "err", err)
 		}
 	}
