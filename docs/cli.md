@@ -136,6 +136,7 @@ mdp --stop
 | `--group`          |               | Group name override (default: git branch)        |
 | `--env`            | `PORT`        | Env var name for the assigned port               |
 | `--port-range`     | `10000-60000` | Port range for spawned services                  |
+| `--no-stable-ports`| `false`       | Allocate fresh ports each run instead of reusing this branch's previous ports. See [stable ports](./recipes.md#stable-ports). |
 | `--tls-cert`       |               | TLS certificate file (serves this service over HTTPS; see [recipes](./recipes.md)) |
 | `--tls-key`        |               | TLS key file (paired with `--tls-cert`)          |
 | `--auto-tls`       | `false`       | Auto-detect TLS certs from mkcert                |

@@ -32,6 +32,7 @@ import (
 	"github.com/derekgould/multi-dev-proxy/internal/envexport"
 	"github.com/derekgould/multi-dev-proxy/internal/orchestrator"
 	"github.com/derekgould/multi-dev-proxy/internal/ports"
+	"github.com/derekgould/multi-dev-proxy/internal/portstore"
 	"github.com/derekgould/multi-dev-proxy/internal/process"
 	"github.com/derekgould/multi-dev-proxy/internal/registry"
 )
@@ -70,6 +71,7 @@ func init() {
 	runCmd.Flags().String("tls-key", "", "TLS key file (forwarded to proxy for HTTPS)")
 	runCmd.Flags().Bool("auto-tls", false, "Auto-detect TLS certs from mkcert")
 	runCmd.Flags().String("group", "", "Group name override (default: git branch)")
+	runCmd.Flags().Bool("no-stable-ports", false, "Disable stable per-branch port reuse (allocate fresh ports each run)")
 	runCmd.Flags().String("env", "PORT", "Environment variable name for the assigned port")
 	runCmd.Flags().Int("control-port", 13100, "Orchestrator control port")
 	runCmd.Flags().String("log-split", "", `Demultiplex combined-stream logs. Values: "compose" (docker-compose format) or "regex:<pattern>" with named captures 'name' and 'msg'.`)
@@ -97,6 +99,44 @@ func parseLinks(values []string) (map[string]string, error) {
 		out[repo] = group
 	}
 	return out, nil
+}
+
+// pickPort returns a port for key. When a previously-remembered port for key is
+// still free (per isFree) and not already taken this run (exclude), it is
+// reused; otherwise a fresh port is allocated via finder. The chosen port is
+// recorded in picked so callers can persist it. Passing a nil remembered/picked
+// map disables reuse/recording (used when stable ports are off).
+func pickPort(
+	finder func(ports.PortRange, []int) (int, error),
+	isFree func(int) bool,
+	remembered, picked map[string]int,
+	key string,
+	r ports.PortRange,
+	exclude []int,
+) (int, error) {
+	if p, ok := remembered[key]; ok && p >= r.Start && p <= r.End && isFree(p) && !intInSlice(p, exclude) {
+		if picked != nil {
+			picked[key] = p
+		}
+		return p, nil
+	}
+	p, err := finder(r, exclude)
+	if err != nil {
+		return 0, err
+	}
+	if picked != nil {
+		picked[key] = p
+	}
+	return p, nil
+}
+
+func intInSlice(v int, s []int) bool {
+	for _, x := range s {
+		if x == v {
+			return true
+		}
+	}
+	return false
 }
 
 func runRun(cmd *cobra.Command, args []string) error {
@@ -175,6 +215,20 @@ func runBatchMode(cmd *cobra.Command, controlPort int, groupFlag string, linkMap
 		return fmt.Errorf("invalid port range in config: %w", err)
 	}
 
+	repo := detect.DetectRepo(filepath.Dir(configPath))
+
+	// Stable ports: reuse this branch's previously-assigned ports (when still
+	// free) so certs/trust keyed to a port survive restarts. Best-effort —
+	// remembered and picked stay nil when disabled, which makes pickPort fall
+	// straight through to fresh allocation.
+	noStable, _ := cmd.Flags().GetBool("no-stable-ports")
+	stable := cfg.StablePortsEnabled() && !noStable
+	var remembered, picked map[string]int
+	if stable {
+		remembered = portstore.Load(repo, group)
+		picked = map[string]int{}
+	}
+
 	bt := &batchTracker{}
 
 	var allocations []batchAlloc
@@ -201,10 +255,12 @@ func runBatchMode(cmd *cobra.Command, controlPort int, groupFlag string, linkMap
 			for envName, value := range svc.Env {
 				if value.Ref == "" && value.Value == "auto" {
 					finder := ports.FindFreePort
+					isFree := ports.IsPortFree
 					if envProtocols[envName] == "udp" {
 						finder = ports.FindFreeUDPPort
+						isFree = ports.IsUDPPortFree
 					}
-					port, err := finder(portRange, assignedPorts)
+					port, err := pickPort(finder, isFree, remembered, picked, name+"."+envName, portRange, assignedPorts)
 					if err != nil {
 						return fmt.Errorf("find free port for %q.%s: %w", name, envName, err)
 					}
@@ -223,7 +279,7 @@ func runBatchMode(cmd *cobra.Command, controlPort int, groupFlag string, linkMap
 
 		assignedPort := svc.Port
 		if assignedPort == 0 {
-			assignedPort, err = ports.FindFreePort(portRange, assignedPorts)
+			assignedPort, err = pickPort(ports.FindFreePort, ports.IsPortFree, remembered, picked, name, portRange, assignedPorts)
 			if err != nil {
 				return fmt.Errorf("find free port for %q: %w", name, err)
 			}
@@ -233,7 +289,17 @@ func runBatchMode(cmd *cobra.Command, controlPort int, groupFlag string, linkMap
 		allocations = append(allocations, batchAlloc{name: name, svc: svc, svcGroup: svcGroup, assignedPort: assignedPort})
 	}
 
-	repo := detect.DetectRepo(filepath.Dir(configPath))
+	if stable {
+		// Merge this run's picks over what was remembered so a service started
+		// via a different mode (single vs batch shares the same repo/group file)
+		// keeps its entry instead of being wiped.
+		for k, v := range picked {
+			remembered[k] = v
+		}
+		if err := portstore.Save(repo, group, remembered); err != nil {
+			slog.Warn("failed to persist stable ports", "err", err)
+		}
+	}
 
 	// Build a resolver per allocation so that services with a `group:` override
 	// query the orchestrator under their own group, not the workspace's
@@ -1111,14 +1177,13 @@ func runSingleMode(cmd *cobra.Command, args []string, controlPort int, groupFlag
 		}
 		tlsKey = abs
 	}
+	repo := repoOverride
+	if repo == "" {
+		repo = detect.DetectRepo(cwd)
+	}
 	serverName := nameOverride
 	if serverName == "" {
-		repo := repoOverride
-		if repo == "" {
-			repo = detect.DetectRepo(cwd)
-		}
-		branch := detect.DetectBranch(cwd)
-		serverName = detect.ServerName(repo, branch)
+		serverName = detect.ServerName(repo, detect.DetectBranch(cwd))
 	}
 
 	group := groupFlag
@@ -1126,9 +1191,28 @@ func runSingleMode(cmd *cobra.Command, args []string, controlPort int, groupFlag
 		group = detect.DetectBranch(cwd)
 	}
 
-	assignedPort, err := ports.FindFreePort(portRange, nil)
+	// Stable ports: reuse this branch's previously-assigned port when still free
+	// (see runBatchMode). On by default; --no-stable-ports opts out.
+	noStable, _ := cmd.Flags().GetBool("no-stable-ports")
+	stable := !noStable
+	var remembered, picked map[string]int
+	if stable {
+		remembered = portstore.Load(repo, group)
+		picked = map[string]int{}
+	}
+	assignedPort, err := pickPort(ports.FindFreePort, ports.IsPortFree, remembered, picked, serverName, portRange, nil)
 	if err != nil {
 		return fmt.Errorf("find free port: %w", err)
+	}
+	if stable {
+		// Merge over remembered so batch-mode services sharing this repo/group
+		// file aren't wiped by an ad-hoc single-command run.
+		for k, v := range picked {
+			remembered[k] = v
+		}
+		if err := portstore.Save(repo, group, remembered); err != nil {
+			slog.Warn("failed to persist stable ports", "err", err)
+		}
 	}
 
 	scheme := "http"

@@ -39,6 +39,7 @@ services:
 |---|---|---|---|
 | `services` | map of name → [service](#service) | `{}` | Each key is a service name. Shown in the TUI and referenced by `depends_on`. |
 | `port_range` | `"MIN-MAX"` string | `"10000-60000"` | Range for auto-allocating service ports (when `port` is `0` / unset). |
+| `stable_ports` | bool | `true` | Reuse each branch's previously-assigned ports across restarts (when still free), stored under `~/.mdp/ports/`. Set `false` to allocate fresh ports every run. See [Stable ports](./recipes.md#stable-ports). |
 | `global` | [global](#global) | `{}` | Project-wide env export block. |
 
 ```yaml
