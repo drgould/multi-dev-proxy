@@ -744,12 +744,17 @@ func TestSuperviseProcessRestartsOnPeerChange(t *testing.T) {
 	// Stand up a fake control API that returns a port we can flip.
 	var port atomic.Int64
 	port.Store(9001)
+	// peerHits counts /__mdp/peers responses, incremented after encoding so a
+	// given count guarantees that many responses were sent with the port value
+	// current at send time. Used below to gate the flip on the supervisor's seed.
+	var peerHits atomic.Int64
 	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		if r.URL.Path == "/__mdp/peers" {
 			json.NewEncoder(w).Encode(map[string]any{
 				"port": port.Load(),
 				"env":  map[string]string{},
 			})
+			peerHits.Add(1)
 			return
 		}
 		w.WriteHeader(http.StatusOK)
@@ -821,6 +826,19 @@ func TestSuperviseProcessRestartsOnPeerChange(t *testing.T) {
 	}
 	if !waitFor("9001", 2*time.Second) {
 		t.Fatalf("initial cmd never wrote 9001; log=%q", readFile(t, logPath))
+	}
+
+	// Wait for the supervisor to seed its peer baseline at 9001 before flipping.
+	// The 1st /__mdp/peers hit is buildBatchEnv's initial resolve (above); the
+	// 2nd is superviseProcess's seed. If the flip lands before the seed (e.g. a
+	// loaded CI runner delays the supervisor goroutine), the seed reads 9999 and
+	// the watcher never sees a change — the flaky "restart cmd never wrote 9999".
+	seedDeadline := time.Now().Add(2 * time.Second)
+	for peerHits.Load() < 2 && time.Now().Before(seedDeadline) {
+		time.Sleep(5 * time.Millisecond)
+	}
+	if peerHits.Load() < 2 {
+		t.Fatalf("supervisor never seeded peer baseline; /__mdp/peers hits=%d", peerHits.Load())
 	}
 
 	// Flip the peer port; the supervisor should kill the cmd and relaunch
