@@ -37,7 +37,10 @@ Without a command, reads `mdp.yaml` and batch-starts all configured services:
 ```sh
 mdp run                        # uses current git branch as group
 mdp run --group feature-auth   # override group name
+mdp run -i                     # prompt for declared inputs (e.g. cross-repo branch names)
 ```
+
+Add `-i` to prompt for the [`inputs:`](./mdp-yaml-reference.md#inputs) declared in `mdp.yaml` — handy for choosing a peer's branch interactively instead of typing `--link repo=branch`. Without `-i`, inputs use their defaults (an input with no default errors). With `-i`, answers are read from stdin, so they can also be piped (`mdp run -i < answers.txt`).
 
 When a command is given, `mdp run` picks its mode in this order:
 
@@ -141,6 +144,7 @@ mdp --stop
 | `--auto-tls`       | `false`       | Auto-detect TLS certs from mkcert                |
 | `--control-port`   | `13100`       | Orchestrator control port                        |
 | `--link`           |               | Override peer-lookup group: `repo=group` (repeatable). See [cross-repo refs](./mdp-yaml-reference.md#cross-group-lookups-via---link). |
+| `-i, --interactive`| `false`       | Prompt for the [`inputs:`](./mdp-yaml-reference.md#inputs) declared in `mdp.yaml`; without it, inputs use their defaults. |
 
 
 `**mdp register` flags:**

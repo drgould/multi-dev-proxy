@@ -40,6 +40,8 @@ services:
 | `services` | map of name → [service](#service) | `{}` | Each key is a service name. Shown in the TUI and referenced by `depends_on`. |
 | `port_range` | `"MIN-MAX"` string | `"10000-60000"` | Range for auto-allocating service ports (when `port` is `0` / unset). |
 | `global` | [global](#global) | `{}` | Project-wide env export block. |
+| `inputs` | map of name → [input](#inputs) | `{}` | Values prompted for by `mdp run -i`, referenced elsewhere as `${inputs.<name>}`. Declaration order is the prompt order. |
+| `links` | map of `repo` → `group` | `{}` | Cross-repo peer-lookup groups, equivalent to the `--link repo=group` CLI flag. Values may reference an input (e.g. `${inputs.api_branch}`). See [`links`](#links). |
 
 ```yaml
 port_range: "20000-25000"   # narrow range if you want predictable ports for firewall rules
@@ -90,6 +92,57 @@ DB_URL="postgres://app:app@localhost:20045/app"
 Keys are sorted alphabetically and values are double-quoted so the file is safe to `source` from a shell or load with standard `.env` parsers.
 
 The file is written after all ports are allocated and before any service `command` runs. Point your editor's run config or shell tooling at it when you need the same values outside `mdp`.
+
+## `inputs`
+
+`inputs` declares values that `mdp run -i` prompts for at startup. Each resolved value is referenced elsewhere as `${inputs.<name>}`. The motivating case is supplying a cross-repo branch name interactively instead of typing `--link repo=branch` on the command line.
+
+`${inputs.<name>}` is supported in these fields: a service's `command`, `dir`, `setup`, `shutdown`, `env` (scalar value, `ref:`, and `default:`), and `env_file`; the `global.env` block and `global.env_file`; and [`links`](#links) values. Using it in `group`, `tls_cert`, or `tls_key` is a load-time error (use [`links`](#links) for cross-repo groups); it is not expanded in other fields such as `port_range` or `health_check`.
+
+Input names may contain only letters, digits, and underscore (so they are always referenceable as `${inputs.<name>}`).
+
+Keys under `inputs.<name>`:
+
+| Key | Type | Default | Notes |
+|---|---|---|---|
+| `prompt` | string | the input name | Question shown when prompting. |
+| `default` | string | none | Fallback used when not prompting, or when the answer is empty. Omitting the key (or writing a bare `default:` with no value) means **no default** — such an input errors under plain `mdp run` and must be prompted with `-i`. Use `default: ""` for an explicit empty default. Must be a plain literal — it cannot contain `${...}` references. |
+| `choices` | string | `""` | Set to `groups` to offer a numbered pick-list of the orchestrator's currently active groups (you may still type a custom value). Any other value is rejected at load. |
+
+```yaml
+inputs:
+  api_branch:
+    prompt: "Which branch is the API running on?"
+    default: main
+    choices: groups
+
+links:
+  api: ${inputs.api_branch}
+
+services:
+  web:
+    command: npm run dev
+    env:
+      VITE_API_URL: "http://localhost:${@api.server.port}"
+      VITE_TARGET_BRANCH: "${inputs.api_branch}"
+```
+
+Resolution:
+
+- **`mdp run -i`**: each input is prompted in declaration order, reading from stdin (a terminal, or piped answers such as `mdp run -i < answers.txt`). A `choices: groups` input prints the active groups (marking the `default`); enter a number, type a custom value, or press enter to accept the `default`. Pressing enter on an input that has no `default` re-prompts; `Ctrl-D` / end-of-input aborts the run.
+- **`mdp run`** (no `-i`): every input resolves to its `default`. An input with no `default` is an error — provide a `default` or run with `-i`.
+
+Input values are plain literals: an answer (or `default`) containing `${...}` is rejected, so an input can never smuggle in a port or peer reference. An undeclared `${inputs.X}` reference in a supported field is a load-time error, and the service name `inputs` is reserved.
+
+## `links`
+
+`links` maps a peer repo name to the group its services run in — the config-file equivalent of the repeatable `--link repo=group` CLI flag. A value may be a literal group or an `${inputs.<name>}` reference. The CLI `--link` flag overrides config `links` per repo. See [Cross-group lookups](#cross-group-lookups-via---link).
+
+```yaml
+links:
+  api: ${inputs.api_branch}   # group chosen interactively
+  auth: stable                # fixed group
+```
 
 ## Service
 
@@ -553,6 +606,20 @@ services:
 ```
 
 The override applies to all `@<repo>.*` references resolved during this `mdp run` invocation, both at startup and during peer-change watching.
+
+To avoid typing the group on every run, declare it in the [`links`](#links) section instead — and combine it with an [input](#inputs) to choose the branch interactively:
+
+```yaml
+inputs:
+  api_branch:
+    prompt: "Which branch is the API on?"
+    default: main
+    choices: groups
+links:
+  api: ${inputs.api_branch}
+```
+
+`mdp run -i` then prompts for `api_branch` (offering the active groups), and `mdp run` without `-i` uses the `main` default. A `--link api=<group>` on the command line still overrides the config value.
 
 ## Path resolution
 

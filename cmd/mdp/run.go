@@ -74,6 +74,7 @@ func init() {
 	runCmd.Flags().Int("control-port", 13100, "Orchestrator control port")
 	runCmd.Flags().String("log-split", "", `Demultiplex combined-stream logs. Values: "compose" (docker-compose format) or "regex:<pattern>" with named captures 'name' and 'msg'.`)
 	runCmd.Flags().StringArray("link", nil, "Override the lookup group for cross-repo @<repo>.* env refs: repo=group (repeatable, last-wins per repo). Used when a peer service runs in a different group than the caller (e.g. backend on main, frontend on a feature branch).")
+	runCmd.Flags().BoolP("interactive", "i", false, "Prompt for the inputs declared in mdp.yaml (see the `inputs:` section); without it, inputs use their defaults.")
 }
 
 // parseLinks converts repeated `--link repo=group` values into a map. Empty
@@ -99,6 +100,27 @@ func parseLinks(values []string) (map[string]string, error) {
 	return out, nil
 }
 
+// mergeLinks combines config `links:` with CLI --link overrides. CLI wins per
+// repo. Returns the CLI map unchanged when there are no config links. Empty
+// groups are not filtered here — checkLinkGroups rejects them after the merge,
+// so a CLI override can still rescue a config link that resolved empty.
+func mergeLinks(configLinks, cliLinks map[string]string) map[string]string {
+	if len(configLinks) == 0 {
+		return cliLinks
+	}
+	if len(cliLinks) == 0 {
+		return configLinks
+	}
+	merged := make(map[string]string, len(configLinks)+len(cliLinks))
+	for repo, group := range configLinks {
+		merged[repo] = group
+	}
+	for repo, group := range cliLinks {
+		merged[repo] = group
+	}
+	return merged
+}
+
 func runRun(cmd *cobra.Command, args []string) error {
 	controlPort, _ := cmd.Flags().GetInt("control-port")
 	groupFlag, _ := cmd.Flags().GetString("group")
@@ -116,8 +138,12 @@ func runRun(cmd *cobra.Command, args []string) error {
 		slog.Info("link flags parsed", "links", pairs)
 	}
 
+	interactive, _ := cmd.Flags().GetBool("interactive")
 	if len(args) == 0 {
-		return runBatchMode(cmd, controlPort, groupFlag, linkMap)
+		return runBatchMode(cmd, controlPort, groupFlag, linkMap, interactive)
+	}
+	if interactive {
+		return fmt.Errorf("-i/--interactive applies only to mdp.yaml batch mode, not `mdp run -- <command>`")
 	}
 
 	tlsCert, _ := cmd.Flags().GetString("tls-cert")
@@ -142,7 +168,7 @@ func runRun(cmd *cobra.Command, args []string) error {
 	return runSingleMode(cmd, args, controlPort, groupFlag, tlsCert, tlsKey, logSplit)
 }
 
-func runBatchMode(cmd *cobra.Command, controlPort int, groupFlag string, linkMap map[string]string) error {
+func runBatchMode(cmd *cobra.Command, controlPort int, groupFlag string, linkMap map[string]string, interactive bool) error {
 	cwd, err := os.Getwd()
 	if err != nil {
 		return fmt.Errorf("cannot determine working directory: %w", err)
@@ -169,6 +195,36 @@ func runBatchMode(cmd *cobra.Command, controlPort int, groupFlag string, linkMap
 	client := &http.Client{Timeout: 5 * time.Second}
 	controlURL := fmt.Sprintf("http://127.0.0.1:%d", controlPort)
 	clientID := generateClientID()
+
+	// Resolve declared inputs (prompting when -i, else defaults), then
+	// substitute ${inputs.X} refs throughout the config so the env/link
+	// pipeline below never sees an input reference.
+	inputs, err := resolveInputs(cfg, interactive, func() []string { return fetchActiveGroups(client, controlURL) }, os.Stdin, os.Stderr)
+	if err != nil {
+		return err
+	}
+	if err := applyInputs(cfg, inputs); err != nil {
+		return err
+	}
+	// Resolve dir/env_file paths now that input placeholders are gone — Load
+	// deferred any that contained ${inputs.X} so absolute/~ input values
+	// resolve correctly.
+	cfg.FinalizePaths(filepath.Dir(configPath))
+	// Merge config `links:` (now input-substituted) under the CLI --link
+	// overrides (CLI wins per repo), then reject empties — checked after the
+	// merge so a --link override can rescue a config link that resolved empty.
+	linkMap = mergeLinks(cfg.Links, linkMap)
+	if err := checkLinkGroups(linkMap); err != nil {
+		return err
+	}
+	if len(linkMap) > 0 {
+		pairs := make([]string, 0, len(linkMap))
+		for repo, group := range linkMap {
+			pairs = append(pairs, repo+"="+group)
+		}
+		sort.Strings(pairs)
+		slog.Info("cross-repo links resolved", "links", pairs)
+	}
 
 	portRange, err := ports.ParseRange(cfg.PortRange)
 	if err != nil {

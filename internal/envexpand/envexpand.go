@@ -216,3 +216,85 @@ func lookup(pm PortMap, svc, key string) (int, bool) {
 	}
 	return 0, false
 }
+
+// inputsRefPattern matches ${inputs.NAME} and ${inputs.NAME:-fallback}.
+//
+//	group 1: input name
+//	group 2: raw ":-fallback" (empty when no fallback)
+//	group 3: fallback text only
+var inputsRefPattern = regexp.MustCompile(`\$\{inputs\.([A-Za-z0-9_]+)(:-([^}]*))?\}`)
+
+// ScanInputRefs returns every distinct input name that MUST be declared,
+// referenced via ${inputs.NAME} in value, in source order. References that
+// carry a `:-fallback` are omitted: like cross-repo refs, they tolerate an
+// absent target (SubstituteInputs uses the fallback), so the caller does not
+// require them to be declared. Returns nil if none are present.
+func ScanInputRefs(value string) []string {
+	var out []string
+	seen := map[string]bool{}
+	for _, m := range inputsRefPattern.FindAllStringSubmatch(value, -1) {
+		if m[2] != "" { // has :-fallback => optional, not required to be declared
+			continue
+		}
+		if name := m[1]; !seen[name] {
+			seen[name] = true
+			out = append(out, name)
+		}
+	}
+	return out
+}
+
+// looseInputsRefPattern matches any ${inputs.…} placeholder, including ones
+// whose name or shape is malformed. It exists so InvalidInputRefs can report
+// such placeholders rather than letting the strict inputsRefPattern silently
+// skip them (leaving the literal text behind).
+var looseInputsRefPattern = regexp.MustCompile(`\$\{inputs\.[^}]*\}`)
+
+// InvalidInputRefs returns every ${inputs.…} placeholder in value that is not a
+// usable reference: a malformed name/shape (e.g. a name with characters outside
+// [A-Za-z0-9_]), or a well-formed ref whose inline :-fallback contains a nested
+// ${...} (the fallback class stops at the first '}', so it can't represent a
+// nested reference). Returns nil when every placeholder is fine. The service
+// name "inputs" is reserved, so any ${inputs.…} is unambiguously an input
+// reference and a bad one is an error rather than surviving as a literal.
+func InvalidInputRefs(value string) []string {
+	var out []string
+	for _, m := range looseInputsRefPattern.FindAllString(value, -1) {
+		sub := inputsRefPattern.FindStringSubmatch(m)
+		if sub == nil {
+			out = append(out, m) // malformed name or shape
+			continue
+		}
+		if strings.Contains(sub[3], "${") {
+			out = append(out, m) // nested ${...} in :-fallback is not representable
+		}
+	}
+	return out
+}
+
+// SubstituteInputs replaces ${inputs.NAME} (and ${inputs.NAME:-fallback})
+// references in value with the resolved value from inputs. When an input is
+// absent, the inline :-fallback is used if present; otherwise it is an
+// unresolved-reference error. Inputs are resolved before the normal expansion
+// pass, so other ${...} forms in value are left untouched here.
+func SubstituteInputs(value string, inputs map[string]string) (string, error) {
+	var firstErr error
+	out := inputsRefPattern.ReplaceAllStringFunc(value, func(match string) string {
+		m := inputsRefPattern.FindStringSubmatch(match)
+		name := m[1]
+		if v, ok := inputs[name]; ok {
+			return v
+		}
+		if m[2] != "" { // has :-fallback
+			return m[3]
+		}
+		if firstErr == nil {
+			firstErr = fmt.Errorf("unresolved input reference %s", match)
+		}
+		return match
+	})
+	if firstErr != nil {
+		return "", firstErr
+	}
+	return out, nil
+}
