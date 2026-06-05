@@ -327,6 +327,28 @@ func TestFetchActiveGroups(t *testing.T) {
 	}
 }
 
+// runBatchMode substitutes inputs before computing the --service selection, so
+// a ${inputs.X} env ref must not be mistaken for a dependency on a service
+// literally named "inputs".
+func TestResolveServiceSelectionAfterInputs(t *testing.T) {
+	cfg := &config.Config{
+		Inputs: config.Inputs{{Name: "branch", Default: "main", HasDefault: true}},
+		Services: map[string]config.ServiceConfig{
+			"web": {Command: "run", Env: map[string]config.EnvValue{"X": {Value: "${inputs.branch}"}}},
+		},
+	}
+	if err := applyInputs(cfg, map[string]string{"branch": "main"}); err != nil {
+		t.Fatalf("applyInputs: %v", err)
+	}
+	sel, err := resolveServiceSelection(cfg, []string{"web"})
+	if err != nil {
+		t.Fatalf("resolveServiceSelection: %v", err)
+	}
+	if len(sel) != 1 || !sel["web"] {
+		t.Fatalf("expected only web selected, got %v", sel)
+	}
+}
+
 func TestMergeLinks(t *testing.T) {
 	// CLI wins per repo; config-only repos are retained.
 	got := mergeLinks(

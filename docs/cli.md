@@ -38,9 +38,14 @@ Without a command, reads `mdp.yaml` and batch-starts all configured services:
 mdp run                        # uses current git branch as group
 mdp run --group feature-auth   # override group name
 mdp run -i                     # prompt for declared inputs (e.g. cross-repo branch names)
+mdp run --service api          # start only `api` (and its depends_on)
+mdp run --service api,worker   # start a subset (also accepts repeated --service)
+MDP_SERVICES=api,worker mdp run  # same, via env var (flag wins if both are set)
 ```
 
 Add `-i` to prompt for the [`inputs:`](./mdp-yaml-reference.md#inputs) declared in `mdp.yaml` — handy for choosing a peer's branch interactively instead of typing `--link repo=branch`. Without `-i`, inputs use their defaults (an input with no default errors). With `-i`, answers are read from stdin, so they can also be piped (`mdp run -i < answers.txt`).
+
+The `--service` selector restricts batch mode to a subset of the services declared in `mdp.yaml`. Names must match the service keys in the file; transitive `depends_on` entries are auto-included so dependency waits still work. Empty/unset = start everything (default).
 
 When a command is given, `mdp run` picks its mode in this order:
 
@@ -113,6 +118,7 @@ mdp --stop
 | Variable         | Description                                                                         |
 | ---------------- | ----------------------------------------------------------------------------------- |
 | `MDP_PROXY_PORT` | Default proxy port for `mdp run` and `mdp register` (overrides the default of 3000) |
+| `MDP_SERVICES`   | Comma-separated subset of services for `mdp run` batch mode (overridden by `--service`) |
 
 
 `**mdp` flags:**
@@ -139,12 +145,14 @@ mdp --stop
 | `--group`          |               | Group name override (default: git branch)        |
 | `--env`            | `PORT`        | Env var name for the assigned port               |
 | `--port-range`     | `10000-60000` | Port range for spawned services                  |
+| `--no-stable-ports`| `false`       | Allocate fresh ports each run instead of reusing this branch's previous ports. See [stable ports](./recipes.md#stable-ports). |
 | `--tls-cert`       |               | TLS certificate file (serves this service over HTTPS; see [recipes](./recipes.md)) |
 | `--tls-key`        |               | TLS key file (paired with `--tls-cert`)          |
 | `--auto-tls`       | `false`       | Auto-detect TLS certs from mkcert                |
 | `--control-port`   | `13100`       | Orchestrator control port                        |
 | `--link`           |               | Override peer-lookup group: `repo=group` (repeatable). See [cross-repo refs](./mdp-yaml-reference.md#cross-group-lookups-via---link). |
 | `-i, --interactive`| `false`       | Prompt for the [`inputs:`](./mdp-yaml-reference.md#inputs) declared in `mdp.yaml`; without it, inputs use their defaults. |
+| `--service`        |               | Batch mode only: start only the listed services (repeatable or comma-separated). Transitive `depends_on` are auto-included. Falls back to `MDP_SERVICES`. |
 
 
 `**mdp register` flags:**

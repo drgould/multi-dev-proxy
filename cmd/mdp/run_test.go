@@ -912,7 +912,7 @@ func TestExportBatchEnvFilesWritesGlobalAndPerService(t *testing.T) {
 		"web": {"port": 40101, "PORT": 40101},
 	}
 
-	if err := exportBatchEnvFiles(cfg, allocations, portMap, nil, nil); err != nil {
+	if err := exportBatchEnvFiles(cfg, allocations, portMap, nil, nil, nil); err != nil {
 		t.Fatalf("exportBatchEnvFiles: %v", err)
 	}
 
@@ -969,7 +969,7 @@ func TestExportBatchEnvFilesSkipsWhenNoEnvFile(t *testing.T) {
 			svc:          config.ServiceConfig{Env: map[string]config.EnvValue{"X": {Value: "y"}}},
 		},
 	}
-	if err := exportBatchEnvFiles(cfg, allocations, envexpand.PortMap{}, nil, nil); err != nil {
+	if err := exportBatchEnvFiles(cfg, allocations, envexpand.PortMap{}, nil, nil, nil); err != nil {
 		t.Fatalf("exportBatchEnvFiles: %v", err)
 	}
 	entries, _ := os.ReadDir(tmp)
@@ -997,7 +997,7 @@ func TestExportBatchEnvFilesPropagatesExpansionError(t *testing.T) {
 			svc:          config.ServiceConfig{Env: map[string]config.EnvValue{"A": {Value: "b"}}},
 		},
 	}
-	err := exportBatchEnvFiles(cfg, allocations, envexpand.PortMap{"api": {"port": 40300, "PORT": 40300}}, nil, nil)
+	err := exportBatchEnvFiles(cfg, allocations, envexpand.PortMap{"api": {"port": 40300, "PORT": 40300}}, nil, nil, nil)
 	if err == nil {
 		t.Fatal("expected error from unresolved ref")
 	}
@@ -1050,7 +1050,7 @@ func TestExportBatchEnvFilesUsesPerAllocResolver(t *testing.T) {
 		},
 	}
 
-	if err := exportBatchEnvFiles(&config.Config{}, allocations, envexpand.PortMap{}, allocResolvers, nil); err != nil {
+	if err := exportBatchEnvFiles(&config.Config{}, allocations, envexpand.PortMap{}, allocResolvers, nil, nil); err != nil {
 		t.Fatalf("exportBatchEnvFiles: %v", err)
 	}
 
@@ -1110,4 +1110,250 @@ func TestParseLinks(t *testing.T) {
 			}
 		}
 	})
+}
+
+func TestResolveServiceSelection(t *testing.T) {
+	def := "9"
+	cfg := &config.Config{
+		Services: map[string]config.ServiceConfig{
+			"db":       {Command: "db"},
+			"cache":    {Command: "cache"},
+			"api":      {Command: "api", DependsOn: []string{"db", "cache"}},
+			"worker":   {Command: "worker", DependsOn: []string{"db"}},
+			"frontend": {Command: "fe", DependsOn: []string{"api"}},
+			"solo":     {Command: "solo"},
+			// Env-ref services: depend on siblings via env, not depends_on.
+			"metrics": {Command: "m"},
+			"reporter": {Command: "r", Env: map[string]config.EnvValue{
+				"METRICS_URL": {Value: "http://localhost:${metrics.PORT}"},
+			}},
+			"queue": {Command: "q"},
+			"ingest": {Command: "i", Env: map[string]config.EnvValue{
+				"Q": {Ref: "queue.env.ADDR"},
+			}},
+			// Mirrors testbed web-main: depends_on api, env-refs db.
+			"web": {Command: "w", DependsOn: []string{"api"}, Env: map[string]config.EnvValue{
+				"DB_URL": {Value: "postgres://localhost:${db.DB_PORT}/app"},
+			}},
+			// Defaulted ref → tolerates absence, must not pull in (or error).
+			"opt": {Command: "o", Env: map[string]config.EnvValue{
+				"X": {Ref: "absent.PORT", Default: &def},
+			}},
+			// Cross-repo ref → resolved by orchestrator, must not pull in.
+			"xrepo": {Command: "x", Env: map[string]config.EnvValue{
+				"P": {Value: "${@backend.api.PORT}"},
+			}},
+		},
+	}
+
+	t.Run("empty selection returns nil", func(t *testing.T) {
+		for _, in := range [][]string{nil, {}, {"", "  "}} {
+			got, err := resolveServiceSelection(cfg, in)
+			if err != nil {
+				t.Fatalf("unexpected error: %v", err)
+			}
+			if got != nil {
+				t.Errorf("input %v: got %v, want nil", in, got)
+			}
+		}
+	})
+
+	t.Run("single service with no deps", func(t *testing.T) {
+		got, err := resolveServiceSelection(cfg, []string{"solo"})
+		if err != nil {
+			t.Fatalf("unexpected error: %v", err)
+		}
+		if !reflectEqualSet(got, map[string]bool{"solo": true}) {
+			t.Errorf("got %v, want {solo}", got)
+		}
+	})
+
+	t.Run("transitive depends_on pulled in", func(t *testing.T) {
+		got, err := resolveServiceSelection(cfg, []string{"frontend"})
+		if err != nil {
+			t.Fatalf("unexpected error: %v", err)
+		}
+		want := map[string]bool{"frontend": true, "api": true, "db": true, "cache": true}
+		if !reflectEqualSet(got, want) {
+			t.Errorf("got %v, want %v", got, want)
+		}
+	})
+
+	t.Run("diamond deps not double-counted", func(t *testing.T) {
+		// api and worker both pull in db; selecting both must not loop forever.
+		got, err := resolveServiceSelection(cfg, []string{"api", "worker"})
+		if err != nil {
+			t.Fatalf("unexpected error: %v", err)
+		}
+		want := map[string]bool{"api": true, "worker": true, "db": true, "cache": true}
+		if !reflectEqualSet(got, want) {
+			t.Errorf("got %v, want %v", got, want)
+		}
+	})
+
+	t.Run("comma-separated and whitespace tolerated", func(t *testing.T) {
+		// Mirrors the env-var path which uses strings.Split on commas.
+		got, err := resolveServiceSelection(cfg, []string{"solo", "  db  "})
+		if err != nil {
+			t.Fatalf("unexpected error: %v", err)
+		}
+		want := map[string]bool{"solo": true, "db": true}
+		if !reflectEqualSet(got, want) {
+			t.Errorf("got %v, want %v", got, want)
+		}
+	})
+
+	t.Run("unknown name errors with valid list", func(t *testing.T) {
+		_, err := resolveServiceSelection(cfg, []string{"nope"})
+		if err == nil {
+			t.Fatal("expected error, got nil")
+		}
+		msg := err.Error()
+		if !strings.Contains(msg, "nope") {
+			t.Errorf("error %q should mention the bad name", msg)
+		}
+		for _, name := range []string{"api", "db", "frontend"} {
+			if !strings.Contains(msg, name) {
+				t.Errorf("error %q should list valid name %q", msg, name)
+			}
+		}
+	})
+
+	t.Run("case sensitive", func(t *testing.T) {
+		// "API" is not "api" — must error, not silently match.
+		if _, err := resolveServiceSelection(cfg, []string{"API"}); err == nil {
+			t.Error("expected case-sensitive mismatch to error")
+		}
+	})
+
+	t.Run("value-form env ref pulled in", func(t *testing.T) {
+		// reporter references ${metrics.PORT} but doesn't list it in depends_on.
+		got, err := resolveServiceSelection(cfg, []string{"reporter"})
+		if err != nil {
+			t.Fatalf("unexpected error: %v", err)
+		}
+		want := map[string]bool{"reporter": true, "metrics": true}
+		if !reflectEqualSet(got, want) {
+			t.Errorf("got %v, want %v", got, want)
+		}
+	})
+
+	t.Run("bare-ref-form env ref pulled in", func(t *testing.T) {
+		got, err := resolveServiceSelection(cfg, []string{"ingest"})
+		if err != nil {
+			t.Fatalf("unexpected error: %v", err)
+		}
+		want := map[string]bool{"ingest": true, "queue": true}
+		if !reflectEqualSet(got, want) {
+			t.Errorf("got %v, want %v", got, want)
+		}
+	})
+
+	t.Run("depends_on and env ref combine without double-count", func(t *testing.T) {
+		// Mirrors testbed `mdp run --service web-main`: web depends_on api and
+		// env-refs db. db arrives via both api's depends_on and web's env ref.
+		got, err := resolveServiceSelection(cfg, []string{"web"})
+		if err != nil {
+			t.Fatalf("unexpected error: %v", err)
+		}
+		want := map[string]bool{"web": true, "api": true, "db": true, "cache": true}
+		if !reflectEqualSet(got, want) {
+			t.Errorf("got %v, want %v", got, want)
+		}
+	})
+
+	t.Run("defaulted ref does not pull in or error", func(t *testing.T) {
+		// opt's ref targets a nonexistent service but has a default, so it must
+		// neither pull anything in nor error on the missing target.
+		got, err := resolveServiceSelection(cfg, []string{"opt"})
+		if err != nil {
+			t.Fatalf("unexpected error: %v", err)
+		}
+		if !reflectEqualSet(got, map[string]bool{"opt": true}) {
+			t.Errorf("got %v, want {opt}", got)
+		}
+	})
+
+	t.Run("cross-repo ref does not pull in", func(t *testing.T) {
+		got, err := resolveServiceSelection(cfg, []string{"xrepo"})
+		if err != nil {
+			t.Fatalf("unexpected error: %v", err)
+		}
+		if !reflectEqualSet(got, map[string]bool{"xrepo": true}) {
+			t.Errorf("got %v, want {xrepo}", got)
+		}
+	})
+}
+
+func reflectEqualSet(a, b map[string]bool) bool {
+	if len(a) != len(b) {
+		return false
+	}
+	for k, v := range a {
+		if b[k] != v {
+			return false
+		}
+	}
+	return true
+}
+
+// TestExportBatchEnvFilesOmitsRefsToSkippedServices is the regression test for
+// `mdp run --service <subset>` runs aborting when global.env references a
+// service that was filtered out of the selection. Entries that reference a
+// skipped local service must be silently omitted (matching the cross-repo
+// unresolved-ref behavior); entries with defaults must use the default;
+// entries that reference selected services must pass through normally.
+func TestExportBatchEnvFilesOmitsRefsToSkippedServices(t *testing.T) {
+	tmp := t.TempDir()
+	globalPath := filepath.Join(tmp, "global.env")
+
+	defaultPort := "3000"
+	cfg := &config.Config{
+		Global: config.GlobalConfig{
+			EnvFile: globalPath,
+			Env: map[string]config.EnvValue{
+				"API_PORT":         {Ref: "api.PORT"},                                 // selected → kept
+				"WEB_PORT":         {Ref: "web.PORT"},                                 // skipped, no default → omit
+				"WEB_PORT_DEFAULT": {Ref: "web.PORT", Default: &defaultPort},          // skipped but default → kept via default
+				"COMBO_URL":        {Value: "http://api:${api.PORT}/x?w=${web.PORT}"}, // mixes selected + skipped, no default → omit
+				"COMBO_URL_DEF":    {Value: "http://${web.PORT:-3000}/"},              // skipped but inline default → kept
+			},
+		},
+	}
+
+	allocations := []batchAlloc{
+		{
+			name:         "api",
+			svcGroup:     "test",
+			assignedPort: 40100,
+			svc:          config.ServiceConfig{Env: map[string]config.EnvValue{"X": {Value: "y"}}},
+		},
+	}
+	portMap := envexpand.PortMap{"api": {"port": 40100, "PORT": 40100}}
+	skipped := map[string]bool{"web": true}
+
+	if err := exportBatchEnvFiles(cfg, allocations, portMap, nil, nil, skipped); err != nil {
+		t.Fatalf("exportBatchEnvFiles: %v", err)
+	}
+
+	raw, err := os.ReadFile(globalPath)
+	if err != nil {
+		t.Fatalf("read global env: %v", err)
+	}
+	got := string(raw)
+
+	mustContain := []string{`API_PORT="40100"`, `WEB_PORT_DEFAULT="3000"`, `COMBO_URL_DEF="http://3000/"`}
+	for _, want := range mustContain {
+		if !strings.Contains(got, want) {
+			t.Errorf("global env file missing %q\n--- contents ---\n%s", want, got)
+		}
+	}
+
+	mustNotContain := []string{"WEB_PORT=", "COMBO_URL="}
+	for _, bad := range mustNotContain {
+		// Allow "WEB_PORT_DEFAULT=" / "COMBO_URL_DEF=" — match exact key boundary.
+		if strings.Contains(got, "\n"+bad) || strings.HasPrefix(got, bad) {
+			t.Errorf("global env file should have omitted entry starting with %q\n--- contents ---\n%s", bad, got)
+		}
+	}
 }

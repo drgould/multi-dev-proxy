@@ -16,7 +16,10 @@ import (
 type Config struct {
 	Services  map[string]ServiceConfig `yaml:"services"`
 	PortRange string                   `yaml:"port_range"`
-	Global    GlobalConfig             `yaml:"global"`
+	// StablePorts toggles per-branch stable port reuse. Nil (absent) means on;
+	// set `stable_ports: false` to disable. See StablePortsEnabled.
+	StablePorts *bool        `yaml:"stable_ports"`
+	Global      GlobalConfig `yaml:"global"`
 	// Inputs declares values prompted for by `mdp run -i` and referenced
 	// elsewhere as ${inputs.<name>}. Declaration order is preserved so prompts
 	// appear in a stable order.
@@ -26,6 +29,12 @@ type Config struct {
 	// input (e.g. ${inputs.api_branch}). CLI `--link` overrides config links
 	// per repo.
 	Links map[string]string `yaml:"links"`
+}
+
+// StablePortsEnabled reports whether per-branch stable port reuse is active.
+// It defaults to on; set `stable_ports: false` in mdp.yaml to disable.
+func (c *Config) StablePortsEnabled() bool {
+	return c.StablePorts == nil || *c.StablePorts
 }
 
 // GlobalConfig holds project-wide settings that aren't tied to a single service.

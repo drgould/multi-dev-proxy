@@ -477,3 +477,34 @@ func TestIsCrossRepoBareRef(t *testing.T) {
 		})
 	}
 }
+
+func TestLocalServiceRefs(t *testing.T) {
+	tests := []struct {
+		name string
+		in   string
+		want []string
+	}{
+		{"no refs", "plain string", nil},
+		{"port ref", "http://localhost:${api.PORT}", []string{"api"}},
+		{"env ref", "postgres://localhost:${db.env.DB_PORT}/app", []string{"db"}},
+		{"multiple distinct", "${api.PORT}/${db.DB_PORT}", []string{"api", "db"}},
+		{"dedupes repeats", "${api.PORT}-${api.ADMIN}", []string{"api"}},
+		{"excludes cross-repo", "${@backend.api.PORT}", nil},
+		{"excludes defaulted", "${db.DB_PORT:-5432}", nil},
+		{"mix: keeps local-no-default only", "${api.PORT}/${db.DB_PORT:-1}/${@x.svc.PORT}", []string{"api"}},
+		{"order preserved", "${web.PORT}-${api.PORT}", []string{"web", "api"}},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			got := LocalServiceRefs(tt.in)
+			if len(got) != len(tt.want) {
+				t.Fatalf("LocalServiceRefs(%q) = %v, want %v", tt.in, got, tt.want)
+			}
+			for i := range got {
+				if got[i] != tt.want[i] {
+					t.Errorf("LocalServiceRefs(%q)[%d] = %q, want %q", tt.in, i, got[i], tt.want[i])
+				}
+			}
+		})
+	}
+}

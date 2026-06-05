@@ -17,6 +17,7 @@ import (
 	"os/signal"
 	"path/filepath"
 	"regexp"
+	"slices"
 	"sort"
 	"strings"
 	"sync"
@@ -32,6 +33,7 @@ import (
 	"github.com/derekgould/multi-dev-proxy/internal/envexport"
 	"github.com/derekgould/multi-dev-proxy/internal/orchestrator"
 	"github.com/derekgould/multi-dev-proxy/internal/ports"
+	"github.com/derekgould/multi-dev-proxy/internal/portstore"
 	"github.com/derekgould/multi-dev-proxy/internal/process"
 	"github.com/derekgould/multi-dev-proxy/internal/registry"
 )
@@ -70,11 +72,13 @@ func init() {
 	runCmd.Flags().String("tls-key", "", "TLS key file (forwarded to proxy for HTTPS)")
 	runCmd.Flags().Bool("auto-tls", false, "Auto-detect TLS certs from mkcert")
 	runCmd.Flags().String("group", "", "Group name override (default: git branch)")
+	runCmd.Flags().Bool("no-stable-ports", false, "Disable stable per-branch port reuse (allocate fresh ports each run)")
 	runCmd.Flags().String("env", "PORT", "Environment variable name for the assigned port")
 	runCmd.Flags().Int("control-port", 13100, "Orchestrator control port")
 	runCmd.Flags().String("log-split", "", `Demultiplex combined-stream logs. Values: "compose" (docker-compose format) or "regex:<pattern>" with named captures 'name' and 'msg'.`)
 	runCmd.Flags().StringArray("link", nil, "Override the lookup group for cross-repo @<repo>.* env refs: repo=group (repeatable, last-wins per repo). Used when a peer service runs in a different group than the caller (e.g. backend on main, frontend on a feature branch).")
 	runCmd.Flags().BoolP("interactive", "i", false, "Prompt for the inputs declared in mdp.yaml (see the `inputs:` section); without it, inputs use their defaults.")
+	runCmd.Flags().StringSlice("service", nil, "Only start the listed services from mdp.yaml (repeatable or comma-separated). Transitive depends_on are auto-included. Falls back to env MDP_SERVICES. Default: start all.")
 }
 
 // parseLinks converts repeated `--link repo=group` values into a map. Empty
@@ -121,6 +125,129 @@ func mergeLinks(configLinks, cliLinks map[string]string) map[string]string {
 	return merged
 }
 
+// pickPort returns a port for key. When a previously-remembered port for key is
+// still free (per isFree) and not already taken this run (exclude), it is
+// reused; otherwise a fresh port is allocated via finder. The chosen port is
+// recorded in picked so callers can persist it. Passing a nil remembered/picked
+// map disables reuse/recording (used when stable ports are off).
+func pickPort(
+	finder func(ports.PortRange, []int) (int, error),
+	isFree func(int) bool,
+	remembered, picked map[string]int,
+	key string,
+	r ports.PortRange,
+	exclude []int,
+) (int, error) {
+	if p, ok := remembered[key]; ok && p >= r.Start && p <= r.End && isFree(p) && !slices.Contains(exclude, p) {
+		if picked != nil {
+			picked[key] = p
+		}
+		return p, nil
+	}
+	p, err := finder(r, exclude)
+	if err != nil {
+		return 0, err
+	}
+	if picked != nil {
+		picked[key] = p
+	}
+	return p, nil
+}
+
+// referencedServices returns the local sibling services that svc needs present
+// to start cleanly: its explicit depends_on, plus any local service whose port
+// or env var it interpolates from its own env without a default fallback.
+// Cross-repo (@repo.) refs and defaulted refs are excluded — those tolerate the
+// target's absence (the orchestrator resolver / the default covers them).
+func referencedServices(svc config.ServiceConfig) []string {
+	refs := append([]string(nil), svc.DependsOn...)
+	for _, entry := range svc.Env {
+		if entry.Ref != "" {
+			if entry.HasDefault() || envexpand.IsCrossRepoBareRef(entry.Ref) {
+				continue
+			}
+			// Local bare ref: svc.key or svc.env.VAR — name is up to first dot.
+			name := entry.Ref
+			if i := strings.IndexByte(name, '.'); i > 0 {
+				name = name[:i]
+			}
+			refs = append(refs, name)
+			continue
+		}
+		refs = append(refs, envexpand.LocalServiceRefs(entry.Value)...)
+	}
+	return refs
+}
+
+// resolveServiceSelection returns the set of service names to start, or nil to
+// mean "all services". Empty selection (after trimming) returns nil. Unknown
+// names return an error listing the valid names. The returned set is extended
+// with the transitive closure of each selected service's dependencies — both
+// depends_on and the local services it interpolates from env (see
+// referencedServices) — so port allocation and env expansion have every
+// service they reference, not just the ones declared in depends_on.
+func resolveServiceSelection(cfg *config.Config, selection []string) (map[string]bool, error) {
+	cleaned := make([]string, 0, len(selection))
+	for _, s := range selection {
+		s = strings.TrimSpace(s)
+		if s != "" {
+			cleaned = append(cleaned, s)
+		}
+	}
+	if len(cleaned) == 0 {
+		return nil, nil
+	}
+
+	var unknown []string
+	for _, name := range cleaned {
+		if _, ok := cfg.Services[name]; !ok {
+			unknown = append(unknown, name)
+		}
+	}
+	if len(unknown) > 0 {
+		valid := make([]string, 0, len(cfg.Services))
+		for name := range cfg.Services {
+			valid = append(valid, name)
+		}
+		sort.Strings(valid)
+		sort.Strings(unknown)
+		return nil, fmt.Errorf("unknown service(s): %s — valid: %s", strings.Join(unknown, ", "), strings.Join(valid, ", "))
+	}
+
+	selected := make(map[string]bool, len(cleaned))
+	for _, name := range cleaned {
+		selected[name] = true
+	}
+
+	var pulled []string
+	queue := append([]string(nil), cleaned...)
+	for len(queue) > 0 {
+		name := queue[0]
+		queue = queue[1:]
+		for _, ref := range referencedServices(cfg.Services[name]) {
+			if selected[ref] {
+				continue
+			}
+			if _, ok := cfg.Services[ref]; !ok {
+				// depends_on is validated in config.Load; an env ref to a
+				// missing service would fail expansion at full startup too.
+				// Surface it here with the referencing service for context.
+				return nil, fmt.Errorf("service %q references unknown service %q", name, ref)
+			}
+			selected[ref] = true
+			pulled = append(pulled, ref)
+			queue = append(queue, ref)
+		}
+	}
+
+	if len(pulled) > 0 {
+		sort.Strings(pulled)
+		slog.Info("auto-included dependencies", "services", pulled)
+	}
+
+	return selected, nil
+}
+
 func runRun(cmd *cobra.Command, args []string) error {
 	controlPort, _ := cmd.Flags().GetInt("control-port")
 	groupFlag, _ := cmd.Flags().GetString("group")
@@ -140,7 +267,22 @@ func runRun(cmd *cobra.Command, args []string) error {
 
 	interactive, _ := cmd.Flags().GetBool("interactive")
 	if len(args) == 0 {
-		return runBatchMode(cmd, controlPort, groupFlag, linkMap, interactive)
+		selection, _ := cmd.Flags().GetStringSlice("service")
+		// An explicit but empty flag (e.g. `--service ""`) must not shadow
+		// MDP_SERVICES — treat an all-blank selection as unset.
+		hasService := false
+		for _, s := range selection {
+			if strings.TrimSpace(s) != "" {
+				hasService = true
+				break
+			}
+		}
+		if !hasService {
+			if env := os.Getenv("MDP_SERVICES"); env != "" {
+				selection = strings.Split(env, ",")
+			}
+		}
+		return runBatchMode(cmd, controlPort, groupFlag, linkMap, interactive, selection)
 	}
 	if interactive {
 		return fmt.Errorf("-i/--interactive applies only to mdp.yaml batch mode, not `mdp run -- <command>`")
@@ -168,7 +310,7 @@ func runRun(cmd *cobra.Command, args []string) error {
 	return runSingleMode(cmd, args, controlPort, groupFlag, tlsCert, tlsKey, logSplit)
 }
 
-func runBatchMode(cmd *cobra.Command, controlPort int, groupFlag string, linkMap map[string]string, interactive bool) error {
+func runBatchMode(cmd *cobra.Command, controlPort int, groupFlag string, linkMap map[string]string, interactive bool, serviceSelection []string) error {
 	cwd, err := os.Getwd()
 	if err != nil {
 		return fmt.Errorf("cannot determine working directory: %w", err)
@@ -210,6 +352,15 @@ func runBatchMode(cmd *cobra.Command, controlPort int, groupFlag string, linkMap
 	// deferred any that contained ${inputs.X} so absolute/~ input values
 	// resolve correctly.
 	cfg.FinalizePaths(filepath.Dir(configPath))
+
+	// Resolve the service selection after inputs are substituted, so its
+	// env-ref dependency analysis sees final values — a ${inputs.X} reference
+	// must not look like a dependency on a service named "inputs".
+	selected, err := resolveServiceSelection(cfg, serviceSelection)
+	if err != nil {
+		return err
+	}
+
 	// Merge config `links:` (now input-substituted) under the CLI --link
 	// overrides (CLI wins per repo), then reject empties — checked after the
 	// merge so a --link override can rescue a config link that resolved empty.
@@ -231,18 +382,38 @@ func runBatchMode(cmd *cobra.Command, controlPort int, groupFlag string, linkMap
 		return fmt.Errorf("invalid port range in config: %w", err)
 	}
 
+	repo := detect.DetectRepo(filepath.Dir(configPath))
+
+	// Stable ports: reuse this branch's previously-assigned ports (when still
+	// free) so certs/trust keyed to a port survive restarts. Best-effort —
+	// remembered and picked stay nil when disabled, which makes pickPort fall
+	// straight through to fresh allocation.
+	noStable, _ := cmd.Flags().GetBool("no-stable-ports")
+	stable := cfg.StablePortsEnabled() && !noStable
+	var remembered, picked map[string]int
+	if stable {
+		remembered = portstore.Load(repo, group)
+		picked = map[string]int{}
+	}
+
 	bt := &batchTracker{}
 
 	var allocations []batchAlloc
 	portMap := envexpand.PortMap{}
 	var assignedPorts []int
-	for _, svc := range cfg.Services {
+	for name, svc := range cfg.Services {
+		if selected != nil && !selected[name] {
+			continue
+		}
 		if svc.Port > 0 {
 			assignedPorts = append(assignedPorts, svc.Port)
 		}
 	}
 
 	for name, svc := range cfg.Services {
+		if selected != nil && !selected[name] {
+			continue
+		}
 		if svc.Command == "" && svc.Port == 0 {
 			continue
 		}
@@ -257,10 +428,12 @@ func runBatchMode(cmd *cobra.Command, controlPort int, groupFlag string, linkMap
 			for envName, value := range svc.Env {
 				if value.Ref == "" && value.Value == "auto" {
 					finder := ports.FindFreePort
+					isFree := ports.IsPortFree
 					if envProtocols[envName] == "udp" {
 						finder = ports.FindFreeUDPPort
+						isFree = ports.IsUDPPortFree
 					}
-					port, err := finder(portRange, assignedPorts)
+					port, err := pickPort(finder, isFree, remembered, picked, name+"."+envName, portRange, assignedPorts)
 					if err != nil {
 						return fmt.Errorf("find free port for %q.%s: %w", name, envName, err)
 					}
@@ -279,7 +452,7 @@ func runBatchMode(cmd *cobra.Command, controlPort int, groupFlag string, linkMap
 
 		assignedPort := svc.Port
 		if assignedPort == 0 {
-			assignedPort, err = ports.FindFreePort(portRange, assignedPorts)
+			assignedPort, err = pickPort(ports.FindFreePort, ports.IsPortFree, remembered, picked, name, portRange, assignedPorts)
 			if err != nil {
 				return fmt.Errorf("find free port for %q: %w", name, err)
 			}
@@ -289,7 +462,14 @@ func runBatchMode(cmd *cobra.Command, controlPort int, groupFlag string, linkMap
 		allocations = append(allocations, batchAlloc{name: name, svc: svc, svcGroup: svcGroup, assignedPort: assignedPort})
 	}
 
-	repo := detect.DetectRepo(filepath.Dir(configPath))
+	if stable {
+		// Save merges picked into the on-disk file under a lock, so other
+		// services' entries (and concurrent runs sharing this repo/group file)
+		// survive.
+		if err := portstore.Save(repo, group, picked); err != nil {
+			slog.Warn("failed to persist stable ports", "err", err)
+		}
+	}
 
 	// Build a resolver per allocation so that services with a `group:` override
 	// query the orchestrator under their own group, not the workspace's
@@ -302,7 +482,17 @@ func runBatchMode(cmd *cobra.Command, controlPort int, groupFlag string, linkMap
 	}
 	globalResolver := newPeerResolver(client, controlURL, group, linkMap)
 
-	if err := exportBatchEnvFiles(cfg, allocations, portMap, allocResolvers, globalResolver); err != nil {
+	var skipped map[string]bool
+	if selected != nil {
+		skipped = make(map[string]bool, len(cfg.Services))
+		for name := range cfg.Services {
+			if !selected[name] {
+				skipped[name] = true
+			}
+		}
+	}
+
+	if err := exportBatchEnvFiles(cfg, allocations, portMap, allocResolvers, globalResolver, skipped); err != nil {
 		return err
 	}
 
@@ -767,7 +957,13 @@ func buildBatchEnv(a batchAlloc, portMap envexpand.PortMap, resolver envexpand.R
 // against the right peers). globalResolver is used for global env entries,
 // which sit at the workspace level and use the top-level group. Either may be
 // nil to disable cross-repo resolution.
-func exportBatchEnvFiles(cfg *config.Config, allocations []batchAlloc, portMap envexpand.PortMap, allocResolvers []envexpand.Resolver, globalResolver envexpand.Resolver) error {
+//
+// skipped, if non-nil, is the set of services excluded by --service selection.
+// Entries in cfg.Global.Env that reference a skipped service (and have no
+// default to fall back on) are omitted from the global env file with a warning,
+// matching the graceful-degradation behavior used for unresolved cross-repo
+// peers.
+func exportBatchEnvFiles(cfg *config.Config, allocations []batchAlloc, portMap envexpand.PortMap, allocResolvers []envexpand.Resolver, globalResolver envexpand.Resolver, skipped map[string]bool) error {
 	envMap := envexpand.EnvMap{}
 	for i, a := range allocations {
 		var r envexpand.Resolver
@@ -782,7 +978,8 @@ func exportBatchEnvFiles(cfg *config.Config, allocations []batchAlloc, portMap e
 		envMap[a.name] = envSliceToMap(env)
 	}
 	if cfg.Global.EnvFile != "" {
-		if err := envexport.WriteGlobalWith(cfg.Global.EnvFile, cfg.Global.Env, portMap, envMap, globalResolver); err != nil {
+		globalEnv := filterGlobalEnvForSkipped(cfg.Global.Env, skipped)
+		if err := envexport.WriteGlobalWith(cfg.Global.EnvFile, globalEnv, portMap, envMap, globalResolver); err != nil {
 			return fmt.Errorf("write global env file: %w", err)
 		}
 	}
@@ -795,6 +992,57 @@ func exportBatchEnvFiles(cfg *config.Config, allocations []batchAlloc, portMap e
 		}
 	}
 	return nil
+}
+
+// filterGlobalEnvForSkipped returns a copy of globalEnv with entries removed
+// whose Ref or Value references a local service in the skipped set without a
+// default fallback. Entries with defaults are kept (the resolver will use the
+// default). Returns globalEnv unchanged when skipped is empty.
+func filterGlobalEnvForSkipped(globalEnv map[string]config.EnvValue, skipped map[string]bool) map[string]config.EnvValue {
+	if len(skipped) == 0 || len(globalEnv) == 0 {
+		return globalEnv
+	}
+	out := make(map[string]config.EnvValue, len(globalEnv))
+	for k, entry := range globalEnv {
+		if entry.Ref != "" {
+			if entry.HasDefault() || envexpand.IsCrossRepoBareRef(entry.Ref) {
+				out[k] = entry
+				continue
+			}
+			// Local bare ref: svc.key or svc.env.VAR. Service name is everything
+			// before the first dot.
+			svc := entry.Ref
+			if i := strings.IndexByte(svc, '.'); i > 0 {
+				svc = svc[:i]
+			}
+			if skipped[svc] {
+				slog.Warn("omitting global env entry that references unselected service", "key", k, "ref", entry.Ref, "service", svc)
+				continue
+			}
+			out[k] = entry
+			continue
+		}
+		// Value form may embed ${svc.key} refs without defaults. Omit the entry
+		// if any such ref points at a skipped service.
+		if svc := firstSkippedRef(entry.Value, skipped); svc != "" {
+			slog.Warn("omitting global env entry that references unselected service", "key", k, "value", entry.Value, "service", svc)
+			continue
+		}
+		out[k] = entry
+	}
+	return out
+}
+
+// firstSkippedRef returns the first local service referenced by value (without
+// a default) that is in the skipped set, or "" if none. Cross-repo and
+// defaulted refs are excluded by envexpand.LocalServiceRefs.
+func firstSkippedRef(value string, skipped map[string]bool) string {
+	for _, svc := range envexpand.LocalServiceRefs(value) {
+		if skipped[svc] {
+			return svc
+		}
+	}
+	return ""
 }
 
 func envSliceToMap(env []string) map[string]string {
@@ -1167,14 +1415,13 @@ func runSingleMode(cmd *cobra.Command, args []string, controlPort int, groupFlag
 		}
 		tlsKey = abs
 	}
+	repo := repoOverride
+	if repo == "" {
+		repo = detect.DetectRepo(cwd)
+	}
 	serverName := nameOverride
 	if serverName == "" {
-		repo := repoOverride
-		if repo == "" {
-			repo = detect.DetectRepo(cwd)
-		}
-		branch := detect.DetectBranch(cwd)
-		serverName = detect.ServerName(repo, branch)
+		serverName = detect.ServerName(repo, detect.DetectBranch(cwd))
 	}
 
 	group := groupFlag
@@ -1182,9 +1429,25 @@ func runSingleMode(cmd *cobra.Command, args []string, controlPort int, groupFlag
 		group = detect.DetectBranch(cwd)
 	}
 
-	assignedPort, err := ports.FindFreePort(portRange, nil)
+	// Stable ports: reuse this branch's previously-assigned port when still free
+	// (see runBatchMode). On by default; --no-stable-ports opts out.
+	noStable, _ := cmd.Flags().GetBool("no-stable-ports")
+	stable := !noStable
+	var remembered, picked map[string]int
+	if stable {
+		remembered = portstore.Load(repo, group)
+		picked = map[string]int{}
+	}
+	assignedPort, err := pickPort(ports.FindFreePort, ports.IsPortFree, remembered, picked, serverName, portRange, nil)
 	if err != nil {
 		return fmt.Errorf("find free port: %w", err)
+	}
+	if stable {
+		// Save merges under a lock, so batch-mode services sharing this
+		// repo/group file aren't wiped by an ad-hoc single-command run.
+		if err := portstore.Save(repo, group, picked); err != nil {
+			slog.Warn("failed to persist stable ports", "err", err)
+		}
 	}
 
 	scheme := "http"

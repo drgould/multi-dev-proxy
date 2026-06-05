@@ -188,6 +188,31 @@ func ScanCrossRepoRefs(value string) []CrossRepoRef {
 	return out
 }
 
+// LocalServiceRefs returns the distinct names of local services referenced by
+// value through ${svc.key} or ${svc.env.VAR}, in source order. Cross-repo
+// (@repo.) references and references carrying an inline :-default are excluded:
+// the former are resolved by a Resolver, and the latter tolerate the target's
+// absence. Returns nil when value has no qualifying references. Callers use
+// this to discover which sibling services a value depends on for expansion.
+func LocalServiceRefs(value string) []string {
+	var out []string
+	seen := make(map[string]bool)
+	for _, m := range refPattern.FindAllStringSubmatch(value, -1) {
+		if m[2] != "" {
+			continue // cross-repo ref
+		}
+		if m[6] != "" {
+			continue // has an inline :-default
+		}
+		svc := m[3]
+		if !seen[svc] {
+			seen[svc] = true
+			out = append(out, svc)
+		}
+	}
+	return out
+}
+
 // ParseCrossRepoBareRef parses a bare ref of the form @repo.svc[.env].key.
 // Returns (ref, true) if it is a cross-repo bare ref; (zero, false) otherwise.
 func ParseCrossRepoBareRef(ref string) (CrossRepoRef, bool) {
