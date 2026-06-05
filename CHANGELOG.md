@@ -1,5 +1,19 @@
 # Changelog
 
+## [1.10.0](https://github.com/drgould/multi-dev-proxy/compare/v1.9.0...v1.10.0) (2026-06-05)
+
+
+### Features
+
+* interactive inputs and cross-repo links for mdp run ([#60](https://github.com/drgould/multi-dev-proxy/issues/60)) ([b2c689e](https://github.com/drgould/multi-dev-proxy/commit/b2c689ea8cedaaac3e61e096d30c2e3e3b9eab88))
+* select batch services with --service flag and MDP_SERVICES env ([#55](https://github.com/drgould/multi-dev-proxy/issues/55)) ([3f03ce8](https://github.com/drgould/multi-dev-proxy/commit/3f03ce878e596b2a60672572e8ca64114f492a7f))
+* stable per-branch port allocation across mdp runs ([#59](https://github.com/drgould/multi-dev-proxy/issues/59)) ([4ec66ab](https://github.com/drgould/multi-dev-proxy/commit/4ec66ab4ddea78e74171c9f6673f888d7d8242f2))
+
+
+### Bug Fixes
+
+* drop deprecated goreleaser brews block, guard cask xattr hook for linux ([#57](https://github.com/drgould/multi-dev-proxy/issues/57)) ([11b44e3](https://github.com/drgould/multi-dev-proxy/commit/11b44e3231d47674830d00d480de4cb0017d46e1))
+
 ## [1.9.0](https://github.com/drgould/multi-dev-proxy/compare/v1.8.0...v1.9.0) (2026-05-21)
 
 
