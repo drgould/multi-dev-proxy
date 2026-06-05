@@ -8,6 +8,7 @@ import (
 	"sort"
 	"strings"
 
+	"github.com/derekgould/multi-dev-proxy/internal/envexpand"
 	"gopkg.in/yaml.v3"
 )
 
@@ -19,6 +20,15 @@ type Config struct {
 	// set `stable_ports: false` to disable. See StablePortsEnabled.
 	StablePorts *bool        `yaml:"stable_ports"`
 	Global      GlobalConfig `yaml:"global"`
+	// Inputs declares values prompted for by `mdp run -i` and referenced
+	// elsewhere as ${inputs.<name>}. Declaration order is preserved so prompts
+	// appear in a stable order.
+	Inputs Inputs `yaml:"inputs"`
+	// Links maps a peer repo name to the group its services run in, mirroring
+	// the repeatable `--link repo=group` CLI flag. A value may reference an
+	// input (e.g. ${inputs.api_branch}). CLI `--link` overrides config links
+	// per repo.
+	Links map[string]string `yaml:"links"`
 }
 
 // StablePortsEnabled reports whether per-branch stable port reuse is active.
@@ -103,6 +113,71 @@ func (g EnvValue) DefaultValue() string {
 		return ""
 	}
 	return *g.Default
+}
+
+// InputSpec is one declared input under the top-level `inputs:` mapping. Its
+// resolved value (prompted via `mdp run -i`, or the Default otherwise) is
+// referenced elsewhere as ${inputs.<Name>}.
+type InputSpec struct {
+	Name       string // the mapping key
+	Prompt     string // question shown when prompting; defaults to Name
+	Default    string // fallback when not prompting or the answer is empty
+	HasDefault bool   // whether `default:` was present (distinguishes `default: ""` from absent)
+	Choices    string // optional; "groups" => live orchestrator group pick-list
+}
+
+// Inputs is an ordered list of declared inputs. YAML mappings lose key order,
+// so UnmarshalYAML walks the mapping node directly to preserve the declaration
+// order used when prompting.
+type Inputs []InputSpec
+
+// UnmarshalYAML decodes the `inputs:` mapping, preserving declaration order and
+// rejecting unknown spec keys so typos surface at load.
+func (in *Inputs) UnmarshalYAML(node *yaml.Node) error {
+	if node.Kind != yaml.MappingNode {
+		return fmt.Errorf("line %d: inputs must be a mapping of name -> spec", node.Line)
+	}
+	specs := make(Inputs, 0, len(node.Content)/2)
+	for i := 0; i+1 < len(node.Content); i += 2 {
+		keyNode := node.Content[i]
+		valNode := node.Content[i+1]
+		if keyNode.Value == "" {
+			return fmt.Errorf("line %d: input name must not be empty", keyNode.Line)
+		}
+		if valNode.Kind != yaml.MappingNode {
+			return fmt.Errorf("line %d: input %q must be a mapping with prompt/default/choices keys", valNode.Line, keyNode.Value)
+		}
+		spec := InputSpec{Name: keyNode.Value}
+		for j := 0; j+1 < len(valNode.Content); j += 2 {
+			k := valNode.Content[j]
+			v := valNode.Content[j+1]
+			// A bare `default:` (null node) means "no default"; only an explicit
+			// scalar (including `default: ""`) sets one. This keeps null distinct
+			// from the empty string so the non-interactive "no default" error
+			// still fires for `default:` written with no value.
+			if k.Value == "default" && v.Tag == "!!null" {
+				continue
+			}
+			var dst *string
+			switch k.Value {
+			case "prompt":
+				dst = &spec.Prompt
+			case "default":
+				dst = &spec.Default
+				spec.HasDefault = true
+			case "choices":
+				dst = &spec.Choices
+			default:
+				return fmt.Errorf("line %d: unknown key %q in input %q (only `prompt`, `default`, and `choices` are supported)", k.Line, k.Value, keyNode.Value)
+			}
+			if err := v.Decode(dst); err != nil {
+				return fmt.Errorf("line %d: input %q %s: %w", v.Line, keyNode.Value, k.Value, err)
+			}
+		}
+		specs = append(specs, spec)
+	}
+	*in = specs
+	return nil
 }
 
 // ServiceConfig defines a single service in the config file.
@@ -238,16 +313,25 @@ func Load(path string) (*Config, error) {
 	}
 	dir := filepath.Dir(path)
 	for name, svc := range cfg.Services {
-		svc.Dir = resolvePath(svc.Dir, dir)
+		// Paths containing ${inputs.X} are resolved later by FinalizePaths,
+		// after inputs are substituted — resolving a placeholder now would join
+		// a relative literal to the config dir (or miss ~-expansion) for input
+		// values that are themselves absolute or ~-prefixed.
+		if !containsInputRef(svc.Dir) {
+			svc.Dir = resolvePath(svc.Dir, dir)
+		}
 		svc.TLSCert = resolvePath(svc.TLSCert, dir)
 		svc.TLSKey = resolvePath(svc.TLSKey, dir)
 		// Per-service env_file is resolved against the service's (already
-		// absolute) dir; fall back to the config dir when dir is empty.
-		envFileBase := svc.Dir
-		if envFileBase == "" {
-			envFileBase = dir
+		// absolute) dir; fall back to the config dir when dir is empty. Defer
+		// when env_file or its base dir still carries an input ref.
+		if !containsInputRef(svc.EnvFile) && !containsInputRef(svc.Dir) {
+			envFileBase := svc.Dir
+			if envFileBase == "" {
+				envFileBase = dir
+			}
+			svc.EnvFile = resolvePath(svc.EnvFile, envFileBase)
 		}
-		svc.EnvFile = resolvePath(svc.EnvFile, envFileBase)
 		// Infer scheme from cert presence.
 		if svc.Scheme == "" && svc.TLSCert != "" {
 			svc.Scheme = "https"
@@ -291,11 +375,188 @@ func Load(path string) (*Config, error) {
 		}
 		cfg.Services[name] = svc
 	}
-	cfg.Global.EnvFile = resolvePath(cfg.Global.EnvFile, dir)
+	if !containsInputRef(cfg.Global.EnvFile) {
+		cfg.Global.EnvFile = resolvePath(cfg.Global.EnvFile, dir)
+	}
 	if err := validateDependencies(cfg.Services); err != nil {
 		return nil, err
 	}
+	if err := validateInputs(&cfg); err != nil {
+		return nil, err
+	}
 	return &cfg, nil
+}
+
+// containsInputRef reports whether s carries a ${inputs.X} placeholder, whose
+// resolution is deferred until inputs are substituted.
+func containsInputRef(s string) bool {
+	return strings.Contains(s, "${inputs.")
+}
+
+// FinalizePaths resolves the service Dir/EnvFile and global EnvFile that Load
+// left raw because they contained ${inputs.X}. Call it after inputs are
+// substituted (see VisitInputRefFields). resolvePath is idempotent on already
+// absolute paths, so paths Load already resolved are unchanged — meaning this
+// is a no-op for configs that use no inputs in path fields. configDir is the
+// directory containing the mdp.yaml.
+func (cfg *Config) FinalizePaths(configDir string) {
+	for name, svc := range cfg.Services {
+		svc.Dir = resolvePath(svc.Dir, configDir)
+		base := svc.Dir
+		if base == "" {
+			base = configDir
+		}
+		svc.EnvFile = resolvePath(svc.EnvFile, base)
+		cfg.Services[name] = svc
+	}
+	cfg.Global.EnvFile = resolvePath(cfg.Global.EnvFile, configDir)
+}
+
+// inputNamePattern is the accepted syntax for input names. It must match the
+// key syntax that envexpand's ${inputs.NAME} reference regex supports, so a
+// declared input is always referenceable (and any ${inputs.X} typo is caught
+// as an undeclared reference rather than silently surviving substitution).
+var inputNamePattern = regexp.MustCompile(`^[A-Za-z0-9_]+$`)
+
+// validateInputs checks the `inputs:` and `links:` sections: input names are
+// valid and unique, `choices` is empty or "groups", defaults are plain
+// literals, the reserved service name "inputs" is unused, and every
+// ${inputs.X} reference names a declared input. The reference scan drives
+// VisitInputRefFields, so it covers exactly the fields where substitution
+// applies — the two cannot drift apart — and in a deterministic order, so the
+// reported error is stable when several refs are undeclared.
+func validateInputs(cfg *Config) error {
+	declared := make(map[string]bool, len(cfg.Inputs))
+	for _, in := range cfg.Inputs {
+		if in.Name == "" {
+			return fmt.Errorf("input name must not be empty")
+		}
+		if !inputNamePattern.MatchString(in.Name) {
+			return fmt.Errorf("input name %q is invalid: only letters, digits, and underscore are allowed", in.Name)
+		}
+		if declared[in.Name] {
+			return fmt.Errorf("input %q declared more than once", in.Name)
+		}
+		declared[in.Name] = true
+		switch in.Choices {
+		case "", "groups":
+		default:
+			return fmt.Errorf("input %q: unknown choices %q (only \"groups\" is supported)", in.Name, in.Choices)
+		}
+		if in.HasDefault && strings.Contains(in.Default, "${") {
+			return fmt.Errorf("input %q: default must be a plain literal (it cannot contain ${...} references)", in.Name)
+		}
+	}
+	if _, ok := cfg.Services["inputs"]; ok {
+		return fmt.Errorf("service name \"inputs\" is reserved (it collides with ${inputs.*} references)")
+	}
+
+	var firstErr error
+	cfg.VisitInputRefFields(func(where, value string) (string, bool) {
+		if firstErr != nil {
+			return value, false
+		}
+		if bad := envexpand.InvalidInputRefs(value); len(bad) > 0 {
+			firstErr = fmt.Errorf("%s has malformed input reference %s (input names allow only letters, digits, and underscore; a :-fallback cannot contain a nested ${...})", where, bad[0])
+			return value, false
+		}
+		for _, name := range envexpand.ScanInputRefs(value) {
+			if !declared[name] {
+				firstErr = fmt.Errorf("%s references undeclared input ${inputs.%s}", where, name)
+				break
+			}
+		}
+		return value, false // validation never rewrites
+	})
+	if firstErr != nil {
+		return firstErr
+	}
+
+	// Reject ${inputs.X} in fields that don't support substitution, so a natural
+	// mistake (e.g. `group: ${inputs.branch}`) fails clearly at load instead of
+	// surviving as a literal. These are the plausible branch/group/path-shaped
+	// fields outside VisitInputRefFields' supported set.
+	svcNames := make([]string, 0, len(cfg.Services))
+	for name := range cfg.Services {
+		svcNames = append(svcNames, name)
+	}
+	sort.Strings(svcNames)
+	for _, name := range svcNames {
+		svc := cfg.Services[name]
+		for _, f := range []struct{ label, val string }{
+			{"group", svc.Group},
+			{"tls_cert", svc.TLSCert},
+			{"tls_key", svc.TLSKey},
+		} {
+			if strings.Contains(f.val, "${inputs.") {
+				return fmt.Errorf("service %q %s does not support ${inputs.X} references", name, f.label)
+			}
+		}
+	}
+	return nil
+}
+
+// VisitInputRefFields walks, in deterministic order, every config field where
+// ${inputs.X} references are supported — a service's command, dir, setup,
+// shutdown, env (value/ref/default), and env_file; the global env block and
+// env_file; and links values — calling visit(where, value). When visit returns
+// (newValue, true), the field is rewritten in place. Load-time validation and
+// run-time substitution both drive this single walk, so the supported-field set
+// cannot drift between them.
+func (cfg *Config) VisitInputRefFields(visit func(where, value string) (string, bool)) {
+	apply := func(where, value string, set func(string)) {
+		if nv, changed := visit(where, value); changed {
+			set(nv)
+		}
+	}
+	visitEnv := func(where string, env map[string]EnvValue) {
+		keys := make([]string, 0, len(env))
+		for k := range env {
+			keys = append(keys, k)
+		}
+		sort.Strings(keys)
+		for _, k := range keys {
+			e := env[k]
+			apply(fmt.Sprintf("%s env %q", where, k), e.Value, func(v string) { e.Value = v })
+			apply(fmt.Sprintf("%s env %q ref", where, k), e.Ref, func(v string) { e.Ref = v })
+			if e.Default != nil {
+				apply(fmt.Sprintf("%s env %q default", where, k), *e.Default, func(v string) { e.Default = &v })
+			}
+			env[k] = e
+		}
+	}
+
+	names := make([]string, 0, len(cfg.Services))
+	for name := range cfg.Services {
+		names = append(names, name)
+	}
+	sort.Strings(names)
+	for _, name := range names {
+		svc := cfg.Services[name]
+		where := fmt.Sprintf("service %q", name)
+		apply(where+" command", svc.Command, func(v string) { svc.Command = v })
+		apply(where+" dir", svc.Dir, func(v string) { svc.Dir = v })
+		for i := range svc.Setup {
+			apply(fmt.Sprintf("%s setup[%d]", where, i), svc.Setup[i], func(v string) { svc.Setup[i] = v })
+		}
+		for i := range svc.Shutdown {
+			apply(fmt.Sprintf("%s shutdown[%d]", where, i), svc.Shutdown[i], func(v string) { svc.Shutdown[i] = v })
+		}
+		visitEnv(where, svc.Env)
+		apply(where+" env_file", svc.EnvFile, func(v string) { svc.EnvFile = v })
+		cfg.Services[name] = svc
+	}
+	visitEnv("global", cfg.Global.Env)
+	apply("global env_file", cfg.Global.EnvFile, func(v string) { cfg.Global.EnvFile = v })
+
+	repos := make([]string, 0, len(cfg.Links))
+	for repo := range cfg.Links {
+		repos = append(repos, repo)
+	}
+	sort.Strings(repos)
+	for _, repo := range repos {
+		apply(fmt.Sprintf("link %q", repo), cfg.Links[repo], func(v string) { cfg.Links[repo] = v })
+	}
 }
 
 // resolvePath expands a leading "~" and joins relative paths against base.
