@@ -103,6 +103,20 @@ mkcert localhost
 mdp run --tls-cert localhost.pem --tls-key localhost-key.pem -- npm run dev
 ```
 
+## Stable ports
+
+By default mdp remembers each branch's assigned ports and reuses them on the next `mdp run`, as long as the port is still free. Assignments are stored per repo + branch under `~/.mdp/ports/`. This keeps ports steady across restarts — handy when a service binds a TLS cert (or a trust-store entry) to a specific port, so the one-time setup survives a restart instead of repeating every run.
+
+The first run still picks ports at random, so different branches naturally get distinct ports. If a remembered port is taken by something else at startup, mdp transparently allocates a fresh one.
+
+To turn it off, use `--no-stable-ports` — the universal off switch, valid for both `mdp run` (batch) and `mdp run -- <command>` (single-command) runs:
+
+```sh
+mdp run --no-stable-ports
+```
+
+For batch runs you can also disable it by default in `mdp.yaml` with `stable_ports: false`. (The config file isn't read for single-command runs, so use the flag there.)
+
 ---
 
 [← Back to docs index](./index.md)
