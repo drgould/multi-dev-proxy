@@ -111,6 +111,7 @@ Keys under `inputs.<name>`:
 | `prompt` | string | the input name | Question shown when prompting. |
 | `default` | string | none | Fallback used when not prompting, or when the answer is empty. Omitting the key (or writing a bare `default:` with no value) means **no default** — such an input errors under plain `mdp run` and must be prompted with `-i`. Use `default: ""` for an explicit empty default. Must be a plain literal — it cannot contain `${...}` references. |
 | `choices` | string | `""` | Set to `groups` to offer a numbered pick-list of the orchestrator's currently active groups (you may still type a custom value). Any other value is rejected at load. |
+| `repo` | string | `""` | Only valid with `choices: groups`. Limits the pick-list to groups containing services from this repo — useful when the input chooses a peer repo's branch for a [link](#links). Must be a plain literal. |
 
 ```yaml
 inputs:
@@ -118,6 +119,7 @@ inputs:
     prompt: "Which branch is the API running on?"
     default: main
     choices: groups
+    repo: api
 
 links:
   api: ${inputs.api_branch}
@@ -132,7 +134,7 @@ services:
 
 Resolution:
 
-- **`mdp run -i`**: each input is prompted in declaration order, reading from stdin (a terminal, or piped answers such as `mdp run -i < answers.txt`). A `choices: groups` input prints the active groups plus a final `@{current}` entry — "this checkout's default group" — for [links](#links) that should fall back to the caller's own group (marking the `default`); enter a number, type a custom value, or press enter to accept the `default`. Pressing enter on an input that has no `default` re-prompts; `Ctrl-D` / end-of-input aborts the run.
+- **`mdp run -i`**: each input is prompted in declaration order, reading from stdin (a terminal, or piped answers such as `mdp run -i < answers.txt`). A `choices: groups` input prints the active groups (filtered by `repo` if set) plus a final `@{current}` entry — "this checkout's default group" — for [links](#links) that should fall back to the caller's own group (marking the `default`); enter a number, type a custom value, or press enter to accept the `default`. A `choices: groups` input with no matching active groups and a declared `default` is skipped silently — exactly like plain `mdp run` — so `-i` only prompts when there is actually something to select (skipped inputs consume no line from piped answers); with no `default` it degrades to a free-text prompt since a value is still required. If the group listing fails (e.g. the orchestrator can't be reached), the input also falls back to a free-text prompt rather than silently taking the `default`. Pressing enter on an input that has no `default` re-prompts; `Ctrl-D` / end-of-input aborts the run.
 - **`mdp run`** (no `-i`): every input resolves to its `default`. An input with no `default` is an error — provide a `default` or run with `-i`.
 
 Input values are plain literals: an answer (or `default`) containing `${...}` is rejected, so an input can never smuggle in a port or peer reference. An undeclared `${inputs.X}` reference in a supported field is a load-time error, and the service name `inputs` is reserved.
@@ -621,11 +623,12 @@ inputs:
     prompt: "Which branch is the API on?"
     default: main
     choices: groups
+    repo: api
 links:
   api: ${inputs.api_branch}
 ```
 
-`mdp run -i` then prompts for `api_branch` (offering the active groups plus `@{current}`), and `mdp run` without `-i` uses the `main` default. A `--link api=<group>` on the command line still overrides the config value.
+`mdp run -i` then prompts for `api_branch` (offering the active groups containing `api` services plus `@{current}`, or skipping straight to the `default` when there are none), and `mdp run` without `-i` uses the `main` default. A `--link api=<group>` on the command line still overrides the config value.
 
 To default to the caller's own group instead of a fixed branch, use the `@{current}` sentinel (quoted — YAML reserves a leading `@`):
 

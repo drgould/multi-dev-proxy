@@ -476,11 +476,24 @@ func (o *Orchestrator) Groups() map[string][]string {
 	return o.groupsLocked()
 }
 
+// GroupsForRepo is Groups restricted to groups containing at least one service
+// from the given repo (only that repo's services are listed per group). An
+// empty repo is equivalent to Groups.
+func (o *Orchestrator) GroupsForRepo(repo string) map[string][]string {
+	o.mu.RLock()
+	defer o.mu.RUnlock()
+	return o.groupsForRepoLocked(repo)
+}
+
 func (o *Orchestrator) groupsLocked() map[string][]string {
+	return o.groupsForRepoLocked("")
+}
+
+func (o *Orchestrator) groupsForRepoLocked(repo string) map[string][]string {
 	groups := make(map[string][]string)
 	for _, pi := range o.proxies {
 		for _, entry := range pi.Registry.List() {
-			if entry.Group != "" {
+			if entry.Group != "" && (repo == "" || entry.Repo == repo) {
 				groups[entry.Group] = append(groups[entry.Group], entry.Name)
 			}
 		}

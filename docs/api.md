@@ -35,7 +35,7 @@ Each proxy instance serves these endpoints on its listen port (e.g. `:3000`, `:4
 | `DELETE` | `/__mdp/register/{name}`               | Deregister from all proxies       |
 | `POST`   | `/__mdp/proxies/{port}/default/{name}` | Set default on a specific proxy   |
 | `DELETE` | `/__mdp/proxies/{port}/default`        | Clear default on a specific proxy |
-| `GET`    | `/__mdp/groups`                        | List all groups                   |
+| `GET`    | `/__mdp/groups`                        | List all groups (`?repo=` filters to groups containing that repo's services) |
 | `POST`   | `/__mdp/groups/{name}/switch`          | Switch group (set defaults)       |
 | `GET`    | `/__mdp/services`                      | List managed services             |
 | `POST`   | `/__mdp/shutdown`                      | Graceful shutdown                 |

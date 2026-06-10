@@ -6,6 +6,7 @@ import (
 	"fmt"
 	"io"
 	"net/http"
+	"net/url"
 	"slices"
 	"sort"
 	"strconv"
@@ -16,10 +17,16 @@ import (
 )
 
 // fetchActiveGroups returns the sorted list of groups currently registered with
-// the orchestrator, used to populate `choices: groups` pick-lists. Returns nil
-// on any error — prompting then degrades to free-text entry.
-func fetchActiveGroups(client *http.Client, controlURL string) []string {
-	resp, err := client.Get(controlURL + "/__mdp/groups")
+// the orchestrator, used to populate `choices: groups` pick-lists. A non-empty
+// repo restricts the list to groups containing services from that repo. Returns
+// nil on any error and a non-nil empty slice when no groups match — resolveInputs
+// prompts free-text on error but skips the input (default) when genuinely empty.
+func fetchActiveGroups(client *http.Client, controlURL, repo string) []string {
+	target := controlURL + "/__mdp/groups"
+	if repo != "" {
+		target += "?repo=" + url.QueryEscape(repo)
+	}
+	resp, err := client.Get(target)
 	if err != nil {
 		return nil
 	}
@@ -41,18 +48,23 @@ func fetchActiveGroups(client *http.Client, controlURL string) []string {
 
 // resolveInputs produces the {name -> value} map for the config's declared
 // inputs. When interactive, each input is prompted for (groupsFor populates
-// `choices: groups` lists, fetched at most once) reading from in; otherwise
-// every input resolves to its Default, and an input with no default is an
-// error. currentGroup is the caller's own group, shown on the "@{current}"
-// pick-list entry. in/out are injectable for testing.
-func resolveInputs(cfg *config.Config, interactive bool, currentGroup string, groupsFor func() []string, in io.Reader, out io.Writer) (map[string]string, error) {
+// `choices: groups` lists, fetched at most once per repo filter) reading from
+// in; otherwise every input resolves to its Default, and an input with no
+// default is an error. A `choices: groups` input with no active groups and a
+// declared default is skipped silently — exactly like non-interactive — so
+// `mdp run -i` only prompts when there is something to select; a failed groups
+// fetch (nil) instead degrades to a free-text prompt, since "couldn't list
+// groups" must not silently pick the default. currentGroup is
+// the caller's own group, shown on the "@{current}" pick-list entry. in/out
+// are injectable for testing.
+func resolveInputs(cfg *config.Config, interactive bool, currentGroup string, groupsFor func(repo string) []string, in io.Reader, out io.Writer) (map[string]string, error) {
 	if len(cfg.Inputs) == 0 {
 		return nil, nil
 	}
 	values := make(map[string]string, len(cfg.Inputs))
 	reader := bufio.NewReader(in)
-	var groups []string
-	var groupsLoaded bool
+	groupsByRepo := make(map[string][]string) // cache, keyed by repo filter ("" = all)
+	groupsFetched := make(map[string]bool)    // separate from the cache: a nil (failed) fetch is cached too
 	for _, spec := range cfg.Inputs {
 		if !interactive {
 			if !spec.HasDefault {
@@ -61,9 +73,19 @@ func resolveInputs(cfg *config.Config, interactive bool, currentGroup string, gr
 			values[spec.Name] = spec.Default
 			continue
 		}
-		if spec.Choices == "groups" && !groupsLoaded {
-			groups = groupsFor()
-			groupsLoaded = true
+		var groups []string
+		if spec.Choices == "groups" {
+			if !groupsFetched[spec.Repo] {
+				groupsByRepo[spec.Repo] = groupsFor(spec.Repo)
+				groupsFetched[spec.Repo] = true
+			}
+			groups = groupsByRepo[spec.Repo]
+			// Skip only on a confirmed-empty list (non-nil): a failed fetch (nil)
+			// falls through to a free-text prompt instead of silently defaulting.
+			if groups != nil && len(groups) == 0 && spec.HasDefault {
+				values[spec.Name] = spec.Default
+				continue
+			}
 		}
 		val, err := promptInput(spec, currentGroup, groups, reader, out)
 		if err != nil {
@@ -81,9 +103,11 @@ func resolveInputs(cfg *config.Config, interactive bool, currentGroup string, gr
 // (so a numerically-named group stays selectable), and an out-of-range number
 // is taken as a literal value (so a not-yet-running branch named "3" can still
 // be entered). An empty answer uses the default when one is declared, else
-// re-prompts. EOF (Ctrl-D / end of input) aborts. The resolved value — typed or
-// picked — is rejected if it contains ${...}, so inputs stay plain literals (no
-// smuggled port/peer refs).
+// re-prompts. EOF (Ctrl-D / end of input) aborts. A `choices: groups` spec
+// only reaches here with an empty groups list when it has no default or the
+// fetch failed (resolveInputs skips otherwise); it degrades to free text. The resolved
+// value — typed or picked — is rejected if it contains ${...}, so inputs stay
+// plain literals (no smuggled port/peer refs).
 func promptInput(spec config.InputSpec, currentGroup string, groups []string, r *bufio.Reader, out io.Writer) (string, error) {
 	label := spec.Prompt
 	if label == "" {

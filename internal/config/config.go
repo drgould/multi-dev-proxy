@@ -124,6 +124,7 @@ type InputSpec struct {
 	Default    string // fallback when not prompting or the answer is empty
 	HasDefault bool   // whether `default:` was present (distinguishes `default: ""` from absent)
 	Choices    string // optional; "groups" => live orchestrator group pick-list
+	Repo       string // optional; with `choices: groups`, limits the pick-list to groups containing services from this repo
 }
 
 // Inputs is an ordered list of declared inputs. YAML mappings lose key order,
@@ -167,8 +168,10 @@ func (in *Inputs) UnmarshalYAML(node *yaml.Node) error {
 				spec.HasDefault = true
 			case "choices":
 				dst = &spec.Choices
+			case "repo":
+				dst = &spec.Repo
 			default:
-				return fmt.Errorf("line %d: unknown key %q in input %q (only `prompt`, `default`, and `choices` are supported)", k.Line, k.Value, keyNode.Value)
+				return fmt.Errorf("line %d: unknown key %q in input %q (only `prompt`, `default`, `choices`, and `repo` are supported)", k.Line, k.Value, keyNode.Value)
 			}
 			if err := v.Decode(dst); err != nil {
 				return fmt.Errorf("line %d: input %q %s: %w", v.Line, keyNode.Value, k.Value, err)
@@ -419,8 +422,9 @@ func (cfg *Config) FinalizePaths(configDir string) {
 var inputNamePattern = regexp.MustCompile(`^[A-Za-z0-9_]+$`)
 
 // validateInputs checks the `inputs:` and `links:` sections: input names are
-// valid and unique, `choices` is empty or "groups", defaults are plain
-// literals, the reserved service name "inputs" is unused, and every
+// valid and unique, `choices` is empty or "groups", defaults and repos are
+// plain literals, `repo` only appears with `choices: groups`, the reserved
+// service name "inputs" is unused, and every
 // ${inputs.X} reference names a declared input. The reference scan drives
 // VisitInputRefFields, so it covers exactly the fields where substitution
 // applies — the two cannot drift apart — and in a deterministic order, so the
@@ -445,6 +449,12 @@ func validateInputs(cfg *Config) error {
 		}
 		if in.HasDefault && strings.Contains(in.Default, "${") {
 			return fmt.Errorf("input %q: default must be a plain literal (it cannot contain ${...} references)", in.Name)
+		}
+		if in.Repo != "" && in.Choices != "groups" {
+			return fmt.Errorf("input %q: repo is only valid with `choices: groups`", in.Name)
+		}
+		if strings.Contains(in.Repo, "${") {
+			return fmt.Errorf("input %q: repo must be a plain literal (it cannot contain ${...} references)", in.Name)
 		}
 	}
 	if _, ok := cfg.Services["inputs"]; ok {
