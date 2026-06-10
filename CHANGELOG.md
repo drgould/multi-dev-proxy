@@ -1,5 +1,12 @@
 # Changelog
 
+## [1.11.0](https://github.com/drgould/multi-dev-proxy/compare/v1.10.0...v1.11.0) (2026-06-10)
+
+
+### Features
+
+* drive UI refresh via SSE instead of 5s polling ([#61](https://github.com/drgould/multi-dev-proxy/issues/61)) ([dfef47c](https://github.com/drgould/multi-dev-proxy/commit/dfef47c5e68beb2373e51028748a138d0bff7a4e))
+
 ## [1.10.0](https://github.com/drgould/multi-dev-proxy/compare/v1.9.0...v1.10.0) (2026-06-05)
 
 
