@@ -6,6 +6,7 @@ import (
 	"net"
 	"net/http"
 	"testing"
+	"time"
 
 	"github.com/derekgould/multi-dev-proxy/internal/config"
 	"github.com/derekgould/multi-dev-proxy/internal/registry"
@@ -188,6 +189,39 @@ func TestUpdateServiceStatus(t *testing.T) {
 
 	// updating non-existent service is a no-op
 	o.UpdateServiceStatus("nonexistent", "failed")
+}
+
+// Non-terminal status transitions don't emit TUI events, but SSE clients
+// still need a broadcast — without polling, the dashboard would otherwise
+// never see waiting → starting → running.
+func TestUpdateServiceStatusNotifiesSSE(t *testing.T) {
+	o := newTestOrch()
+	o.SetService("web/main", &ManagedService{Name: "web/main", Status: "waiting"})
+
+	// Subscribe after SetService and drain its debounced broadcast so the
+	// signal below is attributable to UpdateServiceStatus alone.
+	ch, unsub := o.Broadcaster().Subscribe()
+	defer unsub()
+	select {
+	case <-ch:
+	case <-time.After(500 * time.Millisecond):
+	}
+
+	o.UpdateServiceStatus("web/main", "running")
+
+	select {
+	case <-ch:
+	case <-time.After(500 * time.Millisecond):
+		t.Fatal("expected SSE broadcast for non-terminal status change")
+	}
+
+	// An unchanged status must not broadcast.
+	o.UpdateServiceStatus("web/main", "running")
+	select {
+	case <-ch:
+		t.Fatal("unchanged status should not broadcast")
+	case <-time.After(300 * time.Millisecond):
+	}
 }
 
 func TestGetProxy(t *testing.T) {

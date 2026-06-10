@@ -530,3 +530,100 @@ func TestDeregisterByClientID(t *testing.T) {
 		}
 	})
 }
+
+func TestNotifyOnMutations(t *testing.T) {
+	r := New()
+	var notified int
+	r.SetNotify(func() { notified++ })
+
+	check := func(op string, want int) {
+		t.Helper()
+		if notified != want {
+			t.Errorf("after %s: notify count = %d, want %d", op, notified, want)
+		}
+	}
+
+	r.Register(&ServerEntry{Name: "app/main", Repo: "app", Port: 3000})
+	check("Register", 1)
+
+	if err := r.SetDefault("app/main"); err != nil {
+		t.Fatal(err)
+	}
+	check("SetDefault", 2)
+
+	r.ClearDefault()
+	check("ClearDefault", 3)
+
+	r.UpdatePID("app/main", 42)
+	check("UpdatePID", 4)
+
+	// Failure counters are pruner bookkeeping, not externally-visible state —
+	// ResetFailures fires every pruner tick for live servers, so notifying
+	// here would recreate periodic refetches.
+	r.IncrementFailures("app/main")
+	r.ResetFailures("app/main")
+	check("IncrementFailures/ResetFailures", 4)
+
+	r.Deregister("app/main")
+	check("Deregister", 5)
+
+	r.Register(&ServerEntry{Name: "app/owned", Repo: "app", Port: 3001, ClientID: "c1"})
+	check("Register owned", 6)
+	r.DeregisterByClientID("c1")
+	check("DeregisterByClientID", 7)
+}
+
+func TestNotifySkipsNoOps(t *testing.T) {
+	r := New()
+	var notified int
+	r.SetNotify(func() { notified++ })
+
+	if err := r.Register(&ServerEntry{}); err == nil {
+		t.Error("Register() with empty entry should fail")
+	}
+	r.Deregister("missing")
+	_ = r.SetDefault("missing")
+	r.ClearDefault() // default already empty
+	r.UpdatePID("missing", 1)
+	r.DeregisterByClientID("nobody")
+
+	if notified != 0 {
+		t.Errorf("no-op mutations should not notify, got %d notifications", notified)
+	}
+
+	// Mutations that leave externally-visible state unchanged are no-ops too.
+	r.Register(&ServerEntry{Name: "app/main", Repo: "app", Port: 3000, PID: 7})
+	if err := r.SetDefault("app/main"); err != nil {
+		t.Fatal(err)
+	}
+	notified = 0
+	r.Register(&ServerEntry{Name: "app/main", Repo: "app", Port: 3000, PID: 7})                 // identical re-register
+	r.Register(&ServerEntry{Name: "app/main", Repo: "app", Port: 3000, PID: 7, Scheme: "http"}) // "" and "http" are the same scheme
+	_ = r.SetDefault("app/main")                                                                // already the default
+	r.UpdatePID("app/main", 7)                                                                  // same PID
+
+	if notified != 0 {
+		t.Errorf("unchanged-state mutations should not notify, got %d notifications", notified)
+	}
+}
+
+// Register publishes the entry pointer into the map; the notify comparison
+// must therefore happen under the lock, or it races with a concurrent
+// UpdatePID writing through the same pointer.
+func TestRegisterUpdatePIDConcurrent(t *testing.T) {
+	r := New()
+	r.SetNotify(func() {}) // exercise the changed-field comparison path
+	var wg sync.WaitGroup
+	for i := 0; i < 50; i++ {
+		wg.Add(2)
+		go func() {
+			defer wg.Done()
+			r.Register(&ServerEntry{Name: "app/main", Repo: "app", Port: 3000, PID: 1})
+		}()
+		go func(pid int) {
+			defer wg.Done()
+			r.UpdatePID("app/main", pid)
+		}(i)
+	}
+	wg.Wait()
+}

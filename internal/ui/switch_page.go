@@ -233,16 +233,22 @@ func renderSwitchPage() string {
       }).catch(function() {});
     }
 
-    // SSE for real-time updates
+    // SSE for real-time updates; if the browser closes the stream permanently
+    // (non-200/wrong-MIME response), recreate it after a delay.
     if (typeof EventSource !== 'undefined') {
-      var es = new EventSource('/__mdp/events');
-      es.onopen = function() { statusEl.textContent = 'Live'; };
-      es.onmessage = function() { fetchAndRender(); };
-      es.onerror = function() { statusEl.textContent = 'Reconnecting...'; };
+      var connectSSE = function() {
+        var es = new EventSource('/__mdp/events');
+        es.onopen = function() { statusEl.textContent = 'Live'; };
+        es.onmessage = function() { fetchAndRender(); };
+        es.onerror = function() {
+          statusEl.textContent = 'Reconnecting...';
+          if (es.readyState === EventSource.CLOSED) {
+            setTimeout(connectSSE, 5000);
+          }
+        };
+      };
+      connectSSE();
     }
-
-    // Polling fallback
-    setInterval(fetchAndRender, 5000);
 
     // Initial fetch
     fetchAndRender();

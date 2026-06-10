@@ -211,6 +211,10 @@ func (o *Orchestrator) EnsureProxy(port int) (*ProxyInstance, error) {
 
 func (o *Orchestrator) createProxyLocked(port int, label string) (*ProxyInstance, error) {
 	reg := registry.New()
+	// Per-proxy API handlers and the dead-server pruner mutate the registry
+	// directly (bypassing the orchestrator's emit), so the registry notifies
+	// the SSE broadcaster itself — UIs refresh on SSE events, not polling.
+	reg.SetNotify(o.broadcaster.Notify)
 	cookieName := routing.CookieNameForPort(port)
 	prx := proxy.NewProxy(reg, port, cookieName)
 	inj := inject.New()
@@ -650,11 +654,17 @@ func (o *Orchestrator) ServiceStatus(name string) (string, bool) {
 func (o *Orchestrator) UpdateServiceStatus(name, status string) {
 	o.mu.Lock()
 	defer o.mu.Unlock()
-	if svc, ok := o.services[name]; ok {
-		svc.Status = status
-		if status == "stopped" || status == "failed" {
-			o.emit(Event{Type: "service_stopped", Name: name})
-		}
+	svc, ok := o.services[name]
+	if !ok || svc.Status == status {
+		return
+	}
+	svc.Status = status
+	if status == "stopped" || status == "failed" {
+		o.emit(Event{Type: "service_stopped", Name: name})
+	} else {
+		// Non-terminal transitions (waiting/starting/running) aren't TUI
+		// events, but SSE clients still need to refetch.
+		o.broadcaster.Notify()
 	}
 }
 

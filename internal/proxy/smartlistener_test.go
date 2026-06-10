@@ -7,6 +7,7 @@ import (
 	"crypto/tls"
 	"crypto/x509"
 	"crypto/x509/pkix"
+	"fmt"
 	"io"
 	"math/big"
 	"net"
@@ -220,5 +221,120 @@ func TestPeekedConnRead(t *testing.T) {
 	}
 	if string(buf) != "hello world" {
 		t.Errorf("got %q, want %q", buf, "hello world")
+	}
+}
+
+// A connection closed before sending any data (e.g. a browser preconnect
+// socket) must not surface its EOF as an Accept error — http.Server.Serve
+// treats Accept errors as fatal and would tear down the whole listener.
+func TestSmartListenerSkipsConnClosedBeforeData(t *testing.T) {
+	ln, err := net.Listen("tcp", "127.0.0.1:0")
+	if err != nil {
+		t.Fatal(err)
+	}
+	sl := NewSmartListener(ln, nil)
+	defer sl.Close()
+
+	// Connect and close immediately without writing — peek sees EOF.
+	dead, err := net.Dial("tcp", sl.Addr().String())
+	if err != nil {
+		t.Fatal(err)
+	}
+	dead.Close()
+
+	// A real client right behind it.
+	live, err := net.Dial("tcp", sl.Addr().String())
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer live.Close()
+	if _, err := live.Write([]byte("GET")); err != nil {
+		t.Fatal(err)
+	}
+
+	// Accept must skip the dead connection and return the live one.
+	got := make(chan error, 1)
+	go func() {
+		conn, err := sl.Accept()
+		if err != nil {
+			got <- err
+			return
+		}
+		buf := make([]byte, 3)
+		if _, err := io.ReadFull(conn, buf); err != nil {
+			got <- err
+			return
+		}
+		if string(buf) != "GET" {
+			got <- fmt.Errorf("peeked replay got %q, want %q", buf, "GET")
+			return
+		}
+		conn.Close()
+		got <- nil
+	}()
+
+	select {
+	case err := <-got:
+		if err != nil {
+			t.Fatalf("Accept should skip the closed connection, got error: %v", err)
+		}
+	case <-time.After(2 * time.Second):
+		t.Fatal("Accept did not return within 2s")
+	}
+}
+
+// An open-but-silent connection (browser preconnect) must not stall Accept
+// beyond peekTimeout, and the peek deadline must not leak into the returned
+// connection's subsequent reads.
+func TestSmartListenerIdleConnDoesNotBlockOthers(t *testing.T) {
+	ln, err := net.Listen("tcp", "127.0.0.1:0")
+	if err != nil {
+		t.Fatal(err)
+	}
+	sl := NewSmartListener(ln, nil)
+	sl.peekTimeout = 100 * time.Millisecond
+	defer sl.Close()
+
+	// Idle socket: connects but never writes.
+	idle, err := net.Dial("tcp", sl.Addr().String())
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer idle.Close()
+
+	// Live client right behind it.
+	live, err := net.Dial("tcp", sl.Addr().String())
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer live.Close()
+	if _, err := live.Write([]byte("G")); err != nil {
+		t.Fatal(err)
+	}
+
+	// Accept must drop the idle socket after the peek timeout and return the
+	// live connection, instead of blocking until the idle socket closes.
+	start := time.Now()
+	conn, err := sl.Accept()
+	if err != nil {
+		t.Fatalf("Accept: %v", err)
+	}
+	defer conn.Close()
+	if elapsed := time.Since(start); elapsed > time.Second {
+		t.Fatalf("Accept blocked %v on an idle connection", elapsed)
+	}
+
+	// Deadline must be cleared: bytes arriving after the peek-timeout window
+	// still read fine on the accepted connection.
+	go func() {
+		time.Sleep(300 * time.Millisecond) // > peekTimeout
+		live.Write([]byte("ET"))
+	}()
+	buf := make([]byte, 3)
+	if _, err := io.ReadFull(conn, buf); err != nil {
+		t.Fatalf("read after peek-timeout window: %v", err)
+	}
+	if string(buf) != "GET" {
+		t.Errorf("got %q, want %q", buf, "GET")
 	}
 }

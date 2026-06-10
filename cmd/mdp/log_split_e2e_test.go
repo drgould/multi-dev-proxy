@@ -2,6 +2,7 @@ package main
 
 import (
 	"bytes"
+	"context"
 	"os"
 	"os/exec"
 	"path/filepath"
@@ -26,6 +27,14 @@ func TestLogSplitRealDockerCompose(t *testing.T) {
 	// `info` probes the daemon; compose commands hang without it.
 	if err := exec.Command("docker", "info").Run(); err != nil {
 		t.Skipf("docker daemon not reachable: %v", err)
+	}
+	// Pre-pull the compose image so an unreachable registry (e.g. Docker Hub
+	// rate limiting on shared CI runners) skips the test instead of failing
+	// it. `--pull missing` below then finds the image cached.
+	pullCtx, cancelPull := context.WithTimeout(context.Background(), 90*time.Second)
+	defer cancelPull()
+	if out, err := exec.CommandContext(pullCtx, "docker", "pull", "alpine:3").CombinedOutput(); err != nil {
+		t.Skipf("cannot pull alpine:3 (registry unreachable?): %v\n%s", err, out)
 	}
 
 	// Build the mdp binary into a tempdir so the test runs against the

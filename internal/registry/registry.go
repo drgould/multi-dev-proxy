@@ -23,16 +23,43 @@ type ServerEntry struct {
 	Env                 map[string]string // resolved env vars exposed for cross-repo @-references
 }
 
+// EffectiveScheme returns the entry's scheme with the empty value defaulted
+// to "http". Registration paths disagree on whether they store "" or "http";
+// this method is the canonical home for that defaulting.
+func (e *ServerEntry) EffectiveScheme() string {
+	if e.Scheme == "" {
+		return "http"
+	}
+	return e.Scheme
+}
+
 // Registry holds all registered dev servers in memory.
 type Registry struct {
 	mu            sync.RWMutex
 	servers       map[string]*ServerEntry
 	defaultServer string
+	notify        func() // optional; see SetNotify
 }
 
 // New creates a new empty Registry.
 func New() *Registry {
 	return &Registry{servers: make(map[string]*ServerEntry)}
+}
+
+// SetNotify sets a callback invoked after every externally-visible mutation
+// (register/deregister/default/PID changes). SSE-driven UIs rely on it to
+// learn about mutations that bypass the orchestrator (per-proxy API handlers,
+// the dead-server pruner). Must be called before the registry is shared
+// across goroutines.
+func (r *Registry) SetNotify(fn func()) {
+	r.notify = fn
+}
+
+// notifyChange invokes the notify callback if set. Call without holding r.mu.
+func (r *Registry) notifyChange() {
+	if r.notify != nil {
+		r.notify()
+	}
 }
 
 // Register adds or replaces a server entry. Returns error if validation fails.
@@ -47,8 +74,19 @@ func (r *Registry) Register(entry *ServerEntry) error {
 		entry.RegisteredAt = time.Now()
 	}
 	r.mu.Lock()
-	defer r.mu.Unlock()
+	prev := r.servers[entry.Name]
 	r.servers[entry.Name] = entry
+	// Notify only when something UI-visible changed — an identical
+	// re-register would make every SSE client refetch identical state.
+	// Compared under the lock: entry is published into the map above, so a
+	// concurrent UpdatePID may write through the same pointer.
+	changed := prev == nil || prev.Repo != entry.Repo || prev.Group != entry.Group ||
+		prev.Port != entry.Port || prev.PID != entry.PID ||
+		prev.EffectiveScheme() != entry.EffectiveScheme()
+	r.mu.Unlock()
+	if changed {
+		r.notifyChange()
+	}
 	return nil
 }
 
@@ -56,11 +94,14 @@ func (r *Registry) Register(entry *ServerEntry) error {
 // Clears the default if the deregistered server was the default.
 func (r *Registry) Deregister(name string) bool {
 	r.mu.Lock()
-	defer r.mu.Unlock()
 	_, exists := r.servers[name]
 	delete(r.servers, name)
 	if r.defaultServer == name {
 		r.defaultServer = ""
+	}
+	r.mu.Unlock()
+	if exists {
+		r.notifyChange()
 	}
 	return exists
 }
@@ -104,19 +145,28 @@ func (r *Registry) Count() int {
 // SetDefault sets the default upstream server. Returns error if the server is not registered.
 func (r *Registry) SetDefault(name string) error {
 	r.mu.Lock()
-	defer r.mu.Unlock()
 	if _, ok := r.servers[name]; !ok {
+		r.mu.Unlock()
 		return errors.New("server not found: " + name)
 	}
+	changed := r.defaultServer != name
 	r.defaultServer = name
+	r.mu.Unlock()
+	if changed {
+		r.notifyChange()
+	}
 	return nil
 }
 
 // ClearDefault removes the default upstream setting.
 func (r *Registry) ClearDefault() {
 	r.mu.Lock()
-	defer r.mu.Unlock()
+	changed := r.defaultServer != ""
 	r.defaultServer = ""
+	r.mu.Unlock()
+	if changed {
+		r.notifyChange()
+	}
 }
 
 // GetDefault returns the current default upstream server name, or "".
@@ -129,13 +179,16 @@ func (r *Registry) GetDefault() string {
 // UpdatePID sets the PID for an existing server entry. Returns true if the entry existed.
 func (r *Registry) UpdatePID(name string, pid int) bool {
 	r.mu.Lock()
-	defer r.mu.Unlock()
 	e, ok := r.servers[name]
-	if !ok {
-		return false
+	changed := ok && e.PID != pid
+	if ok {
+		e.PID = pid
 	}
-	e.PID = pid
-	return true
+	r.mu.Unlock()
+	if changed {
+		r.notifyChange()
+	}
+	return ok
 }
 
 // IncrementFailures increments the consecutive failure counter for the named server.
@@ -166,7 +219,6 @@ func (r *Registry) DeregisterByClientID(clientID string) []string {
 		return nil
 	}
 	r.mu.Lock()
-	defer r.mu.Unlock()
 	var removed []string
 	for name, e := range r.servers {
 		if e.ClientID == clientID {
@@ -176,6 +228,10 @@ func (r *Registry) DeregisterByClientID(clientID string) []string {
 				r.defaultServer = ""
 			}
 		}
+	}
+	r.mu.Unlock()
+	if len(removed) > 0 {
+		r.notifyChange()
 	}
 	return removed
 }

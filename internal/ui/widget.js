@@ -1,7 +1,6 @@
 (() => {
 	"use strict";
 
-	const POLL_MS = 5000;
 	const API_SERVERS = "/__mdp/servers";
 	const API_CONFIG = "/__mdp/config";
 
@@ -413,12 +412,23 @@
 	}
 
 	poll();
-	// SSE for real-time updates, with polling fallback
+	// SSE for real-time updates. The server sends an initial "connected"
+	// event on every (re)connect, so onmessage also resyncs after the
+	// browser's automatic EventSource reconnect. If the browser closes the
+	// stream permanently (non-200/wrong-MIME response, e.g. an intermediary
+	// 502), recreate it after a delay.
 	if (typeof EventSource !== "undefined") {
-		const es = new EventSource("/__mdp/events");
-		es.onmessage = () => poll();
+		const connectSSE = () => {
+			const es = new EventSource("/__mdp/events");
+			es.onmessage = () => poll();
+			es.onerror = () => {
+				if (es.readyState === EventSource.CLOSED) {
+					setTimeout(connectSSE, 5000);
+				}
+			};
+		};
+		connectSSE();
 	}
-	setInterval(poll, POLL_MS);
 
 	document.addEventListener("click", (e) => {
 		if (!host.contains(e.target) && open) {
