@@ -16,6 +16,7 @@ inputs:
     prompt: "Which branch?"
     default: main
     choices: groups
+    repo: api
   region:
     default: us
 links:
@@ -41,7 +42,7 @@ services:
 		t.Fatalf("input order not preserved: %+v", cfg.Inputs)
 	}
 	got := cfg.Inputs[0]
-	if got.Prompt != "Which branch?" || got.Default != "main" || got.Choices != "groups" {
+	if got.Prompt != "Which branch?" || got.Default != "main" || got.Choices != "groups" || got.Repo != "api" {
 		t.Fatalf("api_branch spec wrong: %+v", got)
 	}
 	if cfg.Links["api"] != "${inputs.api_branch}" || cfg.Links["auth"] != "stable" {
@@ -246,6 +247,33 @@ services:
     group: ${inputs.branch}
 `,
 			"group does not support ${inputs.X}",
+		},
+		{
+			"repo without choices groups",
+			`
+inputs:
+  x:
+    default: main
+    repo: api
+services:
+  web: {command: x, proxy: 3000}
+`,
+			"repo is only valid with `choices: groups`",
+		},
+		{
+			"repo is not a plain literal",
+			`
+inputs:
+  a:
+    default: main
+  b:
+    default: main
+    choices: groups
+    repo: "${inputs.a}"
+services:
+  web: {command: x, proxy: 3000}
+`,
+			`input "b": repo must be a plain literal`,
 		},
 		{
 			"unknown spec key",

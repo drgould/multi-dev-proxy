@@ -341,7 +341,7 @@ func runBatchMode(cmd *cobra.Command, controlPort int, groupFlag string, linkMap
 	// Resolve declared inputs (prompting when -i, else defaults), then
 	// substitute ${inputs.X} refs throughout the config so the env/link
 	// pipeline below never sees an input reference.
-	inputs, err := resolveInputs(cfg, interactive, group, func() []string { return fetchActiveGroups(client, controlURL) }, os.Stdin, os.Stderr)
+	inputs, err := resolveInputs(cfg, interactive, group, func(repo string) []string { return fetchActiveGroups(client, controlURL, repo) }, os.Stdin, os.Stderr)
 	if err != nil {
 		return err
 	}

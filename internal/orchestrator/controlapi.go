@@ -254,7 +254,7 @@ func (c *ControlAPI) handleClearDefault(w http.ResponseWriter, r *http.Request) 
 }
 
 func (c *ControlAPI) handleListGroups(w http.ResponseWriter, r *http.Request) {
-	writeJSON(w, http.StatusOK, c.orch.Groups())
+	writeJSON(w, http.StatusOK, c.orch.GroupsForRepo(r.URL.Query().Get("repo")))
 }
 
 func (c *ControlAPI) handleSwitchGroup(w http.ResponseWriter, r *http.Request) {

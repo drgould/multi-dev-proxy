@@ -119,7 +119,7 @@ func TestResolveInputsEmptyDefault(t *testing.T) {
 // never invoked.
 func TestResolveInputsPromptDisabled(t *testing.T) {
 	cfg := &config.Config{Inputs: config.Inputs{{Name: "a", Default: "x", HasDefault: true, Choices: "groups"}}}
-	vals, err := resolveInputs(cfg, false, "feature-x", func() []string {
+	vals, err := resolveInputs(cfg, false, "feature-x", func(string) []string {
 		t.Fatal("groups fetcher must not be called when prompting is disabled")
 		return nil
 	}, strings.NewReader("ignored\n"), io.Discard)
@@ -141,8 +141,11 @@ func TestResolveInputsPrompting(t *testing.T) {
 		{Name: "tier", Default: "free", HasDefault: true},
 	}}
 	fetches := 0
-	groupsFor := func() []string {
+	groupsFor := func(repo string) []string {
 		fetches++
+		if repo != "" {
+			t.Fatalf("groupsFor repo = %q, want empty (no repo filter declared)", repo)
+		}
 		return []string{"main", "derek/foo"}
 	}
 	// branch: pick #2; region: typed; tier: empty => default.
@@ -155,6 +158,89 @@ func TestResolveInputsPrompting(t *testing.T) {
 	}
 	if fetches != 1 {
 		t.Fatalf("groups fetched %d times, want 1", fetches)
+	}
+}
+
+// A `choices: groups` input with no active groups and a declared default is
+// skipped silently — no prompt output, no stdin consumed — so `mdp run -i`
+// only prompts when there is something to select. An input with no default
+// still prompts (free text), since a value is required.
+func TestResolveInputsSkipsGroupChoiceWithoutGroups(t *testing.T) {
+	cfg := &config.Config{Inputs: config.Inputs{
+		{Name: "branch", Default: "@{current}", HasDefault: true, Choices: "groups"},
+		{Name: "region", Default: "us", HasDefault: true},
+	}}
+	groupsFor := func(string) []string { return []string{} }
+	var out bytes.Buffer
+	// "eu" must be read by region, not swallowed by the skipped branch input.
+	vals, err := resolveInputs(cfg, true, "feature-x", groupsFor, strings.NewReader("eu\n"), &out)
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if vals["branch"] != "@{current}" || vals["region"] != "eu" {
+		t.Fatalf("got %v", vals)
+	}
+	if strings.Contains(out.String(), "branch") {
+		t.Fatalf("skipped input must not prompt, got:\n%s", out.String())
+	}
+
+	// No default: still prompts free-text.
+	cfg = &config.Config{Inputs: config.Inputs{{Name: "branch", Choices: "groups"}}}
+	vals, err = resolveInputs(cfg, true, "feature-x", groupsFor, strings.NewReader("other/branch\n"), io.Discard)
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if vals["branch"] != "other/branch" {
+		t.Fatalf("got %v", vals)
+	}
+}
+
+// A failed groups fetch (nil, e.g. orchestrator unreachable) must not be
+// mistaken for "no groups exist": instead of silently taking the default, the
+// input degrades to a free-text prompt so -i still lets the user choose.
+func TestResolveInputsFetchErrorPromptsFreeText(t *testing.T) {
+	cfg := &config.Config{Inputs: config.Inputs{
+		{Name: "branch", Default: "main", HasDefault: true, Choices: "groups"},
+	}}
+	groupsFor := func(string) []string { return nil }
+	var out bytes.Buffer
+	vals, err := resolveInputs(cfg, true, "feature-x", groupsFor, strings.NewReader("derek/foo\n"), &out)
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if vals["branch"] != "derek/foo" {
+		t.Fatalf("got %v, want typed value (not skipped to default)", vals)
+	}
+	if out.Len() == 0 {
+		t.Fatal("expected a prompt to be written")
+	}
+}
+
+// The groups fetch is cached per repo filter: same repo => one fetch,
+// different repos => separate fetches with the declared repo passed through.
+func TestResolveInputsGroupsPerRepo(t *testing.T) {
+	cfg := &config.Config{Inputs: config.Inputs{
+		{Name: "a", Default: "main", HasDefault: true, Choices: "groups", Repo: "api"},
+		{Name: "b", Default: "main", HasDefault: true, Choices: "groups", Repo: "api"},
+		{Name: "c", Default: "main", HasDefault: true, Choices: "groups", Repo: "auth"},
+	}}
+	fetches := map[string]int{}
+	groupsFor := func(repo string) []string {
+		fetches[repo]++
+		if repo == "auth" {
+			return []string{} // no active auth groups => input c skipped
+		}
+		return []string{"main", "derek/foo"}
+	}
+	vals, err := resolveInputs(cfg, true, "feature-x", groupsFor, strings.NewReader("2\n\n"), io.Discard)
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if vals["a"] != "derek/foo" || vals["b"] != "main" || vals["c"] != "main" {
+		t.Fatalf("got %v", vals)
+	}
+	if !reflect.DeepEqual(fetches, map[string]int{"api": 1, "auth": 1}) {
+		t.Fatalf("fetches = %v, want one per repo", fetches)
 	}
 }
 
@@ -339,12 +425,33 @@ func TestInputCurrentFallsBackToOwnGroup(t *testing.T) {
 func TestFetchActiveGroups(t *testing.T) {
 	client := &http.Client{}
 
+	var gotRepo string
 	ok := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		gotRepo = r.URL.Query().Get("repo")
 		w.Write([]byte(`{"main":["a"],"derek/foo":["b"]}`))
 	}))
 	defer ok.Close()
-	if got := fetchActiveGroups(client, ok.URL); !reflect.DeepEqual(got, []string{"derek/foo", "main"}) {
+	if got := fetchActiveGroups(client, ok.URL, ""); !reflect.DeepEqual(got, []string{"derek/foo", "main"}) {
 		t.Fatalf("success: got %v, want sorted [derek/foo main]", got)
+	}
+	if gotRepo != "" {
+		t.Fatalf("repo param = %q, want unset", gotRepo)
+	}
+
+	// A repo filter is forwarded as the ?repo= query param.
+	fetchActiveGroups(client, ok.URL, "my repo")
+	if gotRepo != "my repo" {
+		t.Fatalf("repo param = %q, want %q", gotRepo, "my repo")
+	}
+
+	// A successful response with zero groups is a non-nil empty slice — distinct
+	// from the nil error paths below, so resolveInputs can skip vs prompt.
+	empty := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Write([]byte(`{}`))
+	}))
+	defer empty.Close()
+	if got := fetchActiveGroups(client, empty.URL, ""); got == nil || len(got) != 0 {
+		t.Fatalf("empty: got %#v, want non-nil empty slice", got)
 	}
 
 	// Each degradation path returns nil so prompting falls back to free text.
@@ -352,7 +459,7 @@ func TestFetchActiveGroups(t *testing.T) {
 		w.WriteHeader(http.StatusInternalServerError)
 	}))
 	defer bad.Close()
-	if got := fetchActiveGroups(client, bad.URL); got != nil {
+	if got := fetchActiveGroups(client, bad.URL, ""); got != nil {
 		t.Fatalf("non-200: got %v, want nil", got)
 	}
 
@@ -360,11 +467,11 @@ func TestFetchActiveGroups(t *testing.T) {
 		w.Write([]byte("not json"))
 	}))
 	defer junk.Close()
-	if got := fetchActiveGroups(client, junk.URL); got != nil {
+	if got := fetchActiveGroups(client, junk.URL, ""); got != nil {
 		t.Fatalf("bad json: got %v, want nil", got)
 	}
 
-	if got := fetchActiveGroups(client, "http://127.0.0.1:1"); got != nil {
+	if got := fetchActiveGroups(client, "http://127.0.0.1:1", ""); got != nil {
 		t.Fatalf("connection error: got %v, want nil", got)
 	}
 }

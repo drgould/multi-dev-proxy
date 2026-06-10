@@ -8,6 +8,8 @@ import (
 	"net"
 	"net/http"
 	"net/http/httptest"
+	"slices"
+	"sort"
 	"strings"
 	"testing"
 
@@ -263,6 +265,45 @@ func TestControlAPIListGroups(t *testing.T) {
 	json.NewDecoder(rec.Body).Decode(&groups)
 	if len(groups) != 2 {
 		t.Errorf("expected 2 groups, got %d", len(groups))
+	}
+}
+
+// ?repo= restricts the listing to groups containing services from that repo.
+func TestControlAPIListGroupsRepoFilter(t *testing.T) {
+	o, handler := setupControlAPI(t)
+	o.mu.Lock()
+	o.proxies[3000].Registry.Register(&registry.ServerEntry{Name: "api/dev", Repo: "api", Port: 4003, PID: 300, Group: "dev"})
+	o.mu.Unlock()
+
+	for _, tc := range []struct {
+		repo string
+		want map[string][]string
+	}{
+		{"api", map[string][]string{"dev": {"api/dev"}}},
+		{"app", map[string][]string{"dev": {"app/dev"}, "staging": {"app/staging"}}},
+		{"nope", map[string][]string{}},
+		{"", map[string][]string{"dev": {"app/dev", "api/dev"}, "staging": {"app/staging"}}},
+	} {
+		req := httptest.NewRequest("GET", "/__mdp/groups?repo="+tc.repo, nil)
+		rec := httptest.NewRecorder()
+		handler.ServeHTTP(rec, req)
+		if rec.Code != http.StatusOK {
+			t.Fatalf("repo %q: expected 200, got %d", tc.repo, rec.Code)
+		}
+		var groups map[string][]string
+		json.NewDecoder(rec.Body).Decode(&groups)
+		if len(groups) != len(tc.want) {
+			t.Errorf("repo %q: groups = %v, want %v", tc.repo, groups, tc.want)
+			continue
+		}
+		for g, members := range tc.want {
+			got := groups[g]
+			sort.Strings(got)
+			sort.Strings(members)
+			if !slices.Equal(got, members) {
+				t.Errorf("repo %q group %q: members = %v, want %v", tc.repo, g, got, members)
+			}
+		}
 	}
 }
 
