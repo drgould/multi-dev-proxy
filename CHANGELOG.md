@@ -1,5 +1,13 @@
 # Changelog
 
+## [1.11.1](https://github.com/drgould/multi-dev-proxy/compare/v1.11.0...v1.11.1) (2026-06-10)
+
+
+### Bug Fixes
+
+* let cross-repo links fall back to the current group via @{current} ([#63](https://github.com/drgould/multi-dev-proxy/issues/63)) ([2697a38](https://github.com/drgould/multi-dev-proxy/commit/2697a389fa2e73f2bb53b028e366f7e09958cf48))
+* merge env file writes instead of overwriting ([#65](https://github.com/drgould/multi-dev-proxy/issues/65)) ([11661bd](https://github.com/drgould/multi-dev-proxy/commit/11661bd25ef73f2e63c0004871009e62c0fa4638))
+
 ## [1.11.0](https://github.com/drgould/multi-dev-proxy/compare/v1.10.0...v1.11.0) (2026-06-10)
 
 
