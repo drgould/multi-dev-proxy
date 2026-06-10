@@ -602,13 +602,22 @@ func renderDashboard(controlPort int) string {
     window.__closeMvCard = closeMvCard;
     window.__setMvColCount = setMvColCount;
 
-    // Initial fetch + SSE with polling fallback
+    // Initial fetch + SSE for real-time updates; if the browser closes the
+    // stream permanently (non-200/wrong-MIME response), recreate it after a
+    // delay.
     fetchState();
     if (typeof EventSource !== 'undefined') {
-      var es = new EventSource(API + '/__mdp/events');
-      es.onmessage = function() { fetchState(); };
+      var connectSSE = function() {
+        var es = new EventSource(API + '/__mdp/events');
+        es.onmessage = function() { fetchState(); };
+        es.onerror = function() {
+          if (es.readyState === EventSource.CLOSED) {
+            setTimeout(connectSSE, 5000);
+          }
+        };
+      };
+      connectSSE();
     }
-    setInterval(fetchState, 5000);
   })();
   </script>
 </body>

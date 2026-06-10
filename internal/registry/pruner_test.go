@@ -280,3 +280,28 @@ func TestPrunerSkipsClientOwnedServers(t *testing.T) {
 		t.Error("client-owned PID=0 server should NOT be pruned by registry pruner")
 	}
 }
+
+// Pruning is invisible to the orchestrator (it bypasses o.emit), so the
+// registry's notify hook is what keeps SSE-driven UIs in sync when a dead
+// server is removed. Exactly one notification fires — the failure-counter
+// ticks leading up to the prune must stay silent.
+func TestPrunerNotifiesOnPrune(t *testing.T) {
+	reg := New()
+	reg.Register(&ServerEntry{Name: "app/dead", Repo: "app", Port: 1002, PID: 1002, RegisteredAt: time.Now().Add(-60 * time.Second)})
+
+	var notified int
+	reg.SetNotify(func() { notified++ })
+
+	isAlive := func(pid int) bool { return false }
+	tcpCheck := func(port int) bool { return false }
+	for i := 0; i < tcpFailThreshold; i++ {
+		pruneOnce(reg, isAlive, tcpCheck)
+	}
+
+	if reg.Get("app/dead") != nil {
+		t.Fatal("dead server should have been pruned")
+	}
+	if notified != 1 {
+		t.Errorf("notify count = %d, want 1 (one Deregister, silent failure ticks)", notified)
+	}
+}
