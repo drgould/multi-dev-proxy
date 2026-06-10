@@ -45,7 +45,7 @@ port_range: "10000-60000"  # optional
 
 `mdp` generates free ports and resolves `${svc.port}` refs at startup, so the final env vars aren't known until the orchestrator is up. To make those values visible to tools that run outside of `mdp` (your editor's run config, `psql`, `curl`, a standalone shell), export them to `.env` files.
 
-**Per-service** — `env_file:` writes exactly what that service's process sees:
+**Per-service** — `env_file:` writes the env vars that service's process sees:
 
 ```yaml
 services:
@@ -76,7 +76,7 @@ services:
   # ...
 ```
 
-Files are written after port resolution, before any service `command` runs. Per-service paths resolve against the service's `dir`; `global.env_file` resolves against the `mdp.yaml` directory.
+Files are written after port resolution, before any service `command` runs. Per-service paths resolve against the service's `dir`; `global.env_file` resolves against the `mdp.yaml` directory. If the file already exists, `mdp` updates only the keys it manages in place and appends new ones — other content in the file is preserved (including keys you've since removed from `mdp.yaml`; delete those lines by hand).
 
 ## Referencing another service's port
 
