@@ -1,5 +1,12 @@
 # Changelog
 
+## [1.11.2](https://github.com/drgould/multi-dev-proxy/compare/v1.11.1...v1.11.2) (2026-06-10)
+
+
+### Bug Fixes
+
+* scope group inputs by repo and skip the prompt when no groups match ([#66](https://github.com/drgould/multi-dev-proxy/issues/66)) ([3b57aae](https://github.com/drgould/multi-dev-proxy/commit/3b57aaead5977385f83112702241d4cc1e4efefe))
+
 ## [1.11.1](https://github.com/drgould/multi-dev-proxy/compare/v1.11.0...v1.11.1) (2026-06-10)
 
 
