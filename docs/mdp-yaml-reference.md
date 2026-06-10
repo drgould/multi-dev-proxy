@@ -130,7 +130,7 @@ services:
 
 Resolution:
 
-- **`mdp run -i`**: each input is prompted in declaration order, reading from stdin (a terminal, or piped answers such as `mdp run -i < answers.txt`). A `choices: groups` input prints the active groups (marking the `default`); enter a number, type a custom value, or press enter to accept the `default`. Pressing enter on an input that has no `default` re-prompts; `Ctrl-D` / end-of-input aborts the run.
+- **`mdp run -i`**: each input is prompted in declaration order, reading from stdin (a terminal, or piped answers such as `mdp run -i < answers.txt`). A `choices: groups` input prints the active groups plus a final `@{current}` entry — "this checkout's default group" — for [links](#links) that should fall back to the caller's own group (marking the `default`); enter a number, type a custom value, or press enter to accept the `default`. Pressing enter on an input that has no `default` re-prompts; `Ctrl-D` / end-of-input aborts the run.
 - **`mdp run`** (no `-i`): every input resolves to its `default`. An input with no `default` is an error — provide a `default` or run with `-i`.
 
 Input values are plain literals: an answer (or `default`) containing `${...}` is rejected, so an input can never smuggle in a port or peer reference. An undeclared `${inputs.X}` reference in a supported field is a load-time error, and the service name `inputs` is reserved.
@@ -143,7 +143,10 @@ Input values are plain literals: an answer (or `default`) containing `${...}` is
 links:
   api: ${inputs.api_branch}   # group chosen interactively
   auth: stable                # fixed group
+  db: "@{current}"            # explicitly the caller's own group
 ```
+
+The special value `@{current}` means "the caller's own group" — the lookup behaves as if the link were not declared. It is accepted anywhere a link group can come from: a literal `links:` value, an input answer or `default`, or `--link repo=@{current}`. Note that YAML requires quoting (`"@{current}"`) because a plain scalar cannot start with `@`. A link that resolves to an empty group (e.g. from an empty input) is still an error — `@{current}` is the explicit way to fall back. The sentinel can never collide with a real group: git forbids `@{` anywhere in a branch name (it's reserved for symbolic revisions like `@{u}`).
 
 ## Service
 
@@ -620,7 +623,21 @@ links:
   api: ${inputs.api_branch}
 ```
 
-`mdp run -i` then prompts for `api_branch` (offering the active groups), and `mdp run` without `-i` uses the `main` default. A `--link api=<group>` on the command line still overrides the config value.
+`mdp run -i` then prompts for `api_branch` (offering the active groups plus `@{current}`), and `mdp run` without `-i` uses the `main` default. A `--link api=<group>` on the command line still overrides the config value.
+
+To default to the caller's own group instead of a fixed branch, use the `@{current}` sentinel (quoted — YAML reserves a leading `@`):
+
+```yaml
+inputs:
+  api_branch:
+    prompt: "Which branch is the API on?"
+    default: "@{current}"
+    choices: groups
+links:
+  api: ${inputs.api_branch}
+```
+
+Now plain `mdp run` resolves `@api.*` references against the caller's own group, and `mdp run -i` lets you pick a different one. `--link api=@{current}` works the same way from the command line.
 
 ## Path resolution
 

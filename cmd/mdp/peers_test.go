@@ -161,6 +161,10 @@ func TestEffectiveGroup(t *testing.T) {
 	if g := effectiveGroup("backend", "feature-x", map[string]string{"backend": ""}); g != "feature-x" {
 		t.Errorf("empty override: got %q, want feature-x", g)
 	}
+	// "@{current}" explicitly means no override — fall back to the caller's group.
+	if g := effectiveGroup("backend", "feature-x", map[string]string{"backend": "@{current}"}); g != "feature-x" {
+		t.Errorf("@{current} override: got %q, want feature-x", g)
+	}
 }
 
 func TestRefreshPeerRefsLogsConnectDisconnect(t *testing.T) {
