@@ -26,6 +26,9 @@ func TestPromptInput(t *testing.T) {
 		wantErr string
 	}{
 		{"pick by number", config.InputSpec{Name: "b", Choices: "groups", Default: "main", HasDefault: true}, groups, "2\n", "derek/foo", ""},
+		{"pick @{current} by number", config.InputSpec{Name: "b", Choices: "groups", Default: "main", HasDefault: true}, groups, "3\n", "@{current}", ""},
+		{"typed @{current}", config.InputSpec{Name: "b", Choices: "groups", Default: "main", HasDefault: true}, groups, "@{current}\n", "@{current}", ""},
+		{"empty uses @{current} default", config.InputSpec{Name: "b", Choices: "groups", Default: "@{current}", HasDefault: true}, groups, "\n", "@{current}", ""},
 		{"empty uses default", config.InputSpec{Name: "b", Choices: "groups", Default: "main", HasDefault: true}, groups, "\n", "main", ""},
 		{"custom typed branch", config.InputSpec{Name: "b", Choices: "groups", Default: "main", HasDefault: true}, groups, "other/branch\n", "other/branch", ""},
 		{"out-of-range number is literal", config.InputSpec{Name: "b", Choices: "groups", Default: "main", HasDefault: true}, groups, "9\n", "9", ""},
@@ -42,7 +45,7 @@ func TestPromptInput(t *testing.T) {
 		t.Run(tt.name, func(t *testing.T) {
 			r := bufio.NewReader(strings.NewReader(tt.input))
 			var out bytes.Buffer
-			got, err := promptInput(tt.spec, tt.groups, r, &out)
+			got, err := promptInput(tt.spec, "feature-x", tt.groups, r, &out)
 			if tt.wantErr != "" {
 				if err == nil || !strings.Contains(err.Error(), tt.wantErr) {
 					t.Fatalf("want error containing %q, got %v", tt.wantErr, err)
@@ -59,12 +62,30 @@ func TestPromptInput(t *testing.T) {
 	}
 }
 
+// The pick-list ends with an "@{current}" entry annotated with the caller's
+// actual group, so the fallback-to-own-group sentinel is discoverable.
+func TestPromptInputPickListShowsCurrent(t *testing.T) {
+	spec := config.InputSpec{Name: "b", Choices: "groups", Default: "@{current}", HasDefault: true}
+	r := bufio.NewReader(strings.NewReader("\n"))
+	var out bytes.Buffer
+	got, err := promptInput(spec, "feature-x", []string{"main", "derek/foo"}, r, &out)
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if got != "@{current}" {
+		t.Fatalf("got %q, want @{current}", got)
+	}
+	if !strings.Contains(out.String(), "3) @{current} — this checkout's default group (feature-x) (default)") {
+		t.Fatalf("pick-list missing @{current} entry, got:\n%s", out.String())
+	}
+}
+
 func TestResolveInputsDefaults(t *testing.T) {
 	cfg := &config.Config{Inputs: config.Inputs{
 		{Name: "a", Default: "x", HasDefault: true},
 		{Name: "b", Default: "y", HasDefault: true},
 	}}
-	vals, err := resolveInputs(cfg, false, nil, strings.NewReader(""), io.Discard)
+	vals, err := resolveInputs(cfg, false, "feature-x", nil, strings.NewReader(""), io.Discard)
 	if err != nil {
 		t.Fatalf("unexpected error: %v", err)
 	}
@@ -75,7 +96,7 @@ func TestResolveInputsDefaults(t *testing.T) {
 
 func TestResolveInputsMissingDefault(t *testing.T) {
 	cfg := &config.Config{Inputs: config.Inputs{{Name: "a"}}}
-	_, err := resolveInputs(cfg, false, nil, strings.NewReader(""), io.Discard)
+	_, err := resolveInputs(cfg, false, "feature-x", nil, strings.NewReader(""), io.Discard)
 	if err == nil || !strings.Contains(err.Error(), "has no default") {
 		t.Fatalf("want missing-default error, got %v", err)
 	}
@@ -85,7 +106,7 @@ func TestResolveInputsMissingDefault(t *testing.T) {
 // default, so the non-interactive path resolves it to "" without erroring.
 func TestResolveInputsEmptyDefault(t *testing.T) {
 	cfg := &config.Config{Inputs: config.Inputs{{Name: "a", Default: "", HasDefault: true}}}
-	vals, err := resolveInputs(cfg, false, nil, strings.NewReader(""), io.Discard)
+	vals, err := resolveInputs(cfg, false, "feature-x", nil, strings.NewReader(""), io.Discard)
 	if err != nil {
 		t.Fatalf("unexpected error: %v", err)
 	}
@@ -98,7 +119,7 @@ func TestResolveInputsEmptyDefault(t *testing.T) {
 // never invoked.
 func TestResolveInputsPromptDisabled(t *testing.T) {
 	cfg := &config.Config{Inputs: config.Inputs{{Name: "a", Default: "x", HasDefault: true, Choices: "groups"}}}
-	vals, err := resolveInputs(cfg, false, func() []string {
+	vals, err := resolveInputs(cfg, false, "feature-x", func() []string {
 		t.Fatal("groups fetcher must not be called when prompting is disabled")
 		return nil
 	}, strings.NewReader("ignored\n"), io.Discard)
@@ -125,7 +146,7 @@ func TestResolveInputsPrompting(t *testing.T) {
 		return []string{"main", "derek/foo"}
 	}
 	// branch: pick #2; region: typed; tier: empty => default.
-	vals, err := resolveInputs(cfg, true, groupsFor, strings.NewReader("2\neu\n\n"), io.Discard)
+	vals, err := resolveInputs(cfg, true, "feature-x", groupsFor, strings.NewReader("2\neu\n\n"), io.Discard)
 	if err != nil {
 		t.Fatalf("unexpected error: %v", err)
 	}
@@ -291,6 +312,27 @@ func TestCheckLinkGroups(t *testing.T) {
 	// Without the override the empty link is rejected.
 	if err := checkLinkGroups(mergeLinks(cfg.Links, nil)); err == nil {
 		t.Fatalf("want empty-group error for un-overridden empty link")
+	}
+	// "@{current}" is a valid (non-empty) group: it resolves to the caller's own
+	// group at lookup time.
+	if err := checkLinkGroups(map[string]string{"api": "@{current}"}); err != nil {
+		t.Fatalf("@{current} should be accepted, got %v", err)
+	}
+}
+
+// An input answered with "@{current}" flows through the link pipeline and makes
+// the lookup fall back to the caller's own group.
+func TestInputCurrentFallsBackToOwnGroup(t *testing.T) {
+	cfg := &config.Config{Links: map[string]string{"api": "${inputs.x}"}}
+	if err := applyInputs(cfg, map[string]string{"x": "@{current}"}); err != nil {
+		t.Fatalf("applyInputs: %v", err)
+	}
+	merged := mergeLinks(cfg.Links, nil)
+	if err := checkLinkGroups(merged); err != nil {
+		t.Fatalf("checkLinkGroups: %v", err)
+	}
+	if g := effectiveGroup("api", "feature-x", merged); g != "feature-x" {
+		t.Fatalf("effectiveGroup = %q, want feature-x", g)
 	}
 }
 

@@ -67,11 +67,21 @@ func extractPeerRefs(svc config.ServiceConfig) []peerRef {
 	return out
 }
 
+// currentGroupSentinel is the link-group value meaning "the caller's own
+// group". It is resolved here rather than rewritten in the linkMap because
+// the caller's group varies per resolver (services may carry a `group:`
+// override). Git forbids "@{" anywhere in a ref name (and uses it for
+// symbolic revisions like @{u}), so the sentinel can never collide with a
+// real branch.
+const currentGroupSentinel = "@{current}"
+
 // effectiveGroup returns the group to query for a given peer repo. linkMap
 // overrides the caller's group on a per-repo basis when --link <repo>=<group>
-// was passed at startup.
+// was passed at startup. The sentinel value "@{current}" (from an input
+// answer, a config link, or --link) means no override — the caller's group is
+// used.
 func effectiveGroup(repo, defaultGroup string, linkMap map[string]string) string {
-	if g, ok := linkMap[repo]; ok && g != "" {
+	if g, ok := linkMap[repo]; ok && g != "" && g != currentGroupSentinel {
 		return g
 	}
 	return defaultGroup

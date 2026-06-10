@@ -43,8 +43,9 @@ func fetchActiveGroups(client *http.Client, controlURL string) []string {
 // inputs. When interactive, each input is prompted for (groupsFor populates
 // `choices: groups` lists, fetched at most once) reading from in; otherwise
 // every input resolves to its Default, and an input with no default is an
-// error. in/out are injectable for testing.
-func resolveInputs(cfg *config.Config, interactive bool, groupsFor func() []string, in io.Reader, out io.Writer) (map[string]string, error) {
+// error. currentGroup is the caller's own group, shown on the "@{current}"
+// pick-list entry. in/out are injectable for testing.
+func resolveInputs(cfg *config.Config, interactive bool, currentGroup string, groupsFor func() []string, in io.Reader, out io.Writer) (map[string]string, error) {
 	if len(cfg.Inputs) == 0 {
 		return nil, nil
 	}
@@ -64,7 +65,7 @@ func resolveInputs(cfg *config.Config, interactive bool, groupsFor func() []stri
 			groups = groupsFor()
 			groupsLoaded = true
 		}
-		val, err := promptInput(spec, groups, reader, out)
+		val, err := promptInput(spec, currentGroup, groups, reader, out)
 		if err != nil {
 			return nil, err
 		}
@@ -75,25 +76,35 @@ func resolveInputs(cfg *config.Config, interactive bool, groupsFor func() []stri
 
 // promptInput asks for one input on out, reading the answer from r, and returns
 // the resolved value. For `choices: groups` it prints a numbered list of active
-// groups (marking the default) and accepts a list number or a typed value; an
-// answer matching a group name is taken literally (so a numerically-named group
-// stays selectable), and an out-of-range number is taken as a literal value (so
-// a not-yet-running branch named "3" can still be entered). An empty answer
-// uses the default when one is declared, else re-prompts. EOF (Ctrl-D / end of
-// input) aborts. The resolved value — typed or picked — is rejected if it
-// contains ${...}, so inputs stay plain literals (no smuggled port/peer refs).
-func promptInput(spec config.InputSpec, groups []string, r *bufio.Reader, out io.Writer) (string, error) {
+// groups plus a final "@{current}" entry (marking the default) and accepts a list
+// number or a typed value; an answer matching a list entry is taken literally
+// (so a numerically-named group stays selectable), and an out-of-range number
+// is taken as a literal value (so a not-yet-running branch named "3" can still
+// be entered). An empty answer uses the default when one is declared, else
+// re-prompts. EOF (Ctrl-D / end of input) aborts. The resolved value — typed or
+// picked — is rejected if it contains ${...}, so inputs stay plain literals (no
+// smuggled port/peer refs).
+func promptInput(spec config.InputSpec, currentGroup string, groups []string, r *bufio.Reader, out io.Writer) (string, error) {
 	label := spec.Prompt
 	if label == "" {
 		label = spec.Name
 	}
 	pickList := spec.Choices == "groups" && len(groups) > 0
+	var choices []string
 	if pickList {
+		// "@{current}" is appended as a pickable entry so the fallback-to-own-group
+		// sentinel is discoverable; it resolves at lookup time (effectiveGroup).
+		choices = append(append([]string(nil), groups...), currentGroupSentinel)
 		fmt.Fprintf(out, "%s\n", label)
-		for i, g := range groups {
+		for i, g := range choices {
 			marker := ""
 			if g == spec.Default {
 				marker = " (default)"
+			}
+			// Annotated with the workspace's group; a service-level `group:`
+			// override resolves @{current} to its own group instead (effectiveGroup).
+			if g == currentGroupSentinel {
+				marker = fmt.Sprintf(" — this checkout's default group (%s)%s", currentGroup, marker)
 			}
 			fmt.Fprintf(out, "  %d) %s%s\n", i+1, g, marker)
 		}
@@ -128,12 +139,12 @@ func promptInput(spec config.InputSpec, groups []string, r *bufio.Reader, out io
 
 		value := answer
 		// In a pick-list, a bare number selects by 1-based index. An exact
-		// group-name match wins first (so a group literally named "456" stays
+		// entry-name match wins first (so a group literally named "456" stays
 		// selectable), and an out-of-range number is taken as a literal value
 		// (so a not-yet-running branch named "3" can still be entered).
-		if pickList && !slices.Contains(groups, answer) {
-			if n, convErr := strconv.Atoi(answer); convErr == nil && n >= 1 && n <= len(groups) {
-				value = groups[n-1]
+		if pickList && !slices.Contains(choices, answer) {
+			if n, convErr := strconv.Atoi(answer); convErr == nil && n >= 1 && n <= len(choices) {
+				value = choices[n-1]
 			}
 		}
 		// Guard the resolved value — covers both the typed and pick-list paths.

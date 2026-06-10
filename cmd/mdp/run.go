@@ -76,7 +76,7 @@ func init() {
 	runCmd.Flags().String("env", "PORT", "Environment variable name for the assigned port")
 	runCmd.Flags().Int("control-port", 13100, "Orchestrator control port")
 	runCmd.Flags().String("log-split", "", `Demultiplex combined-stream logs. Values: "compose" (docker-compose format) or "regex:<pattern>" with named captures 'name' and 'msg'.`)
-	runCmd.Flags().StringArray("link", nil, "Override the lookup group for cross-repo @<repo>.* env refs: repo=group (repeatable, last-wins per repo). Used when a peer service runs in a different group than the caller (e.g. backend on main, frontend on a feature branch).")
+	runCmd.Flags().StringArray("link", nil, "Override the lookup group for cross-repo @<repo>.* env refs: repo=group (repeatable, last-wins per repo). Used when a peer service runs in a different group than the caller (e.g. backend on main, frontend on a feature branch). repo=@{current} resets that repo to the caller's own group.")
 	runCmd.Flags().BoolP("interactive", "i", false, "Prompt for the inputs declared in mdp.yaml (see the `inputs:` section); without it, inputs use their defaults.")
 	runCmd.Flags().StringSlice("service", nil, "Only start the listed services from mdp.yaml (repeatable or comma-separated). Transitive depends_on are auto-included. Falls back to env MDP_SERVICES. Default: start all.")
 }
@@ -341,7 +341,7 @@ func runBatchMode(cmd *cobra.Command, controlPort int, groupFlag string, linkMap
 	// Resolve declared inputs (prompting when -i, else defaults), then
 	// substitute ${inputs.X} refs throughout the config so the env/link
 	// pipeline below never sees an input reference.
-	inputs, err := resolveInputs(cfg, interactive, func() []string { return fetchActiveGroups(client, controlURL) }, os.Stdin, os.Stderr)
+	inputs, err := resolveInputs(cfg, interactive, group, func() []string { return fetchActiveGroups(client, controlURL) }, os.Stdin, os.Stderr)
 	if err != nil {
 		return err
 	}
