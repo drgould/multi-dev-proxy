@@ -130,6 +130,66 @@ func TestBuildDockerSkipsWhenDockerMissing(t *testing.T) {
 	}
 }
 
+func TestBuildDockerServicesSkipsWhenDockerMissing(t *testing.T) {
+	// Same shape as the plain-docker test: with or without docker installed,
+	// an empty temp dir has no compose project, so the probe reports unhealthy.
+	probe := Build(&config.HealthCheck{DockerServices: []string{"db"}}, 0, t.TempDir())
+	if probe() {
+		t.Error("expected docker services probe to fail in dir with no compose project")
+	}
+}
+
+func TestParseComposePS(t *testing.T) {
+	tests := []struct {
+		name    string
+		in      string
+		want    int
+		wantErr bool
+	}{
+		{"empty", "", 0, false},
+		{"whitespace", "  \n", 0, false},
+		{"ndjson", "{\"Service\":\"db\",\"State\":\"running\",\"Health\":\"healthy\"}\n{\"Service\":\"redis\",\"State\":\"running\",\"Health\":\"\"}\n", 2, false},
+		{"array", `[{"Service":"db","State":"running","Health":""}]`, 1, false},
+		{"garbage", "not json", 0, true},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			rows, err := parseComposePS([]byte(tt.in))
+			if (err != nil) != tt.wantErr {
+				t.Fatalf("err = %v, wantErr = %v", err, tt.wantErr)
+			}
+			if len(rows) != tt.want {
+				t.Errorf("got %d rows, want %d", len(rows), tt.want)
+			}
+		})
+	}
+}
+
+func TestComposeServicesReady(t *testing.T) {
+	tests := []struct {
+		name     string
+		rows     []composeContainer
+		services []string
+		want     bool
+	}{
+		{"running no healthcheck", []composeContainer{{Service: "db", State: "running"}}, []string{"db"}, true},
+		{"running healthy", []composeContainer{{Service: "db", State: "running", Health: "healthy"}}, []string{"db"}, true},
+		{"health starting", []composeContainer{{Service: "db", State: "running", Health: "starting"}}, []string{"db"}, false},
+		{"exited", []composeContainer{{Service: "db", State: "exited"}}, []string{"db"}, false},
+		{"missing service", []composeContainer{{Service: "db", State: "running"}}, []string{"db", "redis"}, false},
+		{"extra service ignored", []composeContainer{{Service: "db", State: "running"}, {Service: "worker", State: "exited"}}, []string{"db"}, true},
+		{"one replica unhealthy", []composeContainer{{Service: "db", State: "running"}, {Service: "db", State: "running", Health: "unhealthy"}}, []string{"db"}, false},
+		{"no rows", nil, []string{"db"}, false},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			if got := composeServicesReady(tt.rows, tt.services); got != tt.want {
+				t.Errorf("composeServicesReady() = %v, want %v", got, tt.want)
+			}
+		})
+	}
+}
+
 func TestTCPProbeClosedPort(t *testing.T) {
 	// Grab a port, release it, probe should fail.
 	ln, _ := net.Listen("tcp", "localhost:0")

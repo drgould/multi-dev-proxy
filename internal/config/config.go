@@ -214,16 +214,19 @@ type ServiceConfig struct {
 }
 
 // HealthCheck customizes the liveness probe used to decide whether a service
-// is still up. Exactly one of TCP, HTTP, Command, or Docker must be set.
+// is still up. Exactly one of TCP, HTTP, Command, Docker, or DockerServices
+// must be set. DockerServices additionally gates startup readiness.
 type HealthCheck struct {
-	TCP     int    `yaml:"tcp"`     // TCP-dial localhost on this port
-	HTTP    string `yaml:"http"`    // HTTP GET on this absolute URL; 2xx/3xx = healthy
-	Command string `yaml:"command"` // shell tokens (same rules as service.command); exit 0 = healthy
-	Docker  bool   `yaml:"-"`       // set via the scalar shorthand `health_check: docker`
+	TCP            int      `yaml:"tcp"`     // TCP-dial localhost on this port
+	HTTP           string   `yaml:"http"`    // HTTP GET on this absolute URL; 2xx/3xx = healthy
+	Command        string   `yaml:"command"` // shell tokens (same rules as service.command); exit 0 = healthy
+	Docker         bool     `yaml:"-"`       // set via the scalar shorthand `health_check: docker`
+	DockerServices []string `yaml:"docker"`  // compose service names; each must be running (and healthy if it defines a HEALTHCHECK)
 }
 
 // UnmarshalYAML accepts either a scalar shorthand (currently only "docker") or
-// a mapping with tcp/http/command fields.
+// a mapping with tcp/http/command fields, or a docker field listing compose
+// service names.
 func (h *HealthCheck) UnmarshalYAML(node *yaml.Node) error {
 	switch node.Kind {
 	case yaml.ScalarNode:
@@ -255,8 +258,19 @@ func (h *HealthCheck) Validate() error {
 	if h.Docker {
 		set++
 	}
+	if h.DockerServices != nil {
+		if len(h.DockerServices) == 0 {
+			return fmt.Errorf("health_check: docker service list must not be empty")
+		}
+		set++
+		for _, s := range h.DockerServices {
+			if strings.TrimSpace(s) == "" {
+				return fmt.Errorf("health_check: docker service names must not be blank")
+			}
+		}
+	}
 	if set == 0 {
-		return fmt.Errorf("health_check: must set one of tcp, http, command, or the \"docker\" shorthand")
+		return fmt.Errorf("health_check: must set one of tcp, http, command, a docker service list, or the \"docker\" shorthand")
 	}
 	if set > 1 {
 		return fmt.Errorf("health_check: only one of tcp, http, command, or docker may be set")
