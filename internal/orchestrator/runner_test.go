@@ -7,6 +7,7 @@ import (
 	"reflect"
 	"strings"
 	"sync"
+	"sync/atomic"
 	"testing"
 	"time"
 
@@ -343,6 +344,15 @@ func swapTimeouts(t *testing.T, timeout, poll time.Duration) {
 	origTimeout, origPoll := readyTimeout, readyPoll
 	readyTimeout, readyPoll = timeout, poll
 	t.Cleanup(func() { readyTimeout, readyPoll = origTimeout, origPoll })
+}
+
+// swapBuildHealthProbe replaces the package buildHealthProbe with fn for the
+// duration of the test and restores it on cleanup.
+func swapBuildHealthProbe(t *testing.T, fn func(*config.HealthCheck, int, string) func() bool) {
+	t.Helper()
+	orig := buildHealthProbe
+	buildHealthProbe = fn
+	t.Cleanup(func() { buildHealthProbe = orig })
 }
 
 func TestStartConfigServicesRespectsDependsOn(t *testing.T) {
@@ -720,5 +730,73 @@ func TestStartConfigServicesRegistersWithOrchRepo(t *testing.T) {
 	// that's the value the old bug stored in Repo.
 	if got := o.findPeers("main", "api", "api"); len(got) != 0 {
 		t.Errorf("findPeers(main, api, api) returned %d entries; expected 0", len(got))
+	}
+}
+
+func TestStartConfigServicesWaitsForDockerServicesProbe(t *testing.T) {
+	swapTimeouts(t, 5*time.Second, 10*time.Millisecond)
+	swapTCPCheck(t, func(int) bool { return true })
+
+	var probeReady atomic.Bool
+	swapBuildHealthProbe(t, func(hc *config.HealthCheck, port int, dir string) func() bool {
+		return func() bool { return probeReady.Load() }
+	})
+
+	cfg := &config.Config{
+		PortRange: "10000-60000",
+		Services: map[string]config.ServiceConfig{
+			"db": {
+				Command:     "sleep 30",
+				Port:        9921,
+				HealthCheck: &config.HealthCheck{DockerServices: []string{"db"}},
+				DependsOn:   []string{"other"}, // tracked so status is observable
+			},
+			"other": {Command: "sleep 30", Port: 9922},
+		},
+	}
+	o := New(cfg, "", "")
+	ctx, cancel := context.WithCancel(context.Background())
+	t.Cleanup(cancel)
+
+	done := make(chan struct{})
+	go func() {
+		_ = o.StartConfigServices(ctx, "test")
+		close(done)
+	}()
+
+	// Ports are "open" (tcpCheck stubbed true) but the docker probe is not
+	// ready yet — db must not reach "running".
+	if !waitForStatus(t, o, "test/db", "starting", 2*time.Second) {
+		t.Fatal("db did not reach 'starting'")
+	}
+	time.Sleep(50 * time.Millisecond)
+	if status, _ := o.ServiceStatus("test/db"); status == "running" {
+		t.Fatal("db reached 'running' before docker probe passed")
+	}
+
+	probeReady.Store(true)
+	if !waitForStatus(t, o, "test/db", "running", 2*time.Second) {
+		t.Fatal("db did not transition to 'running' after docker probe passed")
+	}
+
+	cancel()
+	select {
+	case <-done:
+	case <-time.After(3 * time.Second):
+		t.Fatal("StartConfigServices did not return after cancel")
+	}
+}
+
+func TestWaitForReadyWithoutExtraProbeUnchanged(t *testing.T) {
+	swapTimeouts(t, time.Second, 10*time.Millisecond)
+	swapTCPCheck(t, func(int) bool { return true })
+	// Probe builder must not gate readiness when no DockerServices are set.
+	swapBuildHealthProbe(t, func(hc *config.HealthCheck, port int, dir string) func() bool {
+		return func() bool { return false }
+	})
+
+	o := New(&config.Config{}, "", "")
+	if err := o.waitForReady(context.Background(), "test/svc", []int{9931}, nil, time.Second); err != nil {
+		t.Fatalf("waitForReady() error = %v", err)
 	}
 }

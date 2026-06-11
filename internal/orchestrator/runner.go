@@ -28,8 +28,11 @@ var (
 	readyPoll    = 200 * time.Millisecond
 )
 
-// tcpCheck is overridable in tests.
-var tcpCheck = registry.TCPCheck
+// tcpCheck and buildHealthProbe are overridable in tests.
+var (
+	tcpCheck         = registry.TCPCheck
+	buildHealthProbe = health.Build
+)
 
 type serviceAlloc struct {
 	name            string
@@ -184,14 +187,22 @@ func (o *Orchestrator) StartConfigServices(ctx context.Context, group string) er
 				return
 			}
 
+			// Named docker compose services additionally gate readiness, on
+			// top of TCP port reachability. Other health_check variants only
+			// affect post-exit liveness pruning.
+			var extraProbe func() bool
+			if hc := a.svc.HealthCheck; hc != nil && len(hc.DockerServices) > 0 {
+				extraProbe = buildHealthProbe(hc, 0, a.svc.Dir)
+			}
+
 			probePorts := probePortsFor(a)
-			if len(probePorts) == 0 {
+			if len(probePorts) == 0 && extraProbe == nil {
 				if a.svc.Command != "" {
 					o.UpdateServiceStatus(serverName, "running")
 				}
 				return
 			}
-			if err := o.waitForReady(ctx, serverName, probePorts, readyTimeout); err != nil {
+			if err := o.waitForReady(ctx, serverName, probePorts, extraProbe, readyTimeout); err != nil {
 				slog.Error("service not ready", "name", a.name, "err", err)
 				state.Err = err
 				o.UpdateServiceStatus(serverName, "failed")
@@ -236,13 +247,12 @@ func probePortsFor(a serviceAlloc) []int {
 	return nil
 }
 
-// waitForReady polls TCP reachability on the given ports until all respond or
-// the timeout elapses. Returns early with an error if the service's status
-// becomes terminal (the process exited) before any port responds.
-func (o *Orchestrator) waitForReady(ctx context.Context, serverName string, probePorts []int, timeout time.Duration) error {
+// waitForReady polls TCP reachability on the given ports — plus extraProbe,
+// when non-nil — until all pass or the timeout elapses. Returns early with an
+// error if the service's status becomes terminal (the process exited) before
+// the checks pass.
+func (o *Orchestrator) waitForReady(ctx context.Context, serverName string, probePorts []int, extraProbe func() bool, timeout time.Duration) error {
 	deadline := time.Now().Add(timeout)
-	ticker := time.NewTicker(readyPoll)
-	defer ticker.Stop()
 	for {
 		// Only treat "failed" as a terminal signal. A clean exit ("stopped")
 		// can be a detached service (e.g. `docker compose up -d`) whose port
@@ -257,16 +267,26 @@ func (o *Orchestrator) waitForReady(ctx context.Context, serverName string, prob
 				break
 			}
 		}
+		// Check the cheap TCP probes first so a failing port short-circuits
+		// the (potentially slow) docker probe.
+		if allReady && extraProbe != nil {
+			allReady = extraProbe()
+		}
 		if allReady {
 			return nil
 		}
 		if time.Now().After(deadline) {
+			if extraProbe != nil {
+				return fmt.Errorf("not ready (ports %v + health check) after %s", probePorts, timeout)
+			}
 			return fmt.Errorf("not ready on ports %v after %s", probePorts, timeout)
 		}
+		// A fresh timer (not a ticker) guarantees an idle gap after each
+		// round even when a probe takes longer than the poll interval.
 		select {
 		case <-ctx.Done():
 			return ctx.Err()
-		case <-ticker.C:
+		case <-time.After(readyPoll):
 		}
 	}
 }
@@ -293,7 +313,7 @@ func (o *Orchestrator) startSingleService(ctx context.Context, name string, svc 
 			Scheme:      scheme,
 			TLSCertPath: svc.TLSCert,
 			TLSKeyPath:  svc.TLSKey,
-			HealthCheck: health.Build(svc.HealthCheck, assignedPort, svc.Dir),
+			HealthCheck: buildHealthProbe(svc.HealthCheck, assignedPort, svc.Dir),
 			Env:         envSliceToMap(env),
 		}
 		if err := o.Register(svc.Proxy, entry); err != nil {
@@ -333,7 +353,7 @@ func (o *Orchestrator) startMultiPortService(ctx context.Context, name string, s
 			Repo:        o.repo,
 			Group:       group,
 			Port:        port,
-			HealthCheck: health.Build(svc.HealthCheck, port, svc.Dir),
+			HealthCheck: buildHealthProbe(svc.HealthCheck, port, svc.Dir),
 			Env:         envSliceToMap(env),
 		}
 		if err := o.Register(pm.Proxy, entry); err != nil {

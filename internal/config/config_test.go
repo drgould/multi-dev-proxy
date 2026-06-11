@@ -731,6 +731,114 @@ services:
 	}
 }
 
+func TestLoadHealthCheckDockerServices(t *testing.T) {
+	dir := t.TempDir()
+	path := filepath.Join(dir, "mdp.yaml")
+	os.WriteFile(path, []byte(`
+services:
+  db:
+    command: docker compose up -d
+    dir: ./db
+    port: 5432
+    health_check:
+      docker: [db, redis]
+`), 0644)
+
+	cfg, err := Load(path)
+	if err != nil {
+		t.Fatalf("Load() error = %v", err)
+	}
+	hc := cfg.Services["db"].HealthCheck
+	if hc == nil || hc.Docker {
+		t.Fatalf("expected Docker=false, got %+v", hc)
+	}
+	if len(hc.DockerServices) != 2 || hc.DockerServices[0] != "db" || hc.DockerServices[1] != "redis" {
+		t.Errorf("DockerServices = %v, want [db redis]", hc.DockerServices)
+	}
+}
+
+func TestLoadHealthCheckDockerServicesWithOtherVariant(t *testing.T) {
+	dir := t.TempDir()
+	path := filepath.Join(dir, "mdp.yaml")
+	os.WriteFile(path, []byte(`
+services:
+  db:
+    command: docker compose up -d
+    port: 5432
+    health_check:
+      tcp: 5432
+      docker: [db]
+`), 0644)
+
+	_, err := Load(path)
+	if err == nil {
+		t.Fatal("expected error when docker list is combined with another variant")
+	}
+	if !strings.Contains(err.Error(), "only one") {
+		t.Errorf("expected 'only one' error, got: %v", err)
+	}
+}
+
+func TestLoadHealthCheckDockerServicesEmpty(t *testing.T) {
+	dir := t.TempDir()
+	path := filepath.Join(dir, "mdp.yaml")
+	os.WriteFile(path, []byte(`
+services:
+  db:
+    command: docker compose up -d
+    port: 5432
+    health_check:
+      docker: []
+`), 0644)
+
+	if _, err := Load(path); err == nil {
+		t.Error("expected error for empty docker service list")
+	}
+}
+
+func TestLoadHealthCheckDockerServicesEmptyWithOtherVariant(t *testing.T) {
+	dir := t.TempDir()
+	path := filepath.Join(dir, "mdp.yaml")
+	os.WriteFile(path, []byte(`
+services:
+  db:
+    command: docker compose up -d
+    port: 5432
+    health_check:
+      tcp: 5432
+      docker: []
+`), 0644)
+
+	_, err := Load(path)
+	if err == nil {
+		t.Fatal("expected error for empty docker list alongside another variant")
+	}
+	if !strings.Contains(err.Error(), "empty") {
+		t.Errorf("expected 'empty' error, got: %v", err)
+	}
+}
+
+func TestLoadHealthCheckDockerServicesBlankEntry(t *testing.T) {
+	dir := t.TempDir()
+	path := filepath.Join(dir, "mdp.yaml")
+	os.WriteFile(path, []byte(`
+services:
+  db:
+    command: docker compose up -d
+    port: 5432
+    health_check:
+      docker: ["db", "  "]
+`), 0644)
+
+	_, err := Load(path)
+	if err == nil {
+		t.Fatal("expected error for blank docker service name")
+	}
+	if !strings.Contains(err.Error(), "blank") {
+		t.Errorf("expected 'blank' error, got: %v", err)
+	}
+}
+
 func TestLoadLogSplit(t *testing.T) {
 	dir := t.TempDir()
 	path := filepath.Join(dir, "mdp.yaml")

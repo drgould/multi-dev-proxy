@@ -173,7 +173,7 @@ Keys under `services.<name>`.
 | `ports` | list of [port mapping](#port-mapping) | `[]` | Multi-port mode. When present, `port` is ignored and ports are allocated per entry. |
 | `log_split` | string \| mapping | `""` | Demultiplex combined-stream logs into per-sub-service colored lanes. Accepts the scalar `"compose"` (built-in docker-compose parser) or a mapping `{ regex: '<pattern>' }` for arbitrary prefixes. See [`log_split`](#log_split--demultiplex-combined-stream-logs). |
 | `depends_on` | list of service names | `[]` | Wait for each dependency to be TCP-reachable on its assigned port(s) before starting. 60s per-dependency timeout. Unknown names and cycles are rejected at config load. |
-| `health_check` | [health check](#health_check) \| `"docker"` | nil (TCP on `port`) | Liveness probe used by the registry pruner. When unset, the default is a TCP dial of the service's registered port. See [Detached services and health checks](#detached-services-and-health-checks). |
+| `health_check` | [health check](#health_check) \| `"docker"` | nil (TCP on `port`) | Liveness probe used by the registry pruner. When unset, the default is a TCP dial of the service's registered port. The `docker: [svc, ...]` variant also gates startup readiness. See [Detached services and health checks](#detached-services-and-health-checks). |
 
 ### `command` — the basic case
 
@@ -451,6 +451,15 @@ services:
     port: 5432
     health_check: docker
 
+  # Named compose services: each must be running, and healthy if it defines
+  # a HEALTHCHECK. Also gates startup readiness — see below.
+  stack:
+    command: docker compose up -d
+    dir: ./stack
+    port: 5432
+    health_check:
+      docker: [db, redis]
+
   # For compose projects whose services are all short-lived, probe the
   # network directly instead.
   workers:
@@ -469,6 +478,9 @@ Variants (mutually exclusive):
 | `http: <url>` | an HTTP GET returns a 2xx or 3xx status |
 | `command: <shell tokens>` | the command exits 0 (run in the service's `dir`) |
 | shorthand `docker` | `docker compose ps -q` in the service's `dir` exits 0 with non-empty output |
+| `docker: [svc, ...]` | every named compose service has all containers in state `running`, and `healthy` if a `HEALTHCHECK` is defined |
+
+Unlike the other variants, which only affect post-exit liveness pruning, `docker: [svc, ...]` also gates **startup readiness**: the service isn't marked `running` (and `depends_on` dependents don't start) until the named compose services pass, in addition to TCP port reachability. It runs `docker compose ps` in the service's `dir` and requires Docker Compose v2.
 
 Command parsing honors single/double quotes but does not invoke a shell, so write `sh -c "..."` explicitly if you need shell features. Timeouts: TCP 2s, HTTP 3s, command/docker 5s.
 

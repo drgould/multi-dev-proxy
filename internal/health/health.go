@@ -3,6 +3,7 @@ package health
 
 import (
 	"context"
+	"encoding/json"
 	"fmt"
 	"net"
 	"net/http"
@@ -38,6 +39,9 @@ func Build(hc *config.HealthCheck, defaultPort int, workDir string) func() bool 
 	case hc.Command != "":
 		cmd := hc.Command
 		return func() bool { return commandProbe(cmd, workDir) }
+	case len(hc.DockerServices) > 0:
+		services := hc.DockerServices
+		return func() bool { return dockerServicesProbe(workDir, services) }
 	case hc.Docker:
 		return func() bool { return dockerProbe(workDir) }
 	}
@@ -86,6 +90,93 @@ func dockerProbe(workDir string) bool {
 		return false
 	}
 	return len(strings.TrimSpace(string(out))) > 0
+}
+
+// composeContainer is the subset of `docker compose ps --format json` output
+// the docker-services probe needs.
+type composeContainer struct {
+	Service string `json:"Service"`
+	State   string `json:"State"`
+	Health  string `json:"Health"`
+}
+
+// dockerServicesProbe is healthy when every named compose service has at least
+// one container running, and each of its containers reports healthy if it
+// defines a HEALTHCHECK. Requires Docker Compose v2 (`--format json`).
+//
+// Deliberately not `ps -a`: that would include exited one-off containers from
+// `docker compose run` under the same service name, failing the probe even
+// when the real stack is healthy. A named service with no running container
+// simply has no row, which reads as not-ready.
+func dockerServicesProbe(workDir string, services []string) bool {
+	ctx, cancel := context.WithTimeout(context.Background(), commandTimeout)
+	defer cancel()
+	args := append([]string{"compose", "ps", "--format", "json"}, services...)
+	c := exec.CommandContext(ctx, "docker", args...)
+	c.Dir = workDir
+	out, err := c.Output()
+	if err != nil {
+		return false
+	}
+	rows, err := parseComposePS(out)
+	if err != nil {
+		return false
+	}
+	return composeServicesReady(rows, services)
+}
+
+// parseComposePS handles both `docker compose ps --format json` output shapes:
+// a JSON array (compose < v2.21) and NDJSON, one object per line (>= v2.21).
+func parseComposePS(out []byte) ([]composeContainer, error) {
+	trimmed := strings.TrimSpace(string(out))
+	if trimmed == "" {
+		return nil, nil
+	}
+	if trimmed[0] == '[' {
+		var rows []composeContainer
+		if err := json.Unmarshal([]byte(trimmed), &rows); err != nil {
+			return nil, err
+		}
+		return rows, nil
+	}
+	var rows []composeContainer
+	for _, line := range strings.Split(trimmed, "\n") {
+		line = strings.TrimSpace(line)
+		if line == "" {
+			continue
+		}
+		var row composeContainer
+		if err := json.Unmarshal([]byte(line), &row); err != nil {
+			return nil, err
+		}
+		rows = append(rows, row)
+	}
+	return rows, nil
+}
+
+// composeServicesReady reports whether every requested service has at least
+// one container and all of its containers (replicas) are running and, when a
+// HEALTHCHECK is defined, healthy.
+func composeServicesReady(rows []composeContainer, services []string) bool {
+	for _, svc := range services {
+		found := false
+		for _, row := range rows {
+			if row.Service != svc {
+				continue
+			}
+			found = true
+			if row.State != "running" {
+				return false
+			}
+			if row.Health != "" && row.Health != "healthy" {
+				return false
+			}
+		}
+		if !found {
+			return false
+		}
+	}
+	return true
 }
 
 // splitArgs tokenizes a command line honoring single and double quotes. Kept
