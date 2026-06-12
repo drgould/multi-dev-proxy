@@ -18,8 +18,9 @@ import (
 
 // ControlAPI handles the orchestrator HTTP control endpoints.
 type ControlAPI struct {
-	orch       *Orchestrator
-	shutdownFn func()
+	orch          *Orchestrator
+	shutdownFn    func()
+	dashboardPort int // 0 if the dashboard server is not running
 }
 
 // NewControlAPI creates a new control API handler.
@@ -78,8 +79,9 @@ func writeJSON(w http.ResponseWriter, status int, v any) {
 
 func (c *ControlAPI) handleHealth(w http.ResponseWriter, r *http.Request) {
 	writeJSON(w, http.StatusOK, map[string]any{
-		"ok":      true,
-		"proxies": len(c.orch.ListProxies()),
+		"ok":            true,
+		"proxies":       len(c.orch.ListProxies()),
+		"dashboardPort": c.dashboardPort,
 	})
 }
 
@@ -401,8 +403,12 @@ func StartDashboardServer(controlPort, dashboardPort int) (*http.Server, error) 
 }
 
 // StartControlServer starts the control API server on the given port.
-func StartControlServer(orch *Orchestrator, port int, shutdownFn func()) (*http.Server, error) {
+// dashboardPort is the port the dashboard web UI is serving on (0 if it
+// failed to start); it is reported on the health endpoint so clients can
+// discover the running daemon's actual dashboard URL.
+func StartControlServer(orch *Orchestrator, port, dashboardPort int, shutdownFn func()) (*http.Server, error) {
 	capi := NewControlAPI(orch, shutdownFn)
+	capi.dashboardPort = dashboardPort
 	addr := fmt.Sprintf("127.0.0.1:%d", port)
 	ln, err := net.Listen("tcp", addr)
 	if err != nil {

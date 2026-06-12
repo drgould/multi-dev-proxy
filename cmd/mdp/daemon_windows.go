@@ -72,7 +72,11 @@ func startDaemon(controlPort int) error {
 		slog.Warn("daemon may not have started correctly", "err", err)
 	}
 
-	fmt.Printf("mdp orchestrator started (PID %d, ctrl :%d)\n", pid, controlPort)
+	msg := fmt.Sprintf("mdp orchestrator started (PID %d, ctrl :%d", pid, controlPort)
+	if dashboardPort, ok := fetchDashboardPort(controlPort); ok && dashboardPort > 0 {
+		msg += fmt.Sprintf(", dashboard http://localhost:%d", dashboardPort)
+	}
+	fmt.Println(msg + ")")
 	return nil
 }
 

@@ -66,6 +66,12 @@ func runOrchestrator(cmd *cobra.Command, args []string) error {
 		if err := startDaemon(controlPort); err != nil {
 			return err
 		}
+	} else if daemon {
+		if port, ok := fetchDashboardPort(controlPort); ok && port > 0 {
+			fmt.Printf("mdp orchestrator already running (dashboard http://localhost:%d)\n", port)
+		} else {
+			fmt.Println("mdp orchestrator already running")
+		}
 	}
 
 	if daemon {
@@ -104,15 +110,16 @@ func runDaemonProcess(cmd *cobra.Command, controlPort int) error {
 
 	orch.StartSessionPruner(ctx, 10*time.Second, 30*time.Second)
 
-	ctrlSrv, err := orchestrator.StartControlServer(orch, controlPort, cancel)
-	if err != nil {
-		return fmt.Errorf("start control API: %w", err)
-	}
-
 	dashboardPort, _ := cmd.Flags().GetInt("dashboard-port")
 	dashSrv, err := orchestrator.StartDashboardServer(controlPort, dashboardPort)
 	if err != nil {
 		slog.Warn("failed to start dashboard", "port", dashboardPort, "err", err)
+		dashboardPort = 0
+	}
+
+	ctrlSrv, err := orchestrator.StartControlServer(orch, controlPort, dashboardPort, cancel)
+	if err != nil {
+		return fmt.Errorf("start control API: %w", err)
 	}
 
 	slog.Info("mdp orchestrator started (daemon)", "control-port", controlPort, "dashboard-port", dashboardPort)
