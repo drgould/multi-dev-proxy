@@ -32,6 +32,7 @@ import (
 	"github.com/derekgould/multi-dev-proxy/internal/envexpand"
 	"github.com/derekgould/multi-dev-proxy/internal/envexport"
 	"github.com/derekgould/multi-dev-proxy/internal/health"
+	"github.com/derekgould/multi-dev-proxy/internal/hookpty"
 	"github.com/derekgould/multi-dev-proxy/internal/orchestrator"
 	"github.com/derekgould/multi-dev-proxy/internal/ports"
 	"github.com/derekgould/multi-dev-proxy/internal/portstore"
@@ -47,6 +48,7 @@ type batchRuntime struct {
 	readyPoll    time.Duration
 	tcpCheck     func(int) bool
 	buildProbe   func(*config.HealthCheck, int, string) func() bool
+	hookMgr      *hookpty.Manager // nil: hooks run on plain pipes (CI, Windows, MDP_NO_HOOK_PTY)
 }
 
 func defaultBatchRuntime() batchRuntime {
@@ -509,6 +511,14 @@ func runBatchMode(cmd *cobra.Command, controlPort int, groupFlag string, linkMap
 	states := depwait.NewStates(names)
 
 	rt := defaultBatchRuntime()
+	// Interactive hook forwarding: setup/shutdown hooks run on a PTY so a
+	// hook stuck on a prompt can be detected and attached to from this
+	// terminal. nil when stdin/stdout is not a TTY or MDP_NO_HOOK_PTY is set.
+	// Closed after bt.wg drains so shutdown hooks stay attachable.
+	rt.hookMgr = hookpty.NewManager(os.Stdin, os.Stdout, os.Stderr, hookpty.RealTerm{})
+	if rt.hookMgr != nil {
+		defer rt.hookMgr.Close()
+	}
 	for i := range allocations {
 		bt.wg.Add(1)
 		go launchBatchService(batchCtx, bt, client, controlURL, clientID, repo, &allocations[i], states, rt, portMap, allocResolvers[i], linkMap)
@@ -709,29 +719,8 @@ func launchBatchService(
 			}
 		}
 		for i, raw := range a.svc.PostStart.Commands {
-			parts, err := orchestrator.SplitHookArgs(raw)
-			if err != nil {
-				slog.Warn("post_start hook parse failed", "name", a.name, "step", i+1, "cmd", raw, "err", err)
-				continue
-			}
-			if len(parts) == 0 {
-				continue
-			}
 			slog.Info("service hook", "name", a.name, "phase", "post_start", "step", i+1, "cmd", raw)
-			h := exec.CommandContext(ctx, parts[0], parts[1:]...)
-			// pw/pwErr are not *os.Files, so exec wires the hook up via pipes;
-			// a hook that exits leaving a background child holding them (or one
-			// killed by ctx cancellation) would block Run in the pipe drain
-			// forever without this bound. The hook itself may run arbitrarily
-			// long — only post-exit/post-cancel I/O is cut off.
-			h.WaitDelay = postStartWaitDelay
-			h.Env = append(os.Environ(), env...)
-			if a.svc.Dir != "" {
-				h.Dir = a.svc.Dir
-			}
-			h.Stdout = pw
-			h.Stderr = pwErr
-			if err := h.Run(); err != nil {
+			if err := runServiceHook(ctx, rt.hookMgr, raw, a.name, "post_start", env, a.svc.Dir, pw, pwErr, postStartWaitDelay); err != nil {
 				slog.Warn("post_start hook failed", "name", a.name, "step", i+1, "cmd", raw, "err", err)
 			}
 		}
@@ -800,24 +789,8 @@ func launchBatchService(
 	// Run setup before registering so routing never points at a service
 	// whose setup is still running (or has failed).
 	for i, raw := range a.svc.Setup {
-		parts, err := orchestrator.SplitHookArgs(raw)
-		if err != nil {
-			slog.Error("setup hook parse failed", "name", a.name, "step", i+1, "cmd", raw, "err", err)
-			state.Err = err
-			return
-		}
-		if len(parts) == 0 {
-			continue
-		}
 		slog.Info("service hook", "name", a.name, "phase", "setup", "step", i+1, "cmd", raw)
-		h := exec.CommandContext(ctx, parts[0], parts[1:]...)
-		h.Env = append(os.Environ(), env...)
-		if a.svc.Dir != "" {
-			h.Dir = a.svc.Dir
-		}
-		h.Stdout = pw
-		h.Stderr = pwErr
-		if err := h.Run(); err != nil {
+		if err := runServiceHook(ctx, rt.hookMgr, raw, a.name, "setup", env, a.svc.Dir, pw, pwErr, 0); err != nil {
 			slog.Error("setup hook failed", "name", a.name, "step", i+1, "cmd", raw, "err", err)
 			state.Err = err
 			return
@@ -868,24 +841,9 @@ func launchBatchService(
 	postStartWG.Wait()
 
 	for i, raw := range a.svc.Shutdown {
-		parts, err := orchestrator.SplitHookArgs(raw)
-		if err != nil {
-			slog.Warn("shutdown hook parse failed", "name", a.name, "step", i+1, "cmd", raw, "err", err)
-			continue
-		}
-		if len(parts) == 0 {
-			continue
-		}
 		slog.Info("service hook", "name", a.name, "phase", "shutdown", "step", i+1, "cmd", raw)
 		hCtx, hCancel := context.WithTimeout(context.Background(), shutdownHookTimeout)
-		h := exec.CommandContext(hCtx, parts[0], parts[1:]...)
-		h.Env = append(os.Environ(), a.env...)
-		if a.svc.Dir != "" {
-			h.Dir = a.svc.Dir
-		}
-		h.Stdout = pw
-		h.Stderr = pwErr
-		if err := h.Run(); err != nil {
+		if err := runServiceHook(hCtx, rt.hookMgr, raw, a.name, "shutdown", a.env, a.svc.Dir, pw, pwErr, 0); err != nil {
 			slog.Warn("shutdown hook failed", "name", a.name, "step", i+1, "cmd", raw, "err", err)
 		}
 		hCancel()
@@ -907,6 +865,47 @@ const shutdownHookTimeout = 30 * time.Second
 // the pipe drain after the hook process exits or ctx is cancelled. It is not
 // a limit on the hook's own runtime.
 const postStartWaitDelay = 10 * time.Second
+
+// runServiceHook executes one setup/shutdown/post_start hook command. When
+// mgr is non-nil the hook runs on a PTY (stderr merges into stdout — PTYs
+// have one stream) so a hook stuck on a prompt is detected and can be
+// attached to; otherwise output pipes to the prefixed writers with stdin
+// disconnected. waitDelay (when non-zero) bounds the pipe-fallback Run's
+// post-exit pipe drain and post-cancel wait — not the hook's own runtime.
+func runServiceHook(ctx context.Context, mgr *hookpty.Manager, raw, name, phase string, env []string, dir string, pw, pwErr io.Writer, waitDelay time.Duration) error {
+	parts, err := orchestrator.SplitHookArgs(raw)
+	if err != nil {
+		return err
+	}
+	if len(parts) == 0 {
+		return nil
+	}
+	newCmd := func(extraEnv ...string) *exec.Cmd {
+		h := exec.CommandContext(ctx, parts[0], parts[1:]...)
+		h.Env = append(append(os.Environ(), extraEnv...), env...)
+		if dir != "" {
+			h.Dir = dir
+		}
+		return h
+	}
+	if mgr != nil {
+		// On a PTY, TTY-detecting tools turn interactive — disable pagers by
+		// default so e.g. `git log` doesn't hang in `less` unattended. The
+		// service's own env (appended after) still overrides. The PTY path
+		// needs no waitDelay: it has no pipes to drain, and ctx cancellation
+		// already escalates SIGINT→SIGKILL inside hookpty.
+		ran, err := mgr.RunHook(ctx, newCmd("PAGER=cat", "GIT_PAGER=cat"), name+" "+phase, pw)
+		if ran {
+			return err
+		}
+		slog.Debug("hook PTY unavailable; falling back to pipes", "name", name, "err", err)
+	}
+	h := newCmd()
+	h.WaitDelay = waitDelay
+	h.Stdout = pw
+	h.Stderr = pwErr
+	return h.Run()
+}
 
 // peerWatchInterval is how often supervisor goroutines poll the orchestrator
 // for cross-repo peer state changes. Package-level so tests can shorten it.

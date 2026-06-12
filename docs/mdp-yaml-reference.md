@@ -214,6 +214,8 @@ services:
 
 If `bun install` exits non-zero, `web` is marked failed and `bun dev` is never started. `shutdown` runs whenever `command` exits — clean exit, crash, or `Ctrl-C`.
 
+When `mdp run` is connected to a terminal (unix only), hooks run on a pseudo-terminal so a hook that prompts for input doesn't hang silently. If a hook's output stalls mid-line (or right after a line ending in `:`, `?`, or `>`), mdp prints a notice — press `Enter` to attach your terminal to it (when several hooks are waiting, type the listed number then `Enter`). While attached, keystrokes go to the hook (`Ctrl-C` included) and `Ctrl-]` detaches. Because a PTY has a single output stream, hook stderr is merged into stdout in this mode. This applies to `setup`, `shutdown`, and [`post_start`](#post_start-hooks) hooks. Set `MDP_NO_HOOK_PTY=1` to disable and run hooks on plain pipes; non-TTY environments (CI) and Windows always use plain pipes.
+
 ### `post_start` hooks
 
 `post_start` runs one-shot commands once the service is **ready** — its TCP port(s) accept connections, and, when `health_check` names docker compose services, those containers are running and healthy. Use it for work that needs the running service (seeding a database, warming a cache) without defining a separate service for it.
