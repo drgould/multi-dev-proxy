@@ -1,5 +1,14 @@
 # Changelog
 
+## [1.12.0](https://github.com/drgould/multi-dev-proxy/compare/v1.11.2...v1.12.0) (2026-06-12)
+
+
+### Features
+
+* forward interactive setup/shutdown/post_start hook prompts to the terminal ([#71](https://github.com/drgould/multi-dev-proxy/issues/71)) ([6dec340](https://github.com/drgould/multi-dev-proxy/commit/6dec3405ce29da4c79318fc71a4ef8e1128c85ec))
+* gate readiness on named docker compose services via health_check ([#68](https://github.com/drgould/multi-dev-proxy/issues/68)) ([bdf42e9](https://github.com/drgould/multi-dev-proxy/commit/bdf42e9f8ec905a011d9a4a82cd4af6ae13e09c3))
+* run post_start hooks after service readiness ([#70](https://github.com/drgould/multi-dev-proxy/issues/70)) ([ef76e1d](https://github.com/drgould/multi-dev-proxy/commit/ef76e1dba8689403529c3934436a28e54e3a5ea5))
+
 ## [1.11.2](https://github.com/drgould/multi-dev-proxy/compare/v1.11.1...v1.11.2) (2026-06-10)
 
 
