@@ -194,6 +194,8 @@ func TestLaunchBatchServiceSkipsUDPPortsFromProbe(t *testing.T) {
 	var probedPorts []int
 	var probeMu sync.Mutex
 	rt := batchRuntime{
+		stdout:       os.Stdout,
+		stderr:       os.Stderr,
 		readyTimeout: time.Second,
 		readyPoll:    10 * time.Millisecond,
 		tcpCheck: func(p int) bool {
@@ -257,6 +259,8 @@ func TestLaunchBatchServiceSkipsProxylessPorts(t *testing.T) {
 	// Commandless services still get TCP-probed; stub the check so the test
 	// doesn't block on unbound ports.
 	rt := batchRuntime{
+		stdout:       os.Stdout,
+		stderr:       os.Stderr,
 		readyTimeout: time.Second,
 		readyPoll:    10 * time.Millisecond,
 		tcpCheck:     func(int) bool { return true },
@@ -321,6 +325,8 @@ func TestLaunchBatchServiceSkipsProxylessPorts(t *testing.T) {
 func TestLaunchBatchServiceWaitsForDependencies(t *testing.T) {
 	gateA := make(chan struct{})
 	rt := batchRuntime{
+		stdout:       os.Stdout,
+		stderr:       os.Stderr,
 		readyTimeout: 5 * time.Second,
 		readyPoll:    10 * time.Millisecond,
 		tcpCheck: func(p int) bool {
@@ -416,6 +422,8 @@ func TestLaunchBatchServiceReturnsOnContextCancel(t *testing.T) {
 	// Regression: on SIGINT, batchCancel() must unblock goroutines still
 	// waiting on deps so shutdown isn't held up by the full readiness timeout.
 	rt := batchRuntime{
+		stdout:       os.Stdout,
+		stderr:       os.Stderr,
 		readyTimeout: 30 * time.Second,
 		readyPoll:    10 * time.Millisecond,
 		tcpCheck:     func(int) bool { return true },
@@ -459,6 +467,8 @@ func TestLaunchBatchServiceHookOrdering(t *testing.T) {
 	// Stub TCP readiness so the probe against our no-op main command's
 	// unbound port doesn't block the test.
 	rt := batchRuntime{
+		stdout:       os.Stdout,
+		stderr:       os.Stderr,
 		readyTimeout: time.Second,
 		readyPoll:    10 * time.Millisecond,
 		tcpCheck:     func(int) bool { return true },
@@ -513,6 +523,8 @@ func TestLaunchBatchServiceHookOrdering(t *testing.T) {
 
 func TestLaunchBatchServiceSetupFailureSkipsRegistration(t *testing.T) {
 	rt := batchRuntime{
+		stdout:       os.Stdout,
+		stderr:       os.Stderr,
 		readyTimeout: time.Second,
 		readyPoll:    10 * time.Millisecond,
 		tcpCheck:     func(int) bool { return true },
@@ -571,6 +583,8 @@ func TestLaunchBatchServiceSetupFailureSkipsRegistration(t *testing.T) {
 
 func TestLaunchBatchServicePostStartRunsAfterReady(t *testing.T) {
 	rt := batchRuntime{
+		stdout:       os.Stdout,
+		stderr:       os.Stderr,
 		readyTimeout: time.Second,
 		readyPoll:    10 * time.Millisecond,
 		tcpCheck:     func(int) bool { return true },
@@ -620,6 +634,8 @@ func TestLaunchBatchServicePostStartRunsAfterReady(t *testing.T) {
 
 func TestLaunchBatchServicePostStartFailureKeepsRunning(t *testing.T) {
 	rt := batchRuntime{
+		stdout:       os.Stdout,
+		stderr:       os.Stderr,
 		readyTimeout: time.Second,
 		readyPoll:    10 * time.Millisecond,
 		tcpCheck:     func(int) bool { return true },
@@ -663,6 +679,8 @@ func TestLaunchBatchServicePostStartFailureKeepsRunning(t *testing.T) {
 func TestLaunchBatchServicePostStartWaitsForDockerGate(t *testing.T) {
 	var probeCalls atomic.Int64
 	rt := batchRuntime{
+		stdout:       os.Stdout,
+		stderr:       os.Stderr,
 		readyTimeout: time.Second,
 		readyPoll:    10 * time.Millisecond,
 		tcpCheck:     func(int) bool { return true },
@@ -706,6 +724,8 @@ func TestLaunchBatchServicePostStartWaitsForDockerGate(t *testing.T) {
 
 func TestLaunchBatchServicePostStartSkippedWhenDockerGateTimesOut(t *testing.T) {
 	rt := batchRuntime{
+		stdout:       os.Stdout,
+		stderr:       os.Stderr,
 		readyTimeout: 200 * time.Millisecond,
 		readyPoll:    10 * time.Millisecond,
 		tcpCheck:     func(int) bool { return true },
@@ -749,6 +769,8 @@ func TestLaunchBatchServicePostStartSkippedWhenDockerGateTimesOut(t *testing.T) 
 
 func TestLaunchBatchServicePostStartDoesNotBlockReady(t *testing.T) {
 	rt := batchRuntime{
+		stdout:       os.Stdout,
+		stderr:       os.Stderr,
 		readyTimeout: time.Second,
 		readyPoll:    10 * time.Millisecond,
 		tcpCheck:     func(int) bool { return true },
@@ -800,6 +822,8 @@ func TestLaunchBatchServicePostStartDoesNotBlockReady(t *testing.T) {
 
 func TestLaunchBatchServicePostStartExternalUpstream(t *testing.T) {
 	rt := batchRuntime{
+		stdout:       os.Stdout,
+		stderr:       os.Stderr,
 		readyTimeout: time.Second,
 		readyPoll:    10 * time.Millisecond,
 		tcpCheck:     func(int) bool { return true },

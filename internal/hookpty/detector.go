@@ -85,6 +85,29 @@ func (d *detector) waiting(now time.Time, stallAfter time.Duration) bool {
 	if d.lastWrite.IsZero() || now.Sub(d.lastWrite) < stallAfter {
 		return false
 	}
+	return d.promptishLocked()
+}
+
+// promptish reports whether the stream's tail currently looks like a prompt
+// (the content half of waiting, without the stall-time gate). Used by the
+// auto-release check: a hook that moved past its prompt no longer looks
+// promptish even though it produced output recently.
+func (d *detector) promptish() bool {
+	d.mu.Lock()
+	defer d.mu.Unlock()
+	return d.promptishLocked()
+}
+
+// partialPending reports whether an unterminated line with visible text is
+// pending — the strong prompt signal (e.g. `Overwrite? (y/n) ` before a
+// read), as opposed to the weaker complete-line-ends-in-:/?/> heuristic.
+func (d *detector) partialPending() bool {
+	d.mu.Lock()
+	defer d.mu.Unlock()
+	return len(bytes.TrimSpace(ansiSeqRe.ReplaceAll(d.partial, nil))) > 0
+}
+
+func (d *detector) promptishLocked() bool {
 	if visible := bytes.TrimSpace(ansiSeqRe.ReplaceAll(d.partial, nil)); len(visible) > 0 {
 		return true
 	}
@@ -97,4 +120,11 @@ func (d *detector) waiting(now time.Time, stallAfter time.Duration) bool {
 		return true
 	}
 	return false
+}
+
+// lastOutput returns the time of the most recent observed output chunk.
+func (d *detector) lastOutput() time.Time {
+	d.mu.Lock()
+	defer d.mu.Unlock()
+	return d.lastWrite
 }

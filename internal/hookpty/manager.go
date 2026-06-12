@@ -30,25 +30,32 @@ type Manager struct {
 	stdin, stdout *os.File
 	notify        io.Writer
 	tc            termController
+	gates         []*Gate // held while a session has focus; nil-safe (empty)
 	stallAfter    time.Duration
 	pollEvery     time.Duration
+	releaseGrace  time.Duration
 
-	mu          sync.Mutex
-	waiting     []*Session // flagged input-starved, in flag order
-	attached    *Session
-	restoreTerm func() error
-	resizeStop  chan struct{}
-	lineBuf     []byte
-	listenerOn  bool
-	closed      bool
-	done        chan struct{}
+	mu               sync.Mutex
+	waiting          []*Session // flagged input-starved, in flag order
+	attached         *Session
+	lastInput        time.Time // attach time, then time of last forwarded keystroke
+	inputSinceAttach bool      // a keystroke was forwarded to the attached session
+	strongPrompt     bool      // attach trigger was an unterminated partial line
+	restoreTerm      func() error
+	resizeStop       chan struct{}
+	lineBuf          []byte
+	listenerOn       bool
+	closed           bool
+	done             chan struct{}
 }
 
 // NewManager returns a Manager wired to the user's terminal, or nil when
 // interactive hook forwarding is unavailable: stdin/stdout is not a TTY
 // (e.g. CI — a PTY would make tools prompt with nobody able to attach), or
-// MDP_NO_HOOK_PTY is set.
-func NewManager(stdin, stdout *os.File, notify io.Writer, tc termController) *Manager {
+// MDP_NO_HOOK_PTY is set. gates are held (buffering all other terminal
+// output) while a session has focus and released — flushing the buffer —
+// when it detaches.
+func NewManager(stdin, stdout *os.File, notify io.Writer, tc termController, gates ...*Gate) *Manager {
 	if os.Getenv("MDP_NO_HOOK_PTY") != "" {
 		return nil
 	}
@@ -56,13 +63,15 @@ func NewManager(stdin, stdout *os.File, notify io.Writer, tc termController) *Ma
 		return nil
 	}
 	return &Manager{
-		stdin:      stdin,
-		stdout:     stdout,
-		notify:     notify,
-		tc:         tc,
-		stallAfter: 5 * time.Second,
-		pollEvery:  time.Second,
-		done:       make(chan struct{}),
+		stdin:        stdin,
+		stdout:       stdout,
+		notify:       notify,
+		tc:           tc,
+		gates:        gates,
+		stallAfter:   5 * time.Second,
+		pollEvery:    time.Second,
+		releaseGrace: 3 * time.Second,
+		done:         make(chan struct{}),
 	}
 }
 
@@ -91,7 +100,9 @@ func (m *Manager) RunHook(ctx context.Context, cmd *exec.Cmd, label string, pref
 			case <-watchDone:
 				return
 			case <-t.C:
-				m.setWaiting(s, s.det.waiting(time.Now(), m.stallAfter))
+				now := time.Now()
+				m.setWaiting(s, s.det.waiting(now, m.stallAfter))
+				m.maybeAutoRelease(s, now)
 			}
 		}
 	}()
@@ -149,9 +160,12 @@ func (m *Manager) unregister(s *Session) {
 	}
 }
 
-// setWaiting flags or clears a session as input-starved. Any change to the
-// waiting list prints a fresh notice (so picker numbers always match a
-// printed listing) and discards buffered keystrokes typed against the old
+// setWaiting flags or clears a session as input-starved. A newly flagged
+// session takes focus immediately when nothing else holds it; otherwise it
+// queues until the attached session detaches. When taking focus fails (raw
+// mode unavailable), it falls back to the notice + picker flow, in which any
+// change to the waiting list prints a fresh notice (so picker numbers always
+// match a printed listing) and discards keystrokes typed against the old
 // listing.
 func (m *Manager) setWaiting(s *Session, w bool) {
 	m.mu.Lock()
@@ -169,20 +183,26 @@ func (m *Manager) setWaiting(s *Session, w bool) {
 	if flagged || m.attached == s {
 		return
 	}
+	if m.attached == nil && m.attachLocked(s) {
+		return
+	}
 	// Discard any bytes typed before this notice (stray keystrokes, escape
 	// sequences) so the next Enter attaches instead of failing the pick parse.
 	m.lineBuf = nil
 	m.waiting = append(m.waiting, s)
-	m.printNoticeLocked()
+	if m.attached == nil {
+		m.printNoticeLocked()
+	}
 }
 
 // dropWaitingLocked removes s from the waiting list, invalidates any
 // half-typed pick (the numbering it referred to is gone), and reprints the
-// notice for the sessions still waiting.
+// notice for the sessions still waiting (picker-fallback mode only — while a
+// session is attached the queue is silent).
 func (m *Manager) dropWaitingLocked(s *Session) {
 	m.waiting = removeSession(m.waiting, s)
 	m.lineBuf = nil
-	if len(m.waiting) > 0 {
+	if len(m.waiting) > 0 && m.attached == nil {
 		m.printNoticeLocked()
 	}
 }
@@ -231,6 +251,8 @@ func (m *Manager) handleInput(p []byte) {
 		// lock) cannot close the master mid-write; if the hook stops reading,
 		// the write unblocks with EIO once the child exits and the slave
 		// closes.
+		m.lastInput = time.Now()
+		m.inputSinceAttach = true
 		if i := bytes.IndexByte(p, detachByte); i >= 0 {
 			if i > 0 {
 				s.master.Write(p[:i])
@@ -264,24 +286,36 @@ func (m *Manager) handleInput(p []byte) {
 	m.attachLocked(m.waiting[pick])
 }
 
-func (m *Manager) attachLocked(s *Session) {
+// attachLocked gives s focus: terminal goes raw, all gated output is held in
+// memory, and the pending prompt is replayed. Returns false when raw mode is
+// unavailable (caller falls back to the notice flow).
+func (m *Manager) attachLocked(s *Session) bool {
 	restore, err := m.tc.MakeRaw(int(m.stdin.Fd()))
 	if err != nil {
 		fmt.Fprintf(m.notify, "mdp: cannot attach to [%s]: %v\n", s.label, err)
-		return
+		return false
 	}
 	m.restoreTerm = restore
 	m.attached = s
+	m.lastInput = time.Now()
+	m.inputSinceAttach = false
+	m.strongPrompt = s.det.partialPending()
 	// No notice reprint here (it would garble the raw session) — just drop
 	// the picked session and any leftover typed bytes.
 	m.waiting = removeSession(m.waiting, s)
 	m.lineBuf = nil
+	// Hold the gates before the banner so nothing interleaves with the
+	// interactive session; everything buffered flushes on detach.
+	for _, g := range m.gates {
+		g.Hold()
+	}
 	fmt.Fprintf(m.stdout, "\r\n--- attached to [%s] — Ctrl-] to detach, Ctrl-C is sent to the hook ---\r\n", s.label)
 	// Replay the pending prompt so the user sees what the hook is asking.
 	m.stdout.Write(s.det.pending())
 	s.setSink(m.stdout)
 	m.resizeStop = make(chan struct{})
 	watchResize(m.stdin, s.master, m.resizeStop)
+	return true
 }
 
 func (m *Manager) detachLocked() {
@@ -300,6 +334,49 @@ func (m *Manager) detachLocked() {
 		m.restoreTerm = nil
 	}
 	fmt.Fprintf(m.notify, "\r\n--- detached from [%s] ---\n", s.label)
+	// Flush everything buffered while s had focus, then hand focus to the
+	// next queued session (not on Close — the terminal is going away).
+	for _, g := range m.gates {
+		g.Release()
+	}
+	if !m.closed && len(m.waiting) > 0 && !m.attachLocked(m.waiting[0]) {
+		m.printNoticeLocked()
+	}
+}
+
+// maybeAutoRelease detaches s when the user looks done answering: no
+// keystrokes for releaseGrace, the hook has produced output since the last
+// keystroke (so a silent password prompt stays attached), and its tail no
+// longer looks like a prompt (so a half-typed answer or an immediate second
+// prompt keeps focus).
+//
+// Before the first keystroke, hook output is ambiguous: a false-positive
+// attach whose hook moved on by itself, or noise (countdown, periodic log)
+// from a hook still blocked on its prompt. Releasing on the latter would
+// orphan the prompt — its non-promptish tail means the stall detector never
+// re-fires. The attach trigger disambiguates: an unterminated partial line
+// (strongPrompt) is almost certainly a real prompt, so focus is held until
+// the user types, Ctrl-], or hook exit; a complete line ending in `:`/`?`/`>`
+// is the false-positive-prone form, so resumed output releases (self-heal).
+func (m *Manager) maybeAutoRelease(s *Session, now time.Time) {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	if m.attached != s || m.closed {
+		return
+	}
+	if !m.inputSinceAttach && m.strongPrompt {
+		return
+	}
+	if now.Sub(m.lastInput) < m.releaseGrace {
+		return
+	}
+	if !s.det.lastOutput().After(m.lastInput) {
+		return
+	}
+	if s.det.promptish() {
+		return
+	}
+	m.detachLocked()
 }
 
 func removeSession(list []*Session, s *Session) []*Session {
