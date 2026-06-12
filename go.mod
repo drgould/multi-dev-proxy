@@ -6,8 +6,10 @@ require (
 	github.com/andybalholm/brotli v1.2.0
 	github.com/charmbracelet/bubbletea v1.3.10
 	github.com/charmbracelet/lipgloss v1.1.0
+	github.com/creack/pty v1.1.24
 	github.com/spf13/cobra v1.8.0
 	golang.org/x/sys v0.36.0
+	golang.org/x/term v0.31.0
 	gopkg.in/yaml.v3 v3.0.1
 )
 
