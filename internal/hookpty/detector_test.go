@@ -25,6 +25,9 @@ func TestDetectorNewlineTerminatedPrompt(t *testing.T) {
 	// Prompt printed on its own line before a read — no partial remains, but
 	// the last complete line ends prompt-like.
 	d.observe([]byte("Enter API key:\n"), t0)
+	if d.partialPending() {
+		t.Fatal("newline-terminated prompt should not be partialPending (weak signal)")
+	}
 	if d.waiting(t0.Add(time.Second), 5*time.Second) {
 		t.Fatal("waiting before stall window elapsed")
 	}
@@ -85,6 +88,30 @@ func TestDetectorOutputResumeClears(t *testing.T) {
 	d.observe([]byte("y\nproceeding\n"), t0.Add(7*time.Second))
 	if d.waiting(t0.Add(8*time.Second), 5*time.Second) {
 		t.Fatal("waiting after output resumed")
+	}
+}
+
+func TestDetectorPromptish(t *testing.T) {
+	var d detector
+	t0 := time.Now()
+	if d.promptish() {
+		t.Fatal("zero-output session promptish")
+	}
+	d.observe([]byte("Continue? (y/n) "), t0)
+	if !d.promptish() {
+		t.Fatal("pending prompt not promptish")
+	}
+	if !d.partialPending() {
+		t.Fatal("unterminated prompt not partialPending")
+	}
+	// promptish ignores the stall clock — fresh output that has moved past the
+	// prompt is immediately non-promptish.
+	d.observe([]byte("y\nproceeding\n"), t0.Add(time.Second))
+	if d.promptish() {
+		t.Fatal("normal output still promptish")
+	}
+	if got := d.lastOutput(); !got.Equal(t0.Add(time.Second)) {
+		t.Fatalf("lastOutput = %v, want %v", got, t0.Add(time.Second))
 	}
 }
 

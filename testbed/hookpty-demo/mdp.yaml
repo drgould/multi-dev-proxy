@@ -1,0 +1,27 @@
+# Manual feel-test config for interactive hook focus (see run.sh).
+#
+# chatty floods the terminal with log lines; prompter and prompter2 each have
+# a setup hook that stops to read input. Expected: when a prompt is detected
+# (~5s stall), it takes focus, chatty's output pauses (buffered), you answer,
+# focus auto-releases ~3s later and the buffered lines flush. The two
+# prompters take focus one at a time.
+services:
+  chatty:
+    command: sh -c 'i=0; while :; do i=$((i+1)); echo "log line $i"; sleep 0.4; done'
+    group: demo
+
+  prompter:
+    setup:
+      - sh -c 'echo "[setup] working..."; sleep 2; printf "What is your name? "; read name; echo "hello, $name!"; sleep 1; echo "[setup] done"'
+    command: sh -c 'echo "prompter running"; exec tail -f /dev/null'
+    group: demo
+
+  prompter2:
+    setup:
+      # Folded scalar: "Favorite color: " contains ": " which a plain YAML
+      # scalar can't hold.
+      - >-
+        sh -c 'sleep 3; printf "Favorite color: ";
+        read c; echo "nice choice, $c"; sleep 1'
+    command: sh -c 'echo "prompter2 running"; exec tail -f /dev/null'
+    group: demo

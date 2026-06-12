@@ -13,8 +13,8 @@ import (
 )
 
 // TestRunHookEndToEnd runs a real prompting shell hook on a PTY, waits for
-// the stall detector to flag it, attaches via simulated stdin, answers the
-// prompt, and verifies the answer round-trips and the terminal is restored.
+// the stall detector to flag it and auto-attach, answers the prompt, and
+// verifies the answer round-trips and the terminal is restored.
 func TestRunHookEndToEnd(t *testing.T) {
 	stdinR, stdinW, err := os.Pipe()
 	if err != nil {
@@ -42,13 +42,14 @@ func TestRunHookEndToEnd(t *testing.T) {
 	notify := &syncBuffer{}
 	tc := &fakeTerm{isTTY: true}
 	m := &Manager{
-		stdin:      stdinR,
-		stdout:     stdoutW,
-		notify:     notify,
-		tc:         tc,
-		stallAfter: 100 * time.Millisecond,
-		pollEvery:  20 * time.Millisecond,
-		done:       make(chan struct{}),
+		stdin:        stdinR,
+		stdout:       stdoutW,
+		notify:       notify,
+		tc:           tc,
+		stallAfter:   100 * time.Millisecond,
+		pollEvery:    20 * time.Millisecond,
+		releaseGrace: 100 * time.Millisecond,
+		done:         make(chan struct{}),
 	}
 	t.Cleanup(m.Close)
 
@@ -63,11 +64,7 @@ func TestRunHookEndToEnd(t *testing.T) {
 		hookDone <- err
 	}()
 
-	waitFor(t, "waiting notice", func() bool {
-		return strings.Contains(notify.String(), "[demo setup] looks like it is waiting for input")
-	})
-
-	stdinW.Write([]byte("\n")) // attach
+	// The stall detector flags the prompt and the session auto-attaches.
 	waitFor(t, "raw mode", func() bool { raws, _ := tc.counts(); return raws == 1 })
 
 	stdinW.Write([]byte("y\n")) // answer the prompt through the PTY

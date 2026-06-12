@@ -9,6 +9,7 @@ import (
 	"encoding/json"
 	"fmt"
 	"io"
+	"log"
 	"log/slog"
 	"net/http"
 	"net/url"
@@ -49,6 +50,8 @@ type batchRuntime struct {
 	tcpCheck     func(int) bool
 	buildProbe   func(*config.HealthCheck, int, string) func() bool
 	hookMgr      *hookpty.Manager // nil: hooks run on plain pipes (CI, Windows, MDP_NO_HOOK_PTY)
+	stdout       io.Writer        // service/log output destination; gated while a hook has focus
+	stderr       io.Writer
 }
 
 func defaultBatchRuntime() batchRuntime {
@@ -57,6 +60,8 @@ func defaultBatchRuntime() batchRuntime {
 		readyPoll:    200 * time.Millisecond,
 		tcpCheck:     registry.TCPCheck,
 		buildProbe:   health.Build,
+		stdout:       os.Stdout,
+		stderr:       os.Stderr,
 	}
 }
 
@@ -512,12 +517,24 @@ func runBatchMode(cmd *cobra.Command, controlPort int, groupFlag string, linkMap
 
 	rt := defaultBatchRuntime()
 	// Interactive hook forwarding: setup/shutdown hooks run on a PTY so a
-	// hook stuck on a prompt can be detected and attached to from this
-	// terminal. nil when stdin/stdout is not a TTY or MDP_NO_HOOK_PTY is set.
+	// hook stuck on a prompt is detected and takes focus of this terminal.
+	// nil when stdin/stdout is not a TTY or MDP_NO_HOOK_PTY is set.
 	// Closed after bt.wg drains so shutdown hooks stay attachable.
-	rt.hookMgr = hookpty.NewManager(os.Stdin, os.Stdout, os.Stderr, hookpty.RealTerm{})
+	// All service/log output goes through gates the manager holds while a
+	// hook has focus: buffered in memory, flushed when focus releases. With
+	// no manager the gates are never held — pure pass-through.
+	stdoutGate := hookpty.NewGate(os.Stdout)
+	stderrGate := hookpty.NewGate(os.Stderr)
+	rt.hookMgr = hookpty.NewManager(os.Stdin, os.Stdout, os.Stderr, hookpty.RealTerm{}, stdoutGate, stderrGate)
 	if rt.hookMgr != nil {
 		defer rt.hookMgr.Close()
+		rt.stdout = stdoutGate
+		rt.stderr = stderrGate
+		// slog's default handler writes through the log package — route it
+		// through the stderr gate so status lines don't interleave with an
+		// interactive hook session.
+		log.SetOutput(stderrGate)
+		defer log.SetOutput(os.Stderr)
 	}
 	for i := range allocations {
 		bt.wg.Add(1)
@@ -686,8 +703,8 @@ func launchBatchService(
 	}
 
 	color := nextColor()
-	pw := newPrefixWriter(a.name, color, os.Stdout)
-	pwErr := newPrefixWriter(a.name, color, os.Stderr)
+	pw := newPrefixWriter(a.name, color, rt.stdout)
+	pwErr := newPrefixWriter(a.name, color, rt.stderr)
 
 	// postStartHooks runs the service's post_start hooks. Best-effort: failures
 	// only warn. waitTCP re-polls TCP readiness first (restart path). When
@@ -782,8 +799,8 @@ func launchBatchService(
 		return
 	}
 	if splitter != nil {
-		stdoutW = newSplitWriter(pw, os.Stdout, splitter)
-		stderrW = newSplitWriter(pwErr, os.Stderr, splitter)
+		stdoutW = newSplitWriter(pw, rt.stdout, splitter)
+		stderrW = newSplitWriter(pwErr, rt.stderr, splitter)
 	}
 
 	// Run setup before registering so routing never points at a service
