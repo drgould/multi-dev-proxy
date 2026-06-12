@@ -188,6 +188,12 @@ type ServiceConfig struct {
 	Command  string              `yaml:"command"`
 	Setup    []string            `yaml:"setup"`    // commands run sequentially before Command
 	Shutdown []string            `yaml:"shutdown"` // commands run sequentially after Command exits
+
+	// PostStart lists commands run after the service becomes ready (TCP ports
+	// reachable, plus the docker health gate when health_check names compose
+	// services). Best-effort and non-blocking: failures only warn, and
+	// depends_on dependents never wait on these hooks.
+	PostStart PostStartConfig `yaml:"post_start"`
 	Dir      string              `yaml:"dir"`
 	Proxy    int                 `yaml:"proxy"`
 	Port     int                 `yaml:"port"`
@@ -211,6 +217,27 @@ type ServiceConfig struct {
 	// service is still up after its command has exited. Nil falls back to
 	// a TCP probe on the service's registered port.
 	HealthCheck *HealthCheck `yaml:"health_check"`
+}
+
+// PostStartConfig configures the post-readiness hooks of a service. It accepts
+// either a plain command list or a mapping with commands/on_restart fields.
+type PostStartConfig struct {
+	Commands  []string `yaml:"commands"`
+	OnRestart bool     `yaml:"on_restart"` // re-run after a peer-change auto-restart
+}
+
+// UnmarshalYAML accepts either a sequence of commands or a mapping with
+// commands/on_restart fields.
+func (p *PostStartConfig) UnmarshalYAML(node *yaml.Node) error {
+	switch node.Kind {
+	case yaml.SequenceNode:
+		return node.Decode(&p.Commands)
+	case yaml.MappingNode:
+		type raw PostStartConfig
+		return node.Decode((*raw)(p))
+	default:
+		return fmt.Errorf("line %d: post_start must be a command list or a mapping", node.Line)
+	}
 }
 
 // HealthCheck customizes the liveness probe used to decide whether a service
@@ -565,6 +592,9 @@ func (cfg *Config) VisitInputRefFields(visit func(where, value string) (string, 
 		}
 		for i := range svc.Shutdown {
 			apply(fmt.Sprintf("%s shutdown[%d]", where, i), svc.Shutdown[i], func(v string) { svc.Shutdown[i] = v })
+		}
+		for i := range svc.PostStart.Commands {
+			apply(fmt.Sprintf("%s post_start[%d]", where, i), svc.PostStart.Commands[i], func(v string) { svc.PostStart.Commands[i] = v })
 		}
 		visitEnv(where, svc.Env)
 		apply(where+" env_file", svc.EnvFile, func(v string) { svc.EnvFile = v })

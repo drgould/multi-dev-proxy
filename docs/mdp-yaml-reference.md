@@ -100,7 +100,7 @@ The file is written after all ports are allocated and before any service `comman
 
 `inputs` declares values that `mdp run -i` prompts for at startup. Each resolved value is referenced elsewhere as `${inputs.<name>}`. The motivating case is supplying a cross-repo branch name interactively instead of typing `--link repo=branch` on the command line.
 
-`${inputs.<name>}` is supported in these fields: a service's `command`, `dir`, `setup`, `shutdown`, `env` (scalar value, `ref:`, and `default:`), and `env_file`; the `global.env` block and `global.env_file`; and [`links`](#links) values. Using it in `group`, `tls_cert`, or `tls_key` is a load-time error (use [`links`](#links) for cross-repo groups); it is not expanded in other fields such as `port_range` or `health_check`.
+`${inputs.<name>}` is supported in these fields: a service's `command`, `dir`, `setup`, `shutdown`, `post_start`, `env` (scalar value, `ref:`, and `default:`), and `env_file`; the `global.env` block and `global.env_file`; and [`links`](#links) values. Using it in `group`, `tls_cert`, or `tls_key` is a load-time error (use [`links`](#links) for cross-repo groups); it is not expanded in other fields such as `port_range` or `health_check`.
 
 Input names may contain only letters, digits, and underscore (so they are always referenceable as `${inputs.<name>}`).
 
@@ -161,6 +161,7 @@ Keys under `services.<name>`.
 | `command` | string | `""` | Shell command to run. If empty and `port > 0`, the service is treated as externally managed: registered with the proxy but not started by `mdp`. |
 | `setup` | list of strings | `[]` | Commands run sequentially **before** `command`. First non-zero exit fails the service and `command` is not started. Shares `dir` and `env`. |
 | `shutdown` | list of strings | `[]` | Commands run sequentially **after** `command` exits (for any reason). Best-effort with a 30s per-step timeout. Shares `dir` and `env`. |
+| `post_start` | list of strings \| `{commands: [...], on_restart: bool}` | `[]` | Commands run sequentially **after the service becomes ready** (TCP-reachable, plus the docker gate when `health_check` names compose services). Best-effort and non-blocking: failures only warn, and `depends_on` dependents never wait on them. Shares `dir` and `env`. See [`post_start` hooks](#post_start-hooks). |
 | `dir` | string path | `""` | Working directory for `command`, `setup`, and `shutdown`. Relative paths resolve against the `mdp.yaml` directory. `~` is expanded. |
 | `port` | int | `0` | Fixed upstream port (for externally managed processes like Docker containers). When `0`, a free port is allocated from `port_range`. Ignored when `ports:` is set. |
 | `proxy` | int | `0` | Proxy port to register this service on. `0` means do not register with any proxy — useful for DB-only services. |
@@ -212,6 +213,37 @@ services:
 ```
 
 If `bun install` exits non-zero, `web` is marked failed and `bun dev` is never started. `shutdown` runs whenever `command` exits — clean exit, crash, or `Ctrl-C`.
+
+### `post_start` hooks
+
+`post_start` runs one-shot commands once the service is **ready** — its TCP port(s) accept connections, and, when `health_check` names docker compose services, those containers are running and healthy. Use it for work that needs the running service (seeding a database, warming a cache) without defining a separate service for it.
+
+```yaml
+services:
+  db:
+    command: docker compose up
+    health_check:
+      docker: [postgres]
+    post_start:
+      - ./scripts/migrate.sh
+      - ./scripts/seed-db.sh
+```
+
+Semantics:
+
+- **Best-effort** — a non-zero exit logs a warning and the next command still runs; the service is unaffected.
+- **Non-blocking** — `depends_on` dependents unblock on readiness as usual; they never wait for `post_start` to finish.
+- Commands run sequentially and share the service's `dir` and `env`, like `setup` and `shutdown`.
+- If the docker health gate never passes within the readiness timeout, the hooks are skipped with a warning.
+
+By default the hooks run only on the initial start. To re-run them after a cross-repo peer change restarts the service, use the mapping form:
+
+```yaml
+post_start:
+  commands:
+    - ./scripts/seed-db.sh
+  on_restart: true
+```
 
 ### `port` — fixed vs auto-allocated
 

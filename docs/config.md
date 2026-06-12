@@ -31,7 +31,7 @@ services:
 port_range: "10000-60000"  # optional
 ```
 
-**Hooks:** `setup` commands run sequentially before `command` — if any exits non-zero the service is marked failed and `command` is not started. `shutdown` commands run sequentially after `command` exits (for any reason), best-effort with a 30s per-step timeout. Both share the same `dir` and `env` as `command`.
+**Hooks:** `setup` commands run sequentially before `command` — if any exits non-zero the service is marked failed and `command` is not started. `shutdown` commands run sequentially after `command` exits (for any reason), best-effort with a 30s per-step timeout. `post_start` commands run sequentially after the service becomes ready (e.g. seed a database once its container is healthy) — best-effort, and `depends_on` dependents never wait on them. All hooks share the same `dir` and `env` as `command`. See the [`post_start` reference](./mdp-yaml-reference.md#post_start-hooks) for details and the restart re-run option.
 
 **Other service fields:**
 

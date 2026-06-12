@@ -325,6 +325,81 @@ services:
 	}
 }
 
+func TestLoadPostStartList(t *testing.T) {
+	dir := t.TempDir()
+	path := filepath.Join(dir, "mdp.yaml")
+	os.WriteFile(path, []byte(`
+services:
+  web:
+    command: bun dev
+    post_start:
+      - ./scripts/seed-db.sh
+      - bun run warm-cache
+    proxy: 3000
+`), 0644)
+
+	cfg, err := Load(path)
+	if err != nil {
+		t.Fatalf("Load() error = %v", err)
+	}
+	web := cfg.Services["web"]
+	want := []string{"./scripts/seed-db.sh", "bun run warm-cache"}
+	if len(web.PostStart.Commands) != len(want) {
+		t.Fatalf("post_start len = %d, want %d", len(web.PostStart.Commands), len(want))
+	}
+	for i, s := range want {
+		if web.PostStart.Commands[i] != s {
+			t.Errorf("post_start[%d] = %q, want %q", i, web.PostStart.Commands[i], s)
+		}
+	}
+	if web.PostStart.OnRestart {
+		t.Error("on_restart = true, want false default")
+	}
+}
+
+func TestLoadPostStartObject(t *testing.T) {
+	dir := t.TempDir()
+	path := filepath.Join(dir, "mdp.yaml")
+	os.WriteFile(path, []byte(`
+services:
+  web:
+    command: bun dev
+    post_start:
+      commands:
+        - ./scripts/seed-db.sh
+      on_restart: true
+    proxy: 3000
+`), 0644)
+
+	cfg, err := Load(path)
+	if err != nil {
+		t.Fatalf("Load() error = %v", err)
+	}
+	web := cfg.Services["web"]
+	if len(web.PostStart.Commands) != 1 || web.PostStart.Commands[0] != "./scripts/seed-db.sh" {
+		t.Errorf("post_start commands = %v, want [./scripts/seed-db.sh]", web.PostStart.Commands)
+	}
+	if !web.PostStart.OnRestart {
+		t.Error("on_restart = false, want true")
+	}
+}
+
+func TestLoadPostStartInvalidShape(t *testing.T) {
+	dir := t.TempDir()
+	path := filepath.Join(dir, "mdp.yaml")
+	os.WriteFile(path, []byte(`
+services:
+  web:
+    command: bun dev
+    post_start: ./scripts/seed-db.sh
+    proxy: 3000
+`), 0644)
+
+	if _, err := Load(path); err == nil {
+		t.Fatal("Load() error = nil, want error for scalar post_start")
+	}
+}
+
 func TestFind(t *testing.T) {
 	dir := t.TempDir()
 	sub := filepath.Join(dir, "a", "b")

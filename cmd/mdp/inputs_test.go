@@ -254,6 +254,9 @@ func TestApplyInputs(t *testing.T) {
 				EnvFile:  "/repo/worktrees/${inputs.x}/.env",
 				Setup:    []string{"setup ${inputs.x}"},
 				Shutdown: []string{"teardown ${inputs.x}"},
+				PostStart: config.PostStartConfig{
+					Commands: []string{"seed ${inputs.x}"},
+				},
 				Env: map[string]config.EnvValue{
 					"A": {Value: "v-${inputs.x}"},
 					"B": {Ref: "api.port", Default: &def},
@@ -281,6 +284,9 @@ func TestApplyInputs(t *testing.T) {
 	}
 	if web.Setup[0] != "setup main" || web.Shutdown[0] != "teardown main" {
 		t.Fatalf("setup/shutdown = %v / %v", web.Setup, web.Shutdown)
+	}
+	if web.PostStart.Commands[0] != "seed main" {
+		t.Fatalf("post_start = %v", web.PostStart.Commands)
 	}
 	if got := web.Env["A"].Value; got != "v-main" {
 		t.Fatalf("env A = %q", got)
