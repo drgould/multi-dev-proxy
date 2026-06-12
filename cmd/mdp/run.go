@@ -31,6 +31,7 @@ import (
 	"github.com/derekgould/multi-dev-proxy/internal/detect"
 	"github.com/derekgould/multi-dev-proxy/internal/envexpand"
 	"github.com/derekgould/multi-dev-proxy/internal/envexport"
+	"github.com/derekgould/multi-dev-proxy/internal/health"
 	"github.com/derekgould/multi-dev-proxy/internal/orchestrator"
 	"github.com/derekgould/multi-dev-proxy/internal/ports"
 	"github.com/derekgould/multi-dev-proxy/internal/portstore"
@@ -45,6 +46,7 @@ type batchRuntime struct {
 	readyTimeout time.Duration
 	readyPoll    time.Duration
 	tcpCheck     func(int) bool
+	buildProbe   func(*config.HealthCheck, int, string) func() bool
 }
 
 func defaultBatchRuntime() batchRuntime {
@@ -52,6 +54,7 @@ func defaultBatchRuntime() batchRuntime {
 		readyTimeout: 60 * time.Second,
 		readyPoll:    200 * time.Millisecond,
 		tcpCheck:     registry.TCPCheck,
+		buildProbe:   health.Build,
 	}
 }
 
@@ -672,6 +675,85 @@ func launchBatchService(
 		}
 	}
 
+	color := nextColor()
+	pw := newPrefixWriter(a.name, color, os.Stdout)
+	pwErr := newPrefixWriter(a.name, color, os.Stderr)
+
+	// postStartHooks runs the service's post_start hooks. Best-effort: failures
+	// only warn. waitTCP re-polls TCP readiness first (restart path). When
+	// health_check names docker compose services, hooks additionally wait for
+	// that gate before running.
+	postStartHooks := func(env []string, waitTCP bool) {
+		if len(a.svc.PostStart.Commands) == 0 {
+			return
+		}
+		if waitTCP && len(probePorts) > 0 {
+			if err := depwait.TCPReady(ctx, probePorts, rt.readyTimeout, rt.readyPoll, rt.tcpCheck); err != nil {
+				slog.Warn("post_start skipped; service not ready", "name", a.name, "err", err)
+				return
+			}
+		}
+		if hc := a.svc.HealthCheck; hc != nil && len(hc.DockerServices) > 0 {
+			probe := rt.buildProbe(hc, 0, a.svc.Dir)
+			deadline := time.Now().Add(rt.readyTimeout)
+			for !probe() {
+				if time.Now().After(deadline) {
+					slog.Warn("post_start skipped; docker health gate not ready", "name", a.name, "timeout", rt.readyTimeout)
+					return
+				}
+				select {
+				case <-ctx.Done():
+					return
+				case <-time.After(rt.readyPoll):
+				}
+			}
+		}
+		for i, raw := range a.svc.PostStart.Commands {
+			parts, err := orchestrator.SplitHookArgs(raw)
+			if err != nil {
+				slog.Warn("post_start hook parse failed", "name", a.name, "step", i+1, "cmd", raw, "err", err)
+				continue
+			}
+			if len(parts) == 0 {
+				continue
+			}
+			slog.Info("service hook", "name", a.name, "phase", "post_start", "step", i+1, "cmd", raw)
+			h := exec.CommandContext(ctx, parts[0], parts[1:]...)
+			// pw/pwErr are not *os.Files, so exec wires the hook up via pipes;
+			// a hook that exits leaving a background child holding them (or one
+			// killed by ctx cancellation) would block Run in the pipe drain
+			// forever without this bound. The hook itself may run arbitrarily
+			// long — only post-exit/post-cancel I/O is cut off.
+			h.WaitDelay = postStartWaitDelay
+			h.Env = append(os.Environ(), env...)
+			if a.svc.Dir != "" {
+				h.Dir = a.svc.Dir
+			}
+			h.Stdout = pw
+			h.Stderr = pwErr
+			if err := h.Run(); err != nil {
+				slog.Warn("post_start hook failed", "name", a.name, "step", i+1, "cmd", raw, "err", err)
+			}
+		}
+	}
+
+	// runPostStart runs the hooks on a goroutine so signalReady timing is
+	// never affected and the supervise loop is never blocked.
+	var postStartWG sync.WaitGroup
+	var postStartMu sync.Mutex // serializes initial run vs restart re-runs
+	runPostStart := func(env []string, waitTCP bool) {
+		if len(a.svc.PostStart.Commands) == 0 {
+			return
+		}
+		postStartWG.Add(1)
+		go func() {
+			defer postStartWG.Done()
+			postStartMu.Lock()
+			defer postStartMu.Unlock()
+			postStartHooks(env, waitTCP)
+		}()
+	}
+
 	if a.svc.Command == "" {
 		// External upstream (mdp isn't starting a process). Register upfront
 		// and probe TCP so dependents only unblock once the externally-managed
@@ -687,16 +769,18 @@ func launchBatchService(
 			if err := depwait.TCPReady(ctx, probePorts, rt.readyTimeout, rt.readyPoll, rt.tcpCheck); err != nil {
 				slog.Error("external service not ready", "name", a.name, "err", err)
 				state.Err = err
+				return
 			}
 		}
+		signalReady()
+		// Nothing else to supervise on this path, so the hooks run inline.
+		postStartHooks(a.env, false)
+		pw.Flush()
+		pwErr.Flush()
 		return
 	}
 
 	env := a.env
-
-	color := nextColor()
-	pw := newPrefixWriter(a.name, color, os.Stdout)
-	pwErr := newPrefixWriter(a.name, color, os.Stderr)
 
 	// If log_split is enabled, demultiplex combined output into per-sub-service
 	// colored lanes. Hooks keep the outer service prefix — only the main
@@ -773,8 +857,15 @@ func launchBatchService(
 	// Signal dependents now; the rest of this goroutine just drains the cmd
 	// and (if this service has cross-repo peers) restarts it on peer change.
 	signalReady()
+	if state.Err == nil {
+		runPostStart(env, false)
+	}
 
-	superviseProcess(ctx, cmd, bt, client, controlURL, a, registered, registerAll, portMap, resolver, linkMap, pw, pwErr)
+	superviseProcess(ctx, cmd, bt, client, controlURL, a, registered, registerAll, runPostStart, portMap, resolver, linkMap, pw, pwErr)
+
+	// In-flight post_start hooks are ctx-bound, so after shutdown this wait is
+	// short; it keeps hook output ahead of shutdown hooks and the final flush.
+	postStartWG.Wait()
 
 	for i, raw := range a.svc.Shutdown {
 		parts, err := orchestrator.SplitHookArgs(raw)
@@ -812,6 +903,11 @@ func launchBatchService(
 
 const shutdownHookTimeout = 30 * time.Second
 
+// postStartWaitDelay bounds how long a post_start hook's Run may linger in
+// the pipe drain after the hook process exits or ctx is cancelled. It is not
+// a limit on the hook's own runtime.
+const postStartWaitDelay = 10 * time.Second
+
 // peerWatchInterval is how often supervisor goroutines poll the orchestrator
 // for cross-repo peer state changes. Package-level so tests can shorten it.
 var peerWatchInterval = 2 * time.Second
@@ -828,6 +924,7 @@ func superviseProcess(
 	a *batchAlloc,
 	registered []string,
 	registerAll func() ([]string, error),
+	runPostStart func(env []string, waitTCP bool),
 	portMap envexpand.PortMap,
 	resolver envexpand.Resolver,
 	linkMap map[string]string,
@@ -901,6 +998,11 @@ func superviseProcess(
 		}
 		for _, sn := range registered {
 			updatePIDWithOrchestrator(controlURL, sn, newCmd.Process.Pid)
+		}
+		if a.svc.PostStart.OnRestart {
+			// Readiness re-polling happens inside the hook goroutine, so the
+			// supervise loop is never blocked.
+			runPostStart(newEnv, true)
 		}
 		cmd = newCmd
 	}

@@ -9,6 +9,7 @@ import (
 	"net/http/httptest"
 	"os"
 	"path/filepath"
+	"slices"
 	"strings"
 	"sync"
 	"sync/atomic"
@@ -568,6 +569,383 @@ func TestLaunchBatchServiceSetupFailureSkipsRegistration(t *testing.T) {
 	}
 }
 
+func TestLaunchBatchServicePostStartRunsAfterReady(t *testing.T) {
+	rt := batchRuntime{
+		readyTimeout: time.Second,
+		readyPoll:    10 * time.Millisecond,
+		tcpCheck:     func(int) bool { return true },
+	}
+
+	dir := t.TempDir()
+	logPath := filepath.Join(dir, "events.log")
+	appendCmd := func(tag string) string {
+		return "sh -c 'echo " + tag + " >> " + logPath + "'"
+	}
+
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.WriteHeader(http.StatusOK)
+	}))
+	defer srv.Close()
+
+	a := batchAlloc{
+		name:         "web",
+		svcGroup:     "main",
+		assignedPort: 40103,
+		svc: config.ServiceConfig{
+			Command:   "sh -c 'echo main >> " + logPath + "; sleep 0.4'",
+			PostStart: config.PostStartConfig{Commands: []string{appendCmd("post_start")}},
+			Shutdown:  []string{appendCmd("shutdown")},
+			Proxy:     3000,
+		},
+	}
+
+	bt := &batchTracker{}
+	bt.wg.Add(1)
+	states := depwait.NewStates([]string{"web"})
+	launchBatchService(context.Background(), bt, http.DefaultClient, srv.URL, "c1", "test-repo", &a, states, rt, envexpand.PortMap{}, nil, nil)
+
+	lines := strings.Split(strings.TrimSpace(readFile(t, logPath)), "\n")
+	post := slices.Index(lines, "post_start")
+	shutdown := slices.Index(lines, "shutdown")
+	if post == -1 {
+		t.Fatalf("post_start hook did not run; log=%v", lines)
+	}
+	if shutdown == -1 || shutdown < post {
+		t.Errorf("shutdown hooks must run after post_start; log=%v", lines)
+	}
+	if states["web"].Err != nil {
+		t.Errorf("state.Err = %v, want nil", states["web"].Err)
+	}
+}
+
+func TestLaunchBatchServicePostStartFailureKeepsRunning(t *testing.T) {
+	rt := batchRuntime{
+		readyTimeout: time.Second,
+		readyPoll:    10 * time.Millisecond,
+		tcpCheck:     func(int) bool { return true },
+	}
+
+	dir := t.TempDir()
+	secondSentinel := filepath.Join(dir, "second-ran")
+
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.WriteHeader(http.StatusOK)
+	}))
+	defer srv.Close()
+
+	a := batchAlloc{
+		name:         "web",
+		svcGroup:     "main",
+		assignedPort: 40104,
+		svc: config.ServiceConfig{
+			Command: "sh -c 'sleep 0.3'",
+			PostStart: config.PostStartConfig{Commands: []string{
+				"sh -c 'exit 1'",
+				"sh -c 'touch " + secondSentinel + "'",
+			}},
+			Proxy: 3000,
+		},
+	}
+
+	bt := &batchTracker{}
+	bt.wg.Add(1)
+	states := depwait.NewStates([]string{"web"})
+	launchBatchService(context.Background(), bt, http.DefaultClient, srv.URL, "c1", "test-repo", &a, states, rt, envexpand.PortMap{}, nil, nil)
+
+	if _, err := os.Stat(secondSentinel); err != nil {
+		t.Error("second post_start command did not run after the first failed")
+	}
+	if states["web"].Err != nil {
+		t.Errorf("state.Err = %v, want nil (post_start failures are best-effort)", states["web"].Err)
+	}
+}
+
+func TestLaunchBatchServicePostStartWaitsForDockerGate(t *testing.T) {
+	var probeCalls atomic.Int64
+	rt := batchRuntime{
+		readyTimeout: time.Second,
+		readyPoll:    10 * time.Millisecond,
+		tcpCheck:     func(int) bool { return true },
+		buildProbe: func(*config.HealthCheck, int, string) func() bool {
+			return func() bool { return probeCalls.Add(1) >= 3 }
+		},
+	}
+
+	dir := t.TempDir()
+	sentinel := filepath.Join(dir, "hook-ran")
+
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.WriteHeader(http.StatusOK)
+	}))
+	defer srv.Close()
+
+	a := batchAlloc{
+		name:         "web",
+		svcGroup:     "main",
+		assignedPort: 40105,
+		svc: config.ServiceConfig{
+			Command:     "sh -c 'sleep 0.1'",
+			HealthCheck: &config.HealthCheck{DockerServices: []string{"db"}},
+			PostStart:   config.PostStartConfig{Commands: []string{"sh -c 'touch " + sentinel + "'"}},
+			Proxy:       3000,
+		},
+	}
+
+	bt := &batchTracker{}
+	bt.wg.Add(1)
+	states := depwait.NewStates([]string{"web"})
+	launchBatchService(context.Background(), bt, http.DefaultClient, srv.URL, "c1", "test-repo", &a, states, rt, envexpand.PortMap{}, nil, nil)
+
+	if _, err := os.Stat(sentinel); err != nil {
+		t.Error("post_start hook did not run after docker gate passed")
+	}
+	if got := probeCalls.Load(); got < 3 {
+		t.Errorf("probe called %d times, want >= 3 (hooks must wait for the gate)", got)
+	}
+}
+
+func TestLaunchBatchServicePostStartSkippedWhenDockerGateTimesOut(t *testing.T) {
+	rt := batchRuntime{
+		readyTimeout: 200 * time.Millisecond,
+		readyPoll:    10 * time.Millisecond,
+		tcpCheck:     func(int) bool { return true },
+		buildProbe: func(*config.HealthCheck, int, string) func() bool {
+			return func() bool { return false }
+		},
+	}
+
+	dir := t.TempDir()
+	sentinel := filepath.Join(dir, "hook-ran")
+
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.WriteHeader(http.StatusOK)
+	}))
+	defer srv.Close()
+
+	a := batchAlloc{
+		name:         "web",
+		svcGroup:     "main",
+		assignedPort: 40106,
+		svc: config.ServiceConfig{
+			Command:     "sh -c 'sleep 0.1'",
+			HealthCheck: &config.HealthCheck{DockerServices: []string{"db"}},
+			PostStart:   config.PostStartConfig{Commands: []string{"sh -c 'touch " + sentinel + "'"}},
+			Proxy:       3000,
+		},
+	}
+
+	bt := &batchTracker{}
+	bt.wg.Add(1)
+	states := depwait.NewStates([]string{"web"})
+	launchBatchService(context.Background(), bt, http.DefaultClient, srv.URL, "c1", "test-repo", &a, states, rt, envexpand.PortMap{}, nil, nil)
+
+	if _, err := os.Stat(sentinel); err == nil {
+		t.Error("post_start hook ran but the docker gate never passed")
+	}
+	if states["web"].Err != nil {
+		t.Errorf("state.Err = %v, want nil (a skipped post_start must not fail the service)", states["web"].Err)
+	}
+}
+
+func TestLaunchBatchServicePostStartDoesNotBlockReady(t *testing.T) {
+	rt := batchRuntime{
+		readyTimeout: time.Second,
+		readyPoll:    10 * time.Millisecond,
+		tcpCheck:     func(int) bool { return true },
+	}
+
+	dir := t.TempDir()
+	sentinel := filepath.Join(dir, "hook-ran")
+
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.WriteHeader(http.StatusOK)
+	}))
+	defer srv.Close()
+
+	a := batchAlloc{
+		name:         "web",
+		svcGroup:     "main",
+		assignedPort: 40107,
+		svc: config.ServiceConfig{
+			Command:   "sh -c 'sleep 2'",
+			PostStart: config.PostStartConfig{Commands: []string{"sh -c 'sleep 0.5; touch " + sentinel + "'"}},
+			Proxy:     3000,
+		},
+	}
+
+	bt := &batchTracker{}
+	bt.wg.Add(1)
+	states := depwait.NewStates([]string{"web"})
+	ctx, cancel := context.WithCancel(context.Background())
+	done := make(chan struct{})
+	go func() {
+		launchBatchService(ctx, bt, http.DefaultClient, srv.URL, "c1", "test-repo", &a, states, rt, envexpand.PortMap{}, nil, nil)
+		close(done)
+	}()
+	t.Cleanup(func() {
+		cancel()
+		bt.killAll()
+		<-done
+	})
+
+	select {
+	case <-states["web"].Done:
+	case <-time.After(time.Second):
+		t.Fatal("state.Done did not close; readiness must not wait on post_start")
+	}
+	if _, err := os.Stat(sentinel); err == nil {
+		t.Error("post_start finished before readiness was signaled; expected it to still be running")
+	}
+}
+
+func TestLaunchBatchServicePostStartExternalUpstream(t *testing.T) {
+	rt := batchRuntime{
+		readyTimeout: time.Second,
+		readyPoll:    10 * time.Millisecond,
+		tcpCheck:     func(int) bool { return true },
+	}
+
+	dir := t.TempDir()
+	sentinel := filepath.Join(dir, "hook-ran")
+
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.WriteHeader(http.StatusOK)
+	}))
+	defer srv.Close()
+
+	a := batchAlloc{
+		name:         "infra",
+		svcGroup:     "main",
+		assignedPort: 40108,
+		svc: config.ServiceConfig{
+			// Command empty → external upstream path.
+			PostStart: config.PostStartConfig{Commands: []string{"sh -c 'touch " + sentinel + "'"}},
+			Proxy:     3000,
+		},
+	}
+
+	bt := &batchTracker{}
+	bt.wg.Add(1)
+	states := depwait.NewStates([]string{"infra"})
+	launchBatchService(context.Background(), bt, http.DefaultClient, srv.URL, "c1", "test-repo", &a, states, rt, envexpand.PortMap{}, nil, nil)
+
+	if _, err := os.Stat(sentinel); err != nil {
+		t.Error("post_start hook did not run for external upstream")
+	}
+}
+
+func TestSuperviseProcessPostStartOnRestart(t *testing.T) {
+	for _, tc := range []struct {
+		name      string
+		onRestart bool
+		wantCalls int64
+	}{
+		{"on_restart true reruns hooks", true, 1},
+		{"default does not rerun", false, 0},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			var port atomic.Int64
+			port.Store(9001)
+			var peerHits atomic.Int64
+			srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+				if r.URL.Path == "/__mdp/peers" {
+					json.NewEncoder(w).Encode(map[string]any{
+						"port": port.Load(),
+						"env":  map[string]string{},
+					})
+					peerHits.Add(1)
+					return
+				}
+				w.WriteHeader(http.StatusOK)
+			}))
+			defer srv.Close()
+
+			prev := peerWatchInterval
+			peerWatchInterval = 20 * time.Millisecond
+			t.Cleanup(func() { peerWatchInterval = prev })
+
+			command := "sh -c 'exec sleep 60'"
+			a := &batchAlloc{
+				name:     "frontend",
+				svcGroup: "dev",
+				svc: config.ServiceConfig{
+					Command: command,
+					PostStart: config.PostStartConfig{
+						Commands:  []string{"echo seeded"},
+						OnRestart: tc.onRestart,
+					},
+					Env: map[string]config.EnvValue{
+						"TARGET_PORT": {Ref: "@backend.api.port"},
+					},
+				},
+			}
+			resolver := newPeerResolver(http.DefaultClient, srv.URL, "dev", nil)
+			initialEnv, err := buildBatchEnv(*a, envexpand.PortMap{}, resolver)
+			if err != nil {
+				t.Fatalf("initial env: %v", err)
+			}
+			a.env = initialEnv
+
+			bt := &batchTracker{}
+			pw := newPrefixWriter("test", "0;0", os.Stdout)
+			pwErr := newPrefixWriter("test", "0;0", os.Stderr)
+			cmd, err := startBatchCommand(bt, command, "", initialEnv, pw, pwErr)
+			if err != nil {
+				t.Fatalf("startBatchCommand: %v", err)
+			}
+
+			var hookCalls atomic.Int64
+			hookWaitTCP := make(chan bool, 4)
+			runPostStart := func(env []string, waitTCP bool) {
+				hookCalls.Add(1)
+				hookWaitTCP <- waitTCP
+			}
+
+			registerAll := func() ([]string, error) { return nil, nil }
+			ctx, cancel := context.WithCancel(context.Background())
+			done := make(chan struct{})
+			go func() {
+				superviseProcess(ctx, cmd, bt, http.DefaultClient, srv.URL, a, nil, registerAll, runPostStart, envexpand.PortMap{}, resolver, nil, pw, pwErr)
+				close(done)
+			}()
+			t.Cleanup(func() {
+				cancel()
+				<-done
+				bt.killAll()
+				bt.wg.Wait()
+			})
+
+			// Wait for the supervisor to seed its peer baseline before flipping:
+			// the 1st /__mdp/peers hit is buildBatchEnv's initial resolve, the
+			// 2nd is superviseProcess's seed.
+			seedDeadline := time.Now().Add(2 * time.Second)
+			for peerHits.Load() < 2 && time.Now().Before(seedDeadline) {
+				time.Sleep(5 * time.Millisecond)
+			}
+			port.Store(9999) // trigger a peer-change restart
+
+			deadline := time.Now().Add(2 * time.Second)
+			for hookCalls.Load() < tc.wantCalls && time.Now().Before(deadline) {
+				time.Sleep(10 * time.Millisecond)
+			}
+			if tc.onRestart {
+				if got := hookCalls.Load(); got != 1 {
+					t.Fatalf("runPostStart called %d times, want 1", got)
+				}
+				if waitTCP := <-hookWaitTCP; !waitTCP {
+					t.Error("restart re-run must pass waitTCP=true")
+				}
+			} else {
+				// Give the restart time to land, then confirm no call.
+				time.Sleep(300 * time.Millisecond)
+				if got := hookCalls.Load(); got != 0 {
+					t.Fatalf("runPostStart called %d times, want 0", got)
+				}
+			}
+		})
+	}
+}
+
 func TestRunSoloNoEnvOverride(t *testing.T) {
 	err := runSolo([]string{"sh", "-c", `test -z "$MDP" && test -z "$PORT"`}, config.LogSplitConfig{})
 	if err != nil {
@@ -802,7 +1180,7 @@ func TestSuperviseProcessRestartsOnPeerChange(t *testing.T) {
 	ctx, cancel := context.WithCancel(context.Background())
 	done := make(chan struct{})
 	go func() {
-		superviseProcess(ctx, cmd, bt, http.DefaultClient, srv.URL, a, nil, registerAll, envexpand.PortMap{}, resolver, nil, pw, pwErr)
+		superviseProcess(ctx, cmd, bt, http.DefaultClient, srv.URL, a, nil, registerAll, func([]string, bool) {}, envexpand.PortMap{}, resolver, nil, pw, pwErr)
 		close(done)
 	}()
 	t.Cleanup(func() {
