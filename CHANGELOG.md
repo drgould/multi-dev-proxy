@@ -1,5 +1,18 @@
 # Changelog
 
+## [1.12.1](https://github.com/drgould/multi-dev-proxy/compare/v1.12.0...v1.12.1) (2026-06-15)
+
+
+### Features
+
+* add dashboard command and report dashboard URL on daemon start ([#72](https://github.com/drgould/multi-dev-proxy/issues/72)) ([2b269fd](https://github.com/drgould/multi-dev-proxy/commit/2b269fd1dcac117429e01fb0661f19c9cb97011d))
+* focus interactive hook prompts and buffer other output ([#74](https://github.com/drgould/multi-dev-proxy/issues/74)) ([db33918](https://github.com/drgould/multi-dev-proxy/commit/db339180c7c7515392c38f3868364fd8f708dd08))
+
+
+### Miscellaneous
+
+* release 1.12.1 ([c53f74d](https://github.com/drgould/multi-dev-proxy/commit/c53f74d197a2486d92f02d6ffcc516821d07eca5))
+
 ## [1.12.0](https://github.com/drgould/multi-dev-proxy/compare/v1.11.2...v1.12.0) (2026-06-12)
 
 
