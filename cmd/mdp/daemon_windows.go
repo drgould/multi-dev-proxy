@@ -12,6 +12,8 @@ import (
 	"strconv"
 	"syscall"
 	"time"
+
+	"github.com/derekgould/multi-dev-proxy/internal/process"
 )
 
 func stateDir() string {
@@ -82,6 +84,20 @@ func startDaemon(controlPort int) error {
 
 func signalProcess(proc *os.Process) error {
 	return proc.Kill()
+}
+
+// detachProcAttr returns the SysProcAttr that detaches a re-exec'd child into
+// its own process group, so it survives the parent exiting.
+func detachProcAttr() *syscall.SysProcAttr {
+	return &syscall.SysProcAttr{CreationFlags: syscall.CREATE_NEW_PROCESS_GROUP}
+}
+
+// signalDetachedRun stops a detached `mdp run` supervisor. Windows has no
+// deliverable SIGTERM for a detached, console-less process, and killing only the
+// supervisor would orphan its service children — so terminate the whole process
+// tree (taskkill /T) instead.
+func signalDetachedRun(pid int) error {
+	return process.KillProcessGroup(pid, 10*time.Second)
 }
 
 func waitForHealth(controlPort int, timeout time.Duration) error {
