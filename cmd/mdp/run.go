@@ -20,12 +20,14 @@ import (
 	"regexp"
 	"slices"
 	"sort"
+	"strconv"
 	"strings"
 	"sync"
 	"syscall"
 	"time"
 
 	"github.com/spf13/cobra"
+	"github.com/spf13/pflag"
 
 	"github.com/derekgould/multi-dev-proxy/internal/config"
 	"github.com/derekgould/multi-dev-proxy/internal/depwait"
@@ -89,6 +91,8 @@ func init() {
 	runCmd.Flags().StringArray("link", nil, "Override the lookup group for cross-repo @<repo>.* env refs: repo=group (repeatable, last-wins per repo). Used when a peer service runs in a different group than the caller (e.g. backend on main, frontend on a feature branch). repo=@{current} resets that repo to the caller's own group.")
 	runCmd.Flags().BoolP("interactive", "i", false, "Prompt for the inputs declared in mdp.yaml (see the `inputs:` section); without it, inputs use their defaults.")
 	runCmd.Flags().StringSlice("service", nil, "Only start the listed services from mdp.yaml (repeatable or comma-separated). Transitive depends_on are auto-included. Falls back to env MDP_SERVICES. Default: start all.")
+	runCmd.Flags().BoolP("detach", "d", false, "Run mdp.yaml batch services in the background and return the terminal. Stop with `mdp run --stop`.")
+	runCmd.Flags().Bool("stop", false, "Stop the detached batch run for the current repo/group.")
 }
 
 // parseLinks converts repeated `--link repo=group` values into a map. Empty
@@ -261,6 +265,11 @@ func resolveServiceSelection(cfg *config.Config, selection []string) (map[string
 func runRun(cmd *cobra.Command, args []string) error {
 	controlPort, _ := cmd.Flags().GetInt("control-port")
 	groupFlag, _ := cmd.Flags().GetString("group")
+
+	if stop, _ := cmd.Flags().GetBool("stop"); stop {
+		return runBatchStop(controlPort, groupFlag)
+	}
+
 	linkValues, _ := cmd.Flags().GetStringArray("link")
 	linkMap, err := parseLinks(linkValues)
 	if err != nil {
@@ -296,6 +305,9 @@ func runRun(cmd *cobra.Command, args []string) error {
 	}
 	if interactive {
 		return fmt.Errorf("-i/--interactive applies only to mdp.yaml batch mode, not `mdp run -- <command>`")
+	}
+	if detach, _ := cmd.Flags().GetBool("detach"); detach {
+		return fmt.Errorf("-d/--detach applies only to mdp.yaml batch mode, not `mdp run -- <command>`")
 	}
 
 	tlsCert, _ := cmd.Flags().GetString("tls-cert")
@@ -348,10 +360,26 @@ func runBatchMode(cmd *cobra.Command, controlPort int, groupFlag string, linkMap
 	controlURL := fmt.Sprintf("http://127.0.0.1:%d", controlPort)
 	clientID := generateClientID()
 
+	detach, _ := cmd.Flags().GetBool("detach")
+	detachedChild := os.Getenv("_MDP_RUN_DETACHED") != ""
+
 	// Resolve declared inputs (prompting when -i, else defaults), then
 	// substitute ${inputs.X} refs throughout the config so the env/link
-	// pipeline below never sees an input reference.
-	inputs, err := resolveInputs(cfg, interactive, group, func(repo string) []string { return fetchActiveGroups(client, controlURL, repo) }, os.Stdin, os.Stderr)
+	// pipeline below never sees an input reference. The detached child can't
+	// prompt (no TTY), so it reads the values the detaching parent already
+	// resolved and passed via _MDP_RUN_INPUTS.
+	var inputs map[string]string
+	if detachedChild {
+		inputs, err = decodeDetachedInputs()
+		// Strip the internal handoff vars from our environment so they don't
+		// leak into every service/hook subprocess (which inherit os.Environ()):
+		// _MDP_RUN_INPUTS may carry secrets, and a service that itself invokes
+		// `mdp run` must not be misdetected as a detached child.
+		os.Unsetenv("_MDP_RUN_INPUTS")
+		os.Unsetenv("_MDP_RUN_DETACHED")
+	} else {
+		inputs, err = resolveInputs(cfg, interactive, group, func(repo string) []string { return fetchActiveGroups(client, controlURL, repo) }, os.Stdin, os.Stderr)
+	}
 	if err != nil {
 		return err
 	}
@@ -393,6 +421,36 @@ func runBatchMode(cmd *cobra.Command, controlPort int, groupFlag string, linkMap
 	}
 
 	repo := detect.DetectRepo(filepath.Dir(configPath))
+
+	// Inputs are resolved and the config is finalized; everything below spawns
+	// and supervises service processes, so re-exec ourselves as a detached
+	// background supervisor and hand the resolved inputs to the child.
+	if detach && !detachedChild {
+		// Readiness is observed via the proxy registry, where batch services
+		// register as "<group>/<name>" — and only when they declare a proxy
+		// mapping (see launchBatchService). Services without one never appear
+		// there, so don't count them.
+		var expected []string
+		for name, svc := range cfg.Services {
+			if selected != nil && !selected[name] {
+				continue
+			}
+			svcGroup := svc.Group
+			if svcGroup == "" {
+				svcGroup = group
+			}
+			proxied := svc.Proxy > 0
+			for _, pm := range svc.Ports {
+				if pm.Proxy > 0 {
+					proxied = true
+				}
+			}
+			if proxied {
+				expected = append(expected, svcGroup+"/"+name)
+			}
+		}
+		return spawnDetachedRun(cmd, repo, group, inputs, expected)
+	}
 
 	// Stable ports: reuse this branch's previously-assigned ports (when still
 	// free) so certs/trust keyed to a port survive restarts. Best-effort —
@@ -576,6 +634,220 @@ func runBatchMode(cmd *cobra.Command, controlPort int, groupFlag string, linkMap
 	}
 
 	disconnectFromOrchestrator(controlURL, clientID)
+	if detachedChild {
+		os.Remove(runPIDFilePath(repo, group))
+	}
+	return nil
+}
+
+// decodeDetachedInputs reads the inputs the detaching parent resolved (and
+// serialized into _MDP_RUN_INPUTS) so the detached child reuses them instead of
+// prompting on a terminal it doesn't have.
+func decodeDetachedInputs() (map[string]string, error) {
+	inputs := map[string]string{}
+	raw := os.Getenv("_MDP_RUN_INPUTS")
+	if raw == "" || raw == "null" {
+		return inputs, nil
+	}
+	if err := json.Unmarshal([]byte(raw), &inputs); err != nil {
+		return nil, fmt.Errorf("decode detached inputs: %w", err)
+	}
+	return inputs, nil
+}
+
+// spawnDetachedRun re-execs `mdp run` as a background supervisor: the same batch
+// loop, but detached from the terminal with output redirected to a per-run log
+// file. Resolved inputs are handed to the child via env so it never prompts.
+// Modeled on startDaemon (the orchestrator's own re-exec).
+func spawnDetachedRun(cmd *cobra.Command, repo, group string, inputs map[string]string, expected []string) error {
+	if err := os.MkdirAll(stateDir(), 0755); err != nil {
+		return fmt.Errorf("create state dir: %w", err)
+	}
+
+	// Refuse to start a second supervisor for the same repo/group — it would
+	// overwrite the PID file and orphan the first run beyond reach of --stop.
+	if b, err := os.ReadFile(runPIDFilePath(repo, group)); err == nil {
+		if oldPID, perr := strconv.Atoi(strings.TrimSpace(string(b))); perr == nil && process.IsProcessAlive(oldPID) {
+			return fmt.Errorf("a detached run is already active for %s/%s (PID %d) — stop it first with `mdp run --stop`", repo, group, oldPID)
+		}
+	}
+
+	cwd, err := os.Getwd()
+	if err != nil {
+		return fmt.Errorf("cannot determine working directory: %w", err)
+	}
+
+	logPath := runLogFilePath(repo, group)
+	logFile, err := os.OpenFile(logPath, os.O_CREATE|os.O_WRONLY|os.O_APPEND, 0644)
+	if err != nil {
+		return fmt.Errorf("open log file: %w", err)
+	}
+
+	exe, err := os.Executable()
+	if err != nil {
+		logFile.Close()
+		return fmt.Errorf("find executable: %w", err)
+	}
+
+	inputsJSON, err := json.Marshal(inputs)
+	if err != nil {
+		logFile.Close()
+		return fmt.Errorf("encode inputs: %w", err)
+	}
+
+	// Re-issue `mdp run --detach` preserving the flags the user set. Drop the
+	// flags that don't apply to the supervisor: --detach is re-added explicitly,
+	// --stop would short-circuit, and --interactive can't prompt (inputs are
+	// already resolved). Use the --name=value form so bool/slice flags re-parse.
+	args := []string{"run", "--detach"}
+	cmd.Flags().Visit(func(f *pflag.Flag) {
+		switch f.Name {
+		case "detach", "stop", "interactive":
+			return
+		}
+		if sv, ok := f.Value.(pflag.SliceValue); ok {
+			for _, v := range sv.GetSlice() {
+				args = append(args, "--"+f.Name+"="+v)
+			}
+			return
+		}
+		args = append(args, "--"+f.Name+"="+f.Value.String())
+	})
+
+	child := exec.Command(exe, args...)
+	child.Dir = cwd // child re-runs config.Find(cwd); cwd must be preserved
+	child.Env = append(os.Environ(), "_MDP_RUN_DETACHED=1", "_MDP_RUN_INPUTS="+string(inputsJSON))
+	child.Stdout = logFile
+	child.Stderr = logFile
+	child.Stdin = nil
+	child.SysProcAttr = detachProcAttr()
+
+	if err := child.Start(); err != nil {
+		logFile.Close()
+		return fmt.Errorf("start detached run: %w", err)
+	}
+	logFile.Close()
+
+	pid := child.Process.Pid
+	if err := os.WriteFile(runPIDFilePath(repo, group), []byte(strconv.Itoa(pid)), 0644); err != nil {
+		slog.Warn("failed to write run PID file", "err", err)
+	}
+
+	controlPort, _ := cmd.Flags().GetInt("control-port")
+	controlURL := fmt.Sprintf("http://127.0.0.1:%d", controlPort)
+	started := waitForDetachedServices(controlURL, expected, 15*time.Second)
+
+	fmt.Printf("mdp run started in background (PID %d, group %s)\n", pid, group)
+	switch {
+	case len(expected) == 0:
+		fmt.Printf("  logs: %s\n", logPath)
+	case len(started) < len(expected):
+		fmt.Printf("  %d/%d services up so far — follow logs: %s\n", len(started), len(expected), logPath)
+	default:
+		fmt.Printf("  %d services up — logs: %s\n", len(started), logPath)
+	}
+	fmt.Println("  stop with `mdp run --stop`")
+	return nil
+}
+
+// waitForDetachedServices polls the proxy registry until every expected server
+// (named "<group>/<service>") is registered, or the timeout elapses, returning
+// the names that came up. Batch services register through /__mdp/register and
+// surface under /__mdp/proxies — not /__mdp/services, which only the
+// orchestrator's own runner populates.
+func waitForDetachedServices(controlURL string, expected []string, timeout time.Duration) []string {
+	if len(expected) == 0 {
+		return nil
+	}
+	want := make(map[string]bool, len(expected))
+	for _, n := range expected {
+		want[n] = true
+	}
+	seen := map[string]bool{}
+	client := &http.Client{Timeout: time.Second}
+	deadline := time.Now().Add(timeout)
+	for time.Now().Before(deadline) && len(seen) < len(want) {
+		resp, err := client.Get(controlURL + "/__mdp/proxies")
+		if err == nil {
+			var proxies []struct {
+				Servers []struct {
+					Name string `json:"name"`
+				} `json:"servers"`
+			}
+			json.NewDecoder(resp.Body).Decode(&proxies)
+			resp.Body.Close()
+			for _, p := range proxies {
+				for _, s := range p.Servers {
+					if want[s.Name] {
+						seen[s.Name] = true
+					}
+				}
+			}
+		}
+		if len(seen) < len(want) {
+			time.Sleep(300 * time.Millisecond)
+		}
+	}
+	out := make([]string, 0, len(seen))
+	for n := range seen {
+		out = append(out, n)
+	}
+	sort.Strings(out)
+	return out
+}
+
+// runBatchStop stops the detached batch run for the current repo/group by
+// signaling the supervisor PID recorded by spawnDetachedRun (see
+// signalDetachedRun for the per-platform mechanism).
+func runBatchStop(controlPort int, groupFlag string) error {
+	cwd, err := os.Getwd()
+	if err != nil {
+		return fmt.Errorf("cannot determine working directory: %w", err)
+	}
+	configPath := config.Find(cwd)
+	if configPath == "" {
+		return fmt.Errorf("no mdp.yaml found — run `mdp run --stop` from a repo with an mdp.yaml")
+	}
+	dir := filepath.Dir(configPath)
+	group := groupFlag
+	if group == "" {
+		group = orchestrator.DetectGroup(dir)
+	}
+	repo := detect.DetectRepo(dir)
+
+	pidPath := runPIDFilePath(repo, group)
+	b, err := os.ReadFile(pidPath)
+	if err != nil {
+		return fmt.Errorf("no detached run for %s/%s", repo, group)
+	}
+	pid, err := strconv.Atoi(strings.TrimSpace(string(b)))
+	if err != nil {
+		os.Remove(pidPath)
+		return fmt.Errorf("invalid run PID file %s", pidPath)
+	}
+	if !process.IsProcessAlive(pid) {
+		os.Remove(pidPath)
+		fmt.Printf("no detached run for %s/%s (cleaned up stale PID file)\n", repo, group)
+		return nil
+	}
+
+	if err := signalDetachedRun(pid); err != nil {
+		return fmt.Errorf("stop process %d: %w", pid, err)
+	}
+
+	// Wait for the supervisor to drain its services and exit. Keep the PID file
+	// if it outlives the wait (slow shutdown hooks) — the supervisor removes the
+	// file itself on clean exit, and a later --stop can still find it meanwhile.
+	deadline := time.Now().Add(15 * time.Second)
+	for time.Now().Before(deadline) && process.IsProcessAlive(pid) {
+		time.Sleep(200 * time.Millisecond)
+	}
+	if process.IsProcessAlive(pid) {
+		fmt.Printf("sent stop to detached run %s/%s (PID %d); still shutting down — it will exit and clean up once services drain\n", repo, group, pid)
+		return nil
+	}
+	os.Remove(pidPath)
+	fmt.Printf("stopped detached run for %s/%s (PID %d)\n", repo, group, pid)
 	return nil
 }
 

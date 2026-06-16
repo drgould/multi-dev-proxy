@@ -84,6 +84,23 @@ func signalProcess(proc *os.Process) error {
 	return proc.Signal(syscall.SIGTERM)
 }
 
+// detachProcAttr returns the SysProcAttr that fully detaches a re-exec'd child
+// from the controlling terminal (new session), so it survives the parent exiting.
+func detachProcAttr() *syscall.SysProcAttr {
+	return &syscall.SysProcAttr{Setsid: true}
+}
+
+// signalDetachedRun asks a detached `mdp run` supervisor to shut down. SIGTERM
+// triggers its graceful drain — the same path as Ctrl+C in a foreground run —
+// so it stops its service children before exiting.
+func signalDetachedRun(pid int) error {
+	proc, err := os.FindProcess(pid)
+	if err != nil {
+		return err
+	}
+	return proc.Signal(syscall.SIGTERM)
+}
+
 func waitForHealth(controlPort int, timeout time.Duration) error {
 	client := &http.Client{Timeout: 500 * time.Millisecond}
 	deadline := time.Now().Add(timeout)
