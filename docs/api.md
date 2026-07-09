@@ -38,6 +38,9 @@ Each proxy instance serves these endpoints on its listen port (e.g. `:3000`, `:4
 | `GET`    | `/__mdp/groups`                        | List all groups (`?repo=` filters to groups containing that repo's services) |
 | `POST`   | `/__mdp/groups/{name}/switch`          | Switch group (set defaults)       |
 | `GET`    | `/__mdp/services`                      | List managed services             |
+| `GET`    | `/__mdp/logs`                          | List log sources (daemon log + detached-run logs) |
+| `GET`    | `/__mdp/logs/{id}`                     | Cursor-tail a log source (`?offset=` byte cursor, negative = last N bytes; `?limit=` max bytes). Returns `{lines, nextOffset, size, truncated}` |
+| `POST`   | `/__mdp/servers/stop`                  | Gracefully stop a registered server's process (body `{"name": "repo/branch"}`; `202` accepted, `409` if the server has no PID) |
 | `POST`   | `/__mdp/shutdown`                      | Graceful shutdown                 |
 
 

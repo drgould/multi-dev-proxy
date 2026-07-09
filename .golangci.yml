@@ -1,8 +1,11 @@
+version: "2"
+
 linters:
+  default: standard
   disable:
     - errcheck
-  enable:
-    - govet
-    - ineffassign
-    - staticcheck
-    - unused
+  settings:
+    # v1 CI ran the SA checks only (gosimple/stylecheck were separate, unenabled
+    # linters); keep that surface after the v2 merge.
+    staticcheck:
+      checks: ["SA*"]

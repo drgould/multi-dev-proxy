@@ -1,0 +1,18 @@
+"$schema" = "https://conductor.build/schemas/settings.repo.schema.json"
+
+[scripts]
+setup = "go mod download && npm install"
+run_mode = "nonconcurrent"
+
+[scripts.run.dev]
+command = "go build -o mdp ./cmd/mdp && ./mdp"
+default = true
+icon = "rocket"
+
+[scripts.run.testbed]
+command = "cd testbed && ./run.sh"
+icon = "server"
+
+[scripts.run.test]
+command = "go test ./..."
+icon = "test-tube"

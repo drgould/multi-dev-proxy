@@ -13,7 +13,7 @@ import (
 	"syscall"
 	"time"
 
-	tea "github.com/charmbracelet/bubbletea"
+	tea "charm.land/bubbletea/v2"
 	"github.com/spf13/cobra"
 
 	"github.com/derekgould/multi-dev-proxy/internal/config"
@@ -150,8 +150,8 @@ func attachTUI(controlPort int) error {
 	remote := tui.NewRemoteBackend(controlPort)
 	defer remote.Stop()
 
-	tuiModel := tui.New(remote, controlPort)
-	p := tea.NewProgram(tuiModel, tea.WithAltScreen(), tea.WithMouseAllMotion())
+	tuiModel := tui.New(remote, controlPort, version)
+	p := tea.NewProgram(tuiModel)
 
 	sigCh := make(chan os.Signal, 1)
 	signal.Notify(sigCh, syscall.SIGINT, syscall.SIGTERM)

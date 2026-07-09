@@ -8,26 +8,12 @@ import (
 	"net/http"
 	"os"
 	"os/exec"
-	"path/filepath"
 	"strconv"
 	"syscall"
 	"time"
 
 	"github.com/derekgould/multi-dev-proxy/internal/process"
 )
-
-func stateDir() string {
-	home, _ := os.UserHomeDir()
-	return filepath.Join(home, ".mdp")
-}
-
-func pidFilePath() string {
-	return filepath.Join(stateDir(), "orchestrator.pid")
-}
-
-func logFilePath() string {
-	return filepath.Join(stateDir(), "orchestrator.log")
-}
 
 func startDaemon(controlPort int) error {
 	dir := stateDir()

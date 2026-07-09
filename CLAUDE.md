@@ -40,13 +40,15 @@ internal/
   proxy/              httputil.ReverseProxy wrapper with cookie-based routing
   registry/           In-memory server registry with RWMutex, dead server pruner, default upstream
   routing/            Cookie parsing, upstream resolution (cookie → default → redirect)
-  tui/                Bubbletea TUI: groups + proxies/services, keyboard nav, live updates
+  statedir/           ~/.mdp path helpers (pid/log/run-log) shared by cmd/mdp and orchestrator
+  tui/                Bubbletea v2 TUI (full-width chrome): Groups/Proxies/Services/Logs tabs,
+                      filtering, async actions, service stop, SSE-driven live updates
   ui/                 Switch page HTML renderer; widget.js (go:embed) Shadow DOM script
 ```
 
 ## Key Conventions
 
-- **No external test frameworks** — stdlib `testing` only
+- **No external test frameworks** — stdlib `testing` only. Sole exception: `charmbracelet/x/exp/teatest/v2` drives the Bubble Tea TUI in `internal/tui/teatest_test.go` (there is no stdlib way to exercise a bubbletea program end-to-end). Remove it if strict stdlib-only is preferred.
 - **No external logging** — `log/slog` only
 - **No global mutable state** — dependency injection via structs
 - **Build tags** for platform code: `//go:build unix`, `//go:build windows` (not runtime.GOOS switches)
@@ -73,5 +75,7 @@ On push to `main`, release-please creates/updates a Release PR. Merging it creat
 - `github.com/spf13/cobra` — CLI framework
 - `github.com/andybalholm/brotli` — brotli decompression for HTML injection
 - `gopkg.in/yaml.v3` — YAML config file parsing
-- `github.com/charmbracelet/bubbletea` — TUI framework
-- `github.com/charmbracelet/lipgloss` — TUI styling
+- `charm.land/bubbletea/v2` — TUI framework (v2; requires Go 1.25)
+- `charm.land/lipgloss/v2` — TUI styling
+- `charm.land/bubbles/v2` — TUI components (table-less: help, key, spinner, textinput, viewport)
+- `github.com/charmbracelet/x/exp/teatest/v2` — TUI integration test harness (test-only; stdlib-only exception, see Key Conventions)

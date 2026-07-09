@@ -2,6 +2,7 @@ package tui
 
 import (
 	"encoding/json"
+	"fmt"
 	"net/http"
 	"net/http/httptest"
 	"testing"
@@ -55,6 +56,17 @@ func newTestControlServer(t *testing.T) *httptest.Server {
 
 	mux.HandleFunc("POST /__mdp/proxies/", func(w http.ResponseWriter, r *http.Request) {
 		json.NewEncoder(w).Encode(map[string]bool{"ok": true})
+	})
+
+	mux.HandleFunc("GET /__mdp/events", func(w http.ResponseWriter, r *http.Request) {
+		flusher := w.(http.Flusher)
+		w.Header().Set("Content-Type", "text/event-stream")
+		w.WriteHeader(http.StatusOK)
+		fmt.Fprint(w, "data: {\"type\":\"connected\"}\n\n")
+		flusher.Flush()
+		fmt.Fprint(w, "data: {\"type\":\"update\"}\n\n")
+		flusher.Flush()
+		<-r.Context().Done()
 	})
 
 	return httptest.NewServer(mux)
@@ -166,6 +178,45 @@ func TestRemoteBackendHealthCheckFails(t *testing.T) {
 
 	if rb.healthCheck() {
 		t.Error("expected health check to fail on unreachable server")
+	}
+}
+
+func TestRemoteBackendSSE(t *testing.T) {
+	srv := newTestControlServer(t)
+	defer srv.Close()
+
+	rb := &RemoteBackend{
+		controlURL: srv.URL,
+		client:     &http.Client{Timeout: 2 * time.Second},
+		sseClient:  &http.Client{},
+		events:     make(chan orchestrator.Event, 64),
+		stopPoll:   make(chan struct{}),
+	}
+	go rb.sse()
+	defer rb.Stop()
+
+	select {
+	case e := <-rb.Events():
+		if e.Type != "update" {
+			t.Errorf("expected update event, got %q", e.Type)
+		}
+	case <-time.After(2 * time.Second):
+		t.Fatal("no SSE event received")
+	}
+}
+
+func TestRemoteBackendConnState(t *testing.T) {
+	rb := &RemoteBackend{}
+	if rb.ConnState() != ConnConnected {
+		t.Errorf("zero-value state should be connected, got %d", rb.ConnState())
+	}
+	rb.setConnState(ConnReconnecting)
+	if rb.ConnState() != ConnReconnecting {
+		t.Error("expected reconnecting state")
+	}
+	rb.setConnState(ConnLost)
+	if rb.ConnState() != ConnLost {
+		t.Error("expected lost state")
 	}
 }
 
