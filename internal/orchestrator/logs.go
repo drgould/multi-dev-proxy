@@ -114,14 +114,19 @@ func (c *ControlAPI) handleTailLog(w http.ResponseWriter, r *http.Request) {
 		offset = size
 	}
 
-	buf := make([]byte, limit)
-	n, err := f.ReadAt(buf, offset)
-	if err != nil && err != io.EOF {
+	// Read through a bounded section instead of allocating a caller-sized
+	// buffer: the allocation grows with the bytes actually present, capped by
+	// both the (already clamped) limit and the bytes remaining in the file.
+	want := size - offset
+	if want > limit {
+		want = limit
+	}
+	chunk, err := io.ReadAll(io.NewSectionReader(f, offset, want))
+	if err != nil {
 		writeJSON(w, http.StatusInternalServerError, map[string]string{"error": err.Error()})
 		return
 	}
-	chunk := buf[:n]
-	consumed := int64(n)
+	consumed := int64(len(chunk))
 	truncated := offset+consumed < size
 
 	// Hold back an incomplete trailing line: cut at the last newline so a line
