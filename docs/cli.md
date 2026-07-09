@@ -4,7 +4,9 @@
 
 Starts the orchestrator with an interactive TUI. Manages all proxy instances and shows their registered services.
 
-Keys: `↑`/`↓` (or `j`/`k`) navigate, `Enter` switch active server, `Tab` / `h` / `l` switch tabs, `d` detach (leave daemon running), `q` quit (stop daemon). Mouse clicks are supported.
+Keys: `↑`/`↓` (or `j`/`k`) navigate, `Enter` switch active server, `Tab`/`Shift+Tab` (or `←`/`→`, `1`-`4`) switch tabs, `/` filter rows (`Esc` clears), `x` stop the selected service (with confirmation; unavailable for externally managed processes), `d` detach (leave daemon running), `q` quit (stop daemon). Mouse is supported: click to select/activate, hover to highlight, wheel to scroll.
+
+The Logs tab tails the daemon log and any detached `mdp run` logs: `f` toggles follow, `[`/`]` switch sources, `/` filters lines.
 
 ```sh
 mdp

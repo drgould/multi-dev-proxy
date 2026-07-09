@@ -8,11 +8,15 @@ import (
 	"log/slog"
 	"net"
 	"net/http"
+	"sort"
 	"strconv"
 	"strings"
+	"time"
 
 	"github.com/derekgould/multi-dev-proxy/internal/api"
+	"github.com/derekgould/multi-dev-proxy/internal/process"
 	"github.com/derekgould/multi-dev-proxy/internal/registry"
+	"github.com/derekgould/multi-dev-proxy/internal/statedir"
 	"github.com/derekgould/multi-dev-proxy/internal/ui"
 )
 
@@ -20,12 +24,13 @@ import (
 type ControlAPI struct {
 	orch          *Orchestrator
 	shutdownFn    func()
-	dashboardPort int // 0 if the dashboard server is not running
+	dashboardPort int    // 0 if the dashboard server is not running
+	logDir        string // where log files are looked up; overridable in tests
 }
 
 // NewControlAPI creates a new control API handler.
 func NewControlAPI(orch *Orchestrator, shutdownFn func()) *ControlAPI {
-	return &ControlAPI{orch: orch, shutdownFn: shutdownFn}
+	return &ControlAPI{orch: orch, shutdownFn: shutdownFn, logDir: statedir.Dir()}
 }
 
 // Handler returns the http.Handler for the control API.
@@ -41,25 +46,41 @@ func (c *ControlAPI) Handler() http.Handler {
 	mux.HandleFunc("GET /__mdp/groups", c.handleListGroups)
 	mux.HandleFunc("POST /__mdp/groups/{name}/switch", c.handleSwitchGroup)
 	mux.HandleFunc("GET /__mdp/services", c.handleListServices)
+	mux.HandleFunc("GET /__mdp/logs", c.handleListLogs)
+	mux.HandleFunc("GET /__mdp/logs/{id}", c.handleTailLog)
+	mux.HandleFunc("POST /__mdp/servers/stop", c.handleStopServer)
 	mux.HandleFunc("GET /__mdp/peers", c.handlePeerLookup)
 	mux.HandleFunc("POST /__mdp/heartbeat", c.handleHeartbeat)
 	mux.HandleFunc("POST /__mdp/disconnect", c.handleDisconnect)
 	mux.HandleFunc("GET /__mdp/shutdown/watch", c.handleShutdownWatch)
 	mux.HandleFunc("POST /__mdp/shutdown", c.handleShutdown)
 	mux.HandleFunc("GET /__mdp/events", api.SSEHandler(c.orch.Broadcaster()))
-	return corsMiddleware(mux)
+	return c.corsMiddleware(mux)
 }
 
-// corsMiddleware adds CORS headers to allow the dashboard (on a different port)
-// to call the control API.
-func corsMiddleware(next http.Handler) http.Handler {
+// corsMiddleware allows the dashboard (served on a different local port) to
+// call the control API, while rejecting other cross-origin browser requests.
+// Reflecting an arbitrary Origin with credentials would let any page the user
+// visits drive the control API (CSRF: switch/stop/shutdown) and read log
+// output cross-origin (exfiltration) — the loopback bind is no defense since
+// the request comes from the user's own browser. Non-browser clients (the CLI,
+// TUI, curl) send no Origin and are unaffected.
+func (c *ControlAPI) corsMiddleware(next http.Handler) http.Handler {
+	allowed := map[string]bool{}
+	if c.dashboardPort > 0 {
+		allowed[fmt.Sprintf("http://localhost:%d", c.dashboardPort)] = true
+		allowed[fmt.Sprintf("http://127.0.0.1:%d", c.dashboardPort)] = true
+	}
 	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		origin := r.Header.Get("Origin")
 		if origin != "" {
+			if !allowed[origin] {
+				http.Error(w, "cross-origin request forbidden", http.StatusForbidden)
+				return
+			}
 			w.Header().Set("Access-Control-Allow-Origin", origin)
 			w.Header().Set("Access-Control-Allow-Credentials", "true")
-		} else {
-			w.Header().Set("Access-Control-Allow-Origin", "*")
+			w.Header().Set("Vary", "Origin")
 		}
 		w.Header().Set("Access-Control-Allow-Methods", "GET, POST, DELETE, OPTIONS")
 		w.Header().Set("Access-Control-Allow-Headers", "Content-Type")
@@ -203,6 +224,52 @@ func (c *ControlAPI) handleDeregister(w http.ResponseWriter, r *http.Request) {
 		}
 	}
 	writeJSON(w, http.StatusOK, map[string]any{"ok": true, "deleted": deleted})
+}
+
+// handleStopServer gracefully stops the process behind a registered server.
+// The signal runs asynchronously (a graceful stop can take seconds); the
+// deregistration then flows through the existing supervisor/pruner paths.
+func (c *ControlAPI) handleStopServer(w http.ResponseWriter, r *http.Request) {
+	var body struct {
+		Name string `json:"name"`
+	}
+	if err := json.NewDecoder(r.Body).Decode(&body); err != nil || body.Name == "" {
+		writeJSON(w, http.StatusBadRequest, map[string]string{"error": "name is required"})
+		return
+	}
+	// Read PIDs from registry copies (List locks internally) rather than off a
+	// live *ServerEntry pointer, which would race with UpdatePID. Scan proxies
+	// in port order and take the first live PID so the choice is deterministic
+	// when a name is registered on more than one proxy.
+	proxies := c.orch.ListProxies()
+	sort.Slice(proxies, func(i, j int) bool { return proxies[i].Port < proxies[j].Port })
+	pid := 0
+	found := false
+	for _, pi := range proxies {
+		for _, entry := range pi.Registry.List() {
+			if entry.Name != body.Name {
+				continue
+			}
+			found = true
+			if entry.PID > 0 && pid == 0 {
+				pid = entry.PID
+			}
+		}
+	}
+	if !found {
+		writeJSON(w, http.StatusNotFound, map[string]string{"error": "unknown server"})
+		return
+	}
+	if pid == 0 {
+		writeJSON(w, http.StatusConflict, map[string]string{"error": "server has no PID (externally managed)"})
+		return
+	}
+	go func() {
+		if err := process.GracefulStop(pid, 5*time.Second); err != nil {
+			slog.Warn("graceful stop failed", "name", body.Name, "pid", pid, "err", err)
+		}
+	}()
+	writeJSON(w, http.StatusAccepted, map[string]any{"ok": true, "pid": pid})
 }
 
 func (c *ControlAPI) handleUpdatePID(w http.ResponseWriter, r *http.Request) {

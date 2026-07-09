@@ -31,6 +31,47 @@ func setupControlAPI(t *testing.T) (*Orchestrator, http.Handler) {
 	return o, capi.Handler()
 }
 
+func TestControlAPICORS(t *testing.T) {
+	o := New(&config.Config{}, "", "")
+	capi := NewControlAPI(o, nil)
+	capi.dashboardPort = 6370
+	handler := capi.Handler()
+
+	// No Origin (CLI / TUI / curl): allowed.
+	rec := httptest.NewRecorder()
+	handler.ServeHTTP(rec, httptest.NewRequest("GET", "/__mdp/health", nil))
+	if rec.Code != http.StatusOK {
+		t.Errorf("no-Origin request should be allowed, got %d", rec.Code)
+	}
+
+	// Dashboard origin: allowed and reflected.
+	req := httptest.NewRequest("GET", "/__mdp/health", nil)
+	req.Header.Set("Origin", "http://localhost:6370")
+	rec = httptest.NewRecorder()
+	handler.ServeHTTP(rec, req)
+	if rec.Code != http.StatusOK {
+		t.Errorf("dashboard origin should be allowed, got %d", rec.Code)
+	}
+	if got := rec.Header().Get("Access-Control-Allow-Origin"); got != "http://localhost:6370" {
+		t.Errorf("expected reflected dashboard origin, got %q", got)
+	}
+
+	// Arbitrary cross-origin page: rejected with no CORS grant — covers the new
+	// log-read (exfiltration) and stop (CSRF) endpoints.
+	for _, path := range []string{"/__mdp/health", "/__mdp/logs/daemon", "/__mdp/servers/stop"} {
+		req := httptest.NewRequest("GET", path, nil)
+		req.Header.Set("Origin", "http://evil.example")
+		rec := httptest.NewRecorder()
+		handler.ServeHTTP(rec, req)
+		if rec.Code != http.StatusForbidden {
+			t.Errorf("%s: cross-origin should be 403, got %d", path, rec.Code)
+		}
+		if rec.Header().Get("Access-Control-Allow-Origin") != "" {
+			t.Errorf("%s: must not grant CORS to a disallowed origin", path)
+		}
+	}
+}
+
 func TestControlAPIHealth(t *testing.T) {
 	_, handler := setupControlAPI(t)
 	req := httptest.NewRequest("GET", "/__mdp/health", nil)
