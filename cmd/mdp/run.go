@@ -91,6 +91,7 @@ func init() {
 	runCmd.Flags().StringArray("link", nil, "Override the lookup group for cross-repo @<repo>.* env refs: repo=group (repeatable, last-wins per repo). Used when a peer service runs in a different group than the caller (e.g. backend on main, frontend on a feature branch). repo=@{current} resets that repo to the caller's own group.")
 	runCmd.Flags().BoolP("interactive", "i", false, "Prompt for the inputs declared in mdp.yaml (see the `inputs:` section); without it, inputs use their defaults.")
 	runCmd.Flags().StringSlice("service", nil, "Only start the listed services from mdp.yaml (repeatable or comma-separated). Transitive depends_on are auto-included. Falls back to env MDP_SERVICES. Default: start all.")
+	runCmd.Flags().Bool("select-services", false, "Show an interactive checkbox picker for which mdp.yaml services to start (depends_on auto-included). Cannot combine with --service/MDP_SERVICES.")
 	runCmd.Flags().BoolP("detach", "d", false, "Run mdp.yaml batch services in the background and return the terminal. Stop with `mdp run --stop`.")
 	runCmd.Flags().Bool("stop", false, "Stop the detached batch run for the current repo/group.")
 }
@@ -285,6 +286,7 @@ func runRun(cmd *cobra.Command, args []string) error {
 	}
 
 	interactive, _ := cmd.Flags().GetBool("interactive")
+	selectServices, _ := cmd.Flags().GetBool("select-services")
 	if len(args) == 0 {
 		selection, _ := cmd.Flags().GetStringSlice("service")
 		// An explicit but empty flag (e.g. `--service ""`) must not shadow
@@ -299,15 +301,22 @@ func runRun(cmd *cobra.Command, args []string) error {
 		if !hasService {
 			if env := os.Getenv("MDP_SERVICES"); env != "" {
 				selection = strings.Split(env, ",")
+				hasService = true
 			}
 		}
-		return runBatchMode(cmd, controlPort, groupFlag, linkMap, interactive, selection)
+		if selectServices && hasService {
+			return fmt.Errorf("cannot combine --select-services with --service/MDP_SERVICES — use one")
+		}
+		return runBatchMode(cmd, controlPort, groupFlag, linkMap, interactive, selection, selectServices)
 	}
 	if interactive {
 		return fmt.Errorf("-i/--interactive applies only to mdp.yaml batch mode, not `mdp run -- <command>`")
 	}
 	if detach, _ := cmd.Flags().GetBool("detach"); detach {
 		return fmt.Errorf("-d/--detach applies only to mdp.yaml batch mode, not `mdp run -- <command>`")
+	}
+	if selectServices {
+		return fmt.Errorf("--select-services applies only to mdp.yaml batch mode, not `mdp run -- <command>`")
 	}
 
 	tlsCert, _ := cmd.Flags().GetString("tls-cert")
@@ -332,7 +341,7 @@ func runRun(cmd *cobra.Command, args []string) error {
 	return runSingleMode(cmd, args, controlPort, groupFlag, tlsCert, tlsKey, logSplit)
 }
 
-func runBatchMode(cmd *cobra.Command, controlPort int, groupFlag string, linkMap map[string]string, interactive bool, serviceSelection []string) error {
+func runBatchMode(cmd *cobra.Command, controlPort int, groupFlag string, linkMap map[string]string, interactive bool, serviceSelection []string, selectServices bool) error {
 	cwd, err := os.Getwd()
 	if err != nil {
 		return fmt.Errorf("cannot determine working directory: %w", err)
@@ -391,6 +400,18 @@ func runBatchMode(cmd *cobra.Command, controlPort int, groupFlag string, linkMap
 	// resolve correctly.
 	cfg.FinalizePaths(filepath.Dir(configPath))
 
+	// --select-services shows a checkbox picker over cfg.Services and replaces
+	// serviceSelection with the user's picks; the detached child never prompts
+	// (no TTY) — it receives the already-resolved --service list forwarded by
+	// spawnDetachedRun below instead.
+	if selectServices && !detachedChild {
+		picked, err := selectServicesTUI(cfg, serviceSelection)
+		if err != nil {
+			return err
+		}
+		serviceSelection = picked
+	}
+
 	// Resolve the service selection after inputs are substituted, so its
 	// env-ref dependency analysis sees final values — a ${inputs.X} reference
 	// must not look like a dependency on a service named "inputs".
@@ -447,6 +468,26 @@ func runBatchMode(cmd *cobra.Command, controlPort int, groupFlag string, linkMap
 			}
 			if proxied {
 				expected = append(expected, svcGroup+"/"+name)
+			}
+		}
+		// The picker already ran above (in this parent); forward its resolved
+		// picks to the child via the real --service flag so spawnDetachedRun's
+		// arg-rebuild carries them along naturally — the child never re-prompts
+		// (select-services is dropped from that rebuild below). Set("", ...)
+		// only registers the flag as user-set (Visit below only forwards flags
+		// in the FlagSet's internal "actual" set); the real value goes through
+		// SliceValue.Replace so a service name containing a literal comma
+		// isn't corrupted by Set's own CSV round-trip.
+		if selectServices {
+			sv, ok := cmd.Flags().Lookup("service").Value.(pflag.SliceValue)
+			if !ok {
+				return fmt.Errorf("--service flag is not a slice value")
+			}
+			if err := cmd.Flags().Set("service", ""); err != nil {
+				return fmt.Errorf("forward resolved service selection to detached run: %w", err)
+			}
+			if err := sv.Replace(serviceSelection); err != nil {
+				return fmt.Errorf("forward resolved service selection to detached run: %w", err)
 			}
 		}
 		return spawnDetachedRun(cmd, repo, group, inputs, expected)
@@ -702,7 +743,7 @@ func spawnDetachedRun(cmd *cobra.Command, repo, group string, inputs map[string]
 	args := []string{"run", "--detach"}
 	cmd.Flags().Visit(func(f *pflag.Flag) {
 		switch f.Name {
-		case "detach", "stop", "interactive":
+		case "detach", "stop", "interactive", "select-services":
 			return
 		}
 		if sv, ok := f.Value.(pflag.SliceValue); ok {
