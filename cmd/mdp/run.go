@@ -378,7 +378,14 @@ func runBatchMode(cmd *cobra.Command, controlPort int, groupFlag string, linkMap
 		os.Unsetenv("_MDP_RUN_INPUTS")
 		os.Unsetenv("_MDP_RUN_DETACHED")
 	} else {
-		inputs, err = resolveInputs(cfg, interactive, group, func(repo string) []string { return fetchActiveGroups(client, controlURL, repo) }, os.Stdin, os.Stderr)
+		// Both ends matter: the wizard reads keys from stdin but renders to
+		// stderr (see runInputWizard), so a redirected stderr would make the
+		// prompt invisible even with a real stdin TTY.
+		isTTY := func() bool {
+			term := hookpty.RealTerm{}
+			return term.IsTerminal(int(os.Stdin.Fd())) && term.IsTerminal(int(os.Stderr.Fd()))
+		}
+		inputs, err = resolveInputs(cfg, interactive, group, func(repo string) []string { return fetchActiveGroups(client, controlURL, repo) }, isTTY)
 	}
 	if err != nil {
 		return err

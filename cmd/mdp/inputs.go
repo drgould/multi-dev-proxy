@@ -1,15 +1,11 @@
 package main
 
 import (
-	"bufio"
 	"encoding/json"
 	"fmt"
-	"io"
 	"net/http"
 	"net/url"
-	"slices"
 	"sort"
-	"strconv"
 	"strings"
 
 	"github.com/derekgould/multi-dev-proxy/internal/config"
@@ -46,29 +42,25 @@ func fetchActiveGroups(client *http.Client, controlURL, repo string) []string {
 	return names
 }
 
-// resolveInputs produces the {name -> value} map for the config's declared
-// inputs. When interactive, each input is prompted for (groupsFor populates
-// `choices: groups` lists, fetched at most once per repo filter) reading from
-// in; otherwise every input resolves to its Default, and an input with no
-// default is an error. A `choices: groups` input with no active groups and a
-// declared default is skipped silently — exactly like non-interactive — so
-// `mdp run -i` only prompts when there is something to select; a failed groups
-// fetch (nil) instead degrades to a free-text prompt, since "couldn't list
-// groups" must not silently pick the default. currentGroup is
-// the caller's own group, shown on the "@{current}" pick-list entry. in/out
-// are injectable for testing.
-func resolveInputs(cfg *config.Config, interactive bool, currentGroup string, groupsFor func(repo string) []string, in io.Reader, out io.Writer) (map[string]string, error) {
-	if len(cfg.Inputs) == 0 {
-		return nil, nil
-	}
+// buildInputSteps produces the {name -> value} map for every input that
+// resolves without prompting, plus the ordered inputStep list for every input
+// that still needs an answer. When interactive, groupsFor populates
+// `choices: groups` lists (fetched at most once per repo filter). Non-
+// interactive inputs all resolve here: to their Default, or an error if none
+// is declared. A `choices: groups` input with no active groups and a
+// declared default is skipped silently — so `mdp run -i` only prompts when
+// there is something to select; a failed groups fetch (nil) instead degrades
+// to a free-text step, since "couldn't list groups" must not silently pick
+// the default.
+func buildInputSteps(cfg *config.Config, interactive bool, groupsFor func(repo string) []string) (map[string]string, []inputStep, error) {
 	values := make(map[string]string, len(cfg.Inputs))
-	reader := bufio.NewReader(in)
 	groupsByRepo := make(map[string][]string) // cache, keyed by repo filter ("" = all)
 	groupsFetched := make(map[string]bool)    // separate from the cache: a nil (failed) fetch is cached too
+	var steps []inputStep
 	for _, spec := range cfg.Inputs {
 		if !interactive {
 			if !spec.HasDefault {
-				return nil, fmt.Errorf("input %q has no default; rerun with -i to provide a value", spec.Name)
+				return nil, nil, fmt.Errorf("input %q has no default; rerun with -i to provide a value", spec.Name)
 			}
 			values[spec.Name] = spec.Default
 			continue
@@ -81,102 +73,55 @@ func resolveInputs(cfg *config.Config, interactive bool, currentGroup string, gr
 			}
 			groups = groupsByRepo[spec.Repo]
 			// Skip only on a confirmed-empty list (non-nil): a failed fetch (nil)
-			// falls through to a free-text prompt instead of silently defaulting.
+			// falls through to a free-text step instead of silently defaulting.
 			if groups != nil && len(groups) == 0 && spec.HasDefault {
 				values[spec.Name] = spec.Default
 				continue
 			}
 		}
-		val, err := promptInput(spec, currentGroup, groups, reader, out)
-		if err != nil {
-			return nil, err
+		step := inputStep{spec: spec}
+		if spec.Choices == "groups" && len(groups) > 0 {
+			// "@{current}" is appended as a pickable entry so the
+			// fallback-to-own-group sentinel is discoverable; it resolves at
+			// lookup time (effectiveGroup).
+			step.choices = append(append([]string(nil), groups...), currentGroupSentinel)
 		}
-		values[spec.Name] = val
+		steps = append(steps, step)
 	}
-	return values, nil
+	return values, steps, nil
 }
 
-// promptInput asks for one input on out, reading the answer from r, and returns
-// the resolved value. For `choices: groups` it prints a numbered list of active
-// groups plus a final "@{current}" entry (marking the default) and accepts a list
-// number or a typed value; an answer matching a list entry is taken literally
-// (so a numerically-named group stays selectable), and an out-of-range number
-// is taken as a literal value (so a not-yet-running branch named "3" can still
-// be entered). An empty answer uses the default when one is declared, else
-// re-prompts. EOF (Ctrl-D / end of input) aborts. A `choices: groups` spec
-// only reaches here with an empty groups list when it has no default or the
-// fetch failed (resolveInputs skips otherwise); it degrades to free text. The resolved
-// value — typed or picked — is rejected if it contains ${...}, so inputs stay
-// plain literals (no smuggled port/peer refs).
-func promptInput(spec config.InputSpec, currentGroup string, groups []string, r *bufio.Reader, out io.Writer) (string, error) {
-	label := spec.Prompt
-	if label == "" {
-		label = spec.Name
+// resolveInputs resolves every declared input, prompting for whatever
+// buildInputSteps didn't resolve outright via a single Bubble Tea wizard (see
+// inputwizard.go). currentGroup is the caller's own group, shown on the
+// "@{current}" pick-list entry. isTTY reports whether both stdin and stderr
+// are real terminals — required whenever there's at least one step to
+// prompt, since the wizard reads keys from stdin but renders to stderr, and
+// either being redirected breaks it (injectable so tests don't depend on the
+// process's actual streams).
+func resolveInputs(cfg *config.Config, interactive bool, currentGroup string, groupsFor func(repo string) []string, isTTY func() bool) (map[string]string, error) {
+	if len(cfg.Inputs) == 0 {
+		return nil, nil
 	}
-	pickList := spec.Choices == "groups" && len(groups) > 0
-	var choices []string
-	if pickList {
-		// "@{current}" is appended as a pickable entry so the fallback-to-own-group
-		// sentinel is discoverable; it resolves at lookup time (effectiveGroup).
-		choices = append(append([]string(nil), groups...), currentGroupSentinel)
-		fmt.Fprintf(out, "%s\n", label)
-		for i, g := range choices {
-			marker := ""
-			if g == spec.Default {
-				marker = " (default)"
-			}
-			// Annotated with the workspace's group; a service-level `group:`
-			// override resolves @{current} to its own group instead (effectiveGroup).
-			if g == currentGroupSentinel {
-				marker = fmt.Sprintf(" — this checkout's default group (%s)%s", currentGroup, marker)
-			}
-			fmt.Fprintf(out, "  %d) %s%s\n", i+1, g, marker)
-		}
+	values, steps, err := buildInputSteps(cfg, interactive, groupsFor)
+	if err != nil {
+		return nil, err
 	}
-	for {
-		switch {
-		case pickList && spec.HasDefault:
-			fmt.Fprintf(out, "Select a number, type a branch, or press enter for default [%s]: ", spec.Default)
-		case pickList:
-			fmt.Fprintf(out, "Select a number or type a branch: ")
-		case spec.HasDefault:
-			fmt.Fprintf(out, "%s [%s]: ", label, spec.Default)
-		default:
-			fmt.Fprintf(out, "%s: ", label)
-		}
+	if len(steps) == 0 {
+		return values, nil
+	}
 
-		line, err := r.ReadString('\n')
-		if err != nil && err != io.EOF {
-			return "", fmt.Errorf("read input %q: %w", spec.Name, err)
-		}
-		answer := strings.TrimSpace(line)
-		if answer == "" {
-			if err == io.EOF {
-				return "", fmt.Errorf("input %q cancelled (end of input)", spec.Name)
-			}
-			if spec.HasDefault {
-				return spec.Default, nil
-			}
-			fmt.Fprintln(out, "  a value is required")
-			continue
-		}
-
-		value := answer
-		// In a pick-list, a bare number selects by 1-based index. An exact
-		// entry-name match wins first (so a group literally named "456" stays
-		// selectable), and an out-of-range number is taken as a literal value
-		// (so a not-yet-running branch named "3" can still be entered).
-		if pickList && !slices.Contains(choices, answer) {
-			if n, convErr := strconv.Atoi(answer); convErr == nil && n >= 1 && n <= len(choices) {
-				value = choices[n-1]
-			}
-		}
-		// Guard the resolved value — covers both the typed and pick-list paths.
-		if strings.Contains(value, "${") {
-			return "", fmt.Errorf("input %q: value must be a plain literal (it cannot contain ${...} references)", spec.Name)
-		}
-		return value, nil
+	if !isTTY() {
+		return nil, fmt.Errorf("mdp run -i requires an interactive terminal (stdin or stderr is not a TTY)")
 	}
+	answers, err := runInputWizard(steps, currentGroup)
+	if err != nil {
+		return nil, err
+	}
+	for name, val := range answers {
+		values[name] = val
+	}
+	return values, nil
 }
 
 // applyInputs rewrites every ${inputs.X} reference in the loaded config to its

@@ -45,7 +45,7 @@ mdp run --service api,worker   # start a subset (also accepts repeated --service
 MDP_SERVICES=api,worker mdp run  # same, via env var (flag wins if both are set)
 ```
 
-Add `-i` to prompt for the [`inputs:`](./mdp-yaml-reference.md#inputs) declared in `mdp.yaml` — handy for choosing a peer's branch interactively instead of typing `--link repo=branch`. Without `-i`, inputs use their defaults (an input with no default errors). With `-i`, answers are read from stdin, so they can also be piped (`mdp run -i < answers.txt`).
+Add `-i` to prompt for the [`inputs:`](./mdp-yaml-reference.md#inputs) declared in `mdp.yaml` — handy for choosing a peer's branch interactively instead of typing `--link repo=branch`. Without `-i`, inputs use their defaults (an input with no default errors). With `-i`, each input is prompted through an interactive terminal UI (arrow keys to browse pick-lists, typing for free text) — this requires both stdin and stderr to be a real terminal (it reads keys from stdin and renders to stderr); it errors if either is piped or redirected.
 
 The `--service` selector restricts batch mode to a subset of the services declared in `mdp.yaml`. Names must match the service keys in the file; transitive `depends_on` entries are auto-included so dependency waits still work. Empty/unset = start everything (default).
 

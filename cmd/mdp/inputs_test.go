@@ -1,9 +1,6 @@
 package main
 
 import (
-	"bufio"
-	"bytes"
-	"io"
 	"net/http"
 	"net/http/httptest"
 	"os"
@@ -12,71 +9,210 @@ import (
 	"strings"
 	"testing"
 
+	tea "charm.land/bubbletea/v2"
+
 	"github.com/derekgould/multi-dev-proxy/internal/config"
 )
 
-func TestPromptInput(t *testing.T) {
+// key sends a single named key press ("up", "down", "enter", "esc", or
+// "ctrl+c") to the model and returns the updated model.
+func key(t *testing.T, m inputWizardModel, name string) inputWizardModel {
+	t.Helper()
+	var msg tea.KeyPressMsg
+	switch name {
+	case "up":
+		msg = tea.KeyPressMsg{Code: tea.KeyUp}
+	case "down":
+		msg = tea.KeyPressMsg{Code: tea.KeyDown}
+	case "enter":
+		msg = tea.KeyPressMsg{Code: tea.KeyEnter}
+	case "esc":
+		msg = tea.KeyPressMsg{Code: tea.KeyEscape}
+	case "ctrl+c":
+		msg = tea.KeyPressMsg{Code: 'c', Mod: tea.ModCtrl}
+	default:
+		t.Fatalf("key: unknown key name %q", name)
+	}
+	next, _ := m.Update(msg)
+	return next.(inputWizardModel)
+}
+
+// typeText sends one KeyPressMsg per rune, as a real terminal would.
+func typeText(t *testing.T, m inputWizardModel, s string) inputWizardModel {
+	t.Helper()
+	for _, r := range s {
+		next, _ := m.Update(tea.KeyPressMsg{Text: string(r), Code: r})
+		m = next.(inputWizardModel)
+	}
+	return m
+}
+
+func TestInputWizardFreeText(t *testing.T) {
 	groups := []string{"main", "derek/foo"}
 	tests := []struct {
 		name    string
 		spec    config.InputSpec
-		groups  []string
-		input   string
+		choices []string
+		do      func(t *testing.T, m inputWizardModel) inputWizardModel
 		want    string
 		wantErr string
 	}{
-		{"pick by number", config.InputSpec{Name: "b", Choices: "groups", Default: "main", HasDefault: true}, groups, "2\n", "derek/foo", ""},
-		{"pick @{current} by number", config.InputSpec{Name: "b", Choices: "groups", Default: "main", HasDefault: true}, groups, "3\n", "@{current}", ""},
-		{"typed @{current}", config.InputSpec{Name: "b", Choices: "groups", Default: "main", HasDefault: true}, groups, "@{current}\n", "@{current}", ""},
-		{"empty uses @{current} default", config.InputSpec{Name: "b", Choices: "groups", Default: "@{current}", HasDefault: true}, groups, "\n", "@{current}", ""},
-		{"empty uses default", config.InputSpec{Name: "b", Choices: "groups", Default: "main", HasDefault: true}, groups, "\n", "main", ""},
-		{"custom typed branch", config.InputSpec{Name: "b", Choices: "groups", Default: "main", HasDefault: true}, groups, "other/branch\n", "other/branch", ""},
-		{"out-of-range number is literal", config.InputSpec{Name: "b", Choices: "groups", Default: "main", HasDefault: true}, groups, "9\n", "9", ""},
-		{"numeric-named group selectable", config.InputSpec{Name: "b", Choices: "groups", Default: "main", HasDefault: true}, []string{"main", "456"}, "456\n", "456", ""},
-		{"picked group with ${} rejected", config.InputSpec{Name: "b", Choices: "groups", Default: "main", HasDefault: true}, []string{"main", "dev${x.port}"}, "2\n", "", "plain literal"},
-		{"free text", config.InputSpec{Name: "r", Default: "us", HasDefault: true}, nil, "eu\n", "eu", ""},
-		{"free text empty uses default", config.InputSpec{Name: "r", Default: "us", HasDefault: true}, nil, "\n", "us", ""},
-		{"no active groups falls to free text", config.InputSpec{Name: "b", Choices: "groups", Default: "main", HasDefault: true}, nil, "1\n", "1", ""},
-		{"EOF aborts", config.InputSpec{Name: "b", Default: "main", HasDefault: true}, nil, "", "", "cancelled"},
-		{"re-prompts then accepts value when no default", config.InputSpec{Name: "b"}, nil, "\nfeature\n", "feature", ""},
-		{"value with ${} rejected", config.InputSpec{Name: "b", Default: "main", HasDefault: true}, nil, "${web.port}\n", "", "plain literal"},
+		{"pick by arrow", config.InputSpec{Name: "b", Choices: "groups", Default: "main", HasDefault: true}, groups,
+			func(t *testing.T, m inputWizardModel) inputWizardModel { return key(t, m, "down") }, "derek/foo", ""},
+		{"pick @{current} by arrow", config.InputSpec{Name: "b", Choices: "groups", Default: "main", HasDefault: true}, append(append([]string(nil), groups...), currentGroupSentinel),
+			func(t *testing.T, m inputWizardModel) inputWizardModel { return key(t, key(t, m, "down"), "down") }, "@{current}", ""},
+		{"typed @{current}", config.InputSpec{Name: "b", Choices: "groups", Default: "main", HasDefault: true}, groups,
+			func(t *testing.T, m inputWizardModel) inputWizardModel { return typeText(t, m, "@{current}") }, "@{current}", ""},
+		{"empty uses @{current} default", config.InputSpec{Name: "b", Choices: "groups", Default: "@{current}", HasDefault: true}, groups,
+			func(t *testing.T, m inputWizardModel) inputWizardModel { return m }, "@{current}", ""},
+		{"empty uses default", config.InputSpec{Name: "b", Choices: "groups", Default: "main", HasDefault: true}, groups,
+			func(t *testing.T, m inputWizardModel) inputWizardModel { return m }, "main", ""},
+		{"custom typed branch", config.InputSpec{Name: "b", Choices: "groups", Default: "main", HasDefault: true}, groups,
+			func(t *testing.T, m inputWizardModel) inputWizardModel { return typeText(t, m, "other/branch") }, "other/branch", ""},
+		{"picked group with ${} rejected", config.InputSpec{Name: "b", Choices: "groups", Default: "main", HasDefault: true}, []string{"main", "dev${x.port}"},
+			func(t *testing.T, m inputWizardModel) inputWizardModel { return key(t, m, "down") }, "", "plain literal"},
+		{"free text", config.InputSpec{Name: "r", Default: "us", HasDefault: true}, nil,
+			func(t *testing.T, m inputWizardModel) inputWizardModel { return typeText(t, m, "eu") }, "eu", ""},
+		{"free text empty uses default", config.InputSpec{Name: "r", Default: "us", HasDefault: true}, nil,
+			func(t *testing.T, m inputWizardModel) inputWizardModel { return m }, "us", ""},
+		{"value with ${} rejected", config.InputSpec{Name: "b", Default: "main", HasDefault: true}, nil,
+			func(t *testing.T, m inputWizardModel) inputWizardModel { return typeText(t, m, "${web.port}") }, "", "plain literal"},
 	}
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
-			r := bufio.NewReader(strings.NewReader(tt.input))
-			var out bytes.Buffer
-			got, err := promptInput(tt.spec, "feature-x", tt.groups, r, &out)
+			m := newInputWizardModel([]inputStep{{spec: tt.spec, choices: tt.choices}}, "feature-x")
+			m = tt.do(t, m)
+			next, cmd := m.Update(tea.KeyPressMsg{Code: tea.KeyEnter})
+			m = next.(inputWizardModel)
 			if tt.wantErr != "" {
-				if err == nil || !strings.Contains(err.Error(), tt.wantErr) {
-					t.Fatalf("want error containing %q, got %v", tt.wantErr, err)
+				if m.errMsg == "" || !strings.Contains(m.errMsg, tt.wantErr) {
+					t.Fatalf("want error containing %q, got %q", tt.wantErr, m.errMsg)
 				}
 				return
 			}
-			if err != nil {
-				t.Fatalf("unexpected error: %v", err)
+			if cmd == nil {
+				t.Fatalf("expected tea.Quit after the only step, got nil cmd")
 			}
-			if got != tt.want {
+			if got := m.values[tt.spec.Name]; got != tt.want {
 				t.Fatalf("got %q, want %q", got, tt.want)
 			}
 		})
 	}
 }
 
-// The pick-list ends with an "@{current}" entry annotated with the caller's
-// actual group, so the fallback-to-own-group sentinel is discoverable.
-func TestPromptInputPickListShowsCurrent(t *testing.T) {
+// The default is shown as a placeholder, not pre-filled text, so typing a
+// custom value replaces it instead of appending to it (e.g. "main" + typing
+// "feature/foo" must not produce "mainfeature/foo").
+func TestInputWizardTypingReplacesDefault(t *testing.T) {
+	spec := config.InputSpec{Name: "b", Default: "main", HasDefault: true}
+	m := newInputWizardModel([]inputStep{{spec: spec}}, "feature-x")
+	if got := m.input.Value(); got != "" {
+		t.Fatalf("initial value = %q, want empty (default shown as placeholder)", got)
+	}
+	m = typeText(t, m, "feature/foo")
+	next, cmd := m.Update(tea.KeyPressMsg{Code: tea.KeyEnter})
+	m = next.(inputWizardModel)
+	if cmd == nil {
+		t.Fatalf("expected tea.Quit after the only step")
+	}
+	if got := m.values["b"]; got != "feature/foo" {
+		t.Fatalf("got %q, want feature/foo", got)
+	}
+}
+
+// An input with no default re-prompts (in place) on an empty answer instead
+// of erroring, and accepts a subsequent typed value.
+func TestInputWizardNoDefaultReprompts(t *testing.T) {
+	spec := config.InputSpec{Name: "b"}
+	m := newInputWizardModel([]inputStep{{spec: spec}}, "feature-x")
+	next, cmd := m.Update(tea.KeyPressMsg{Code: tea.KeyEnter})
+	m = next.(inputWizardModel)
+	if cmd != nil {
+		t.Fatalf("empty answer with no default must not advance/quit")
+	}
+	if m.errMsg == "" {
+		t.Fatalf("want a required-value error")
+	}
+	m = typeText(t, m, "feature")
+	next, cmd = m.Update(tea.KeyPressMsg{Code: tea.KeyEnter})
+	m = next.(inputWizardModel)
+	if cmd == nil {
+		t.Fatalf("expected tea.Quit after the only step")
+	}
+	if got := m.values["b"]; got != "feature" {
+		t.Fatalf("got %q, want feature", got)
+	}
+}
+
+// Esc/Ctrl-C aborts the whole wizard immediately, matching the old Ctrl-D
+// behavior — the caller (runInputWizard) turns this into an error.
+func TestInputWizardCancel(t *testing.T) {
+	msgs := map[string]tea.KeyPressMsg{
+		"esc":    {Code: tea.KeyEscape},
+		"ctrl+c": {Code: 'c', Mod: tea.ModCtrl},
+	}
+	for name, msg := range msgs {
+		t.Run(name, func(t *testing.T) {
+			spec := config.InputSpec{Name: "b", Default: "main", HasDefault: true}
+			m := newInputWizardModel([]inputStep{{spec: spec}}, "feature-x")
+			next, cmd := m.Update(msg)
+			m = next.(inputWizardModel)
+			if cmd == nil {
+				t.Fatalf("want tea.Quit on cancel")
+			}
+			if !m.cancelled {
+				t.Fatalf("want cancelled=true")
+			}
+		})
+	}
+}
+
+// Submitting one step advances to the next with its own default shown as a
+// placeholder and its own pick-list, and both answers land in the final
+// values map.
+func TestInputWizardMultipleSteps(t *testing.T) {
+	steps := []inputStep{
+		{spec: config.InputSpec{Name: "branch", Default: "main", HasDefault: true}, choices: []string{"main", "derek/foo", currentGroupSentinel}},
+		{spec: config.InputSpec{Name: "region", Default: "us", HasDefault: true}},
+	}
+	m := newInputWizardModel(steps, "feature-x")
+	if got := m.input.Placeholder; got != "main" {
+		t.Fatalf("step 0 placeholder = %q, want main", got)
+	}
+	m = key(t, m, "down") // -> derek/foo
+	next, cmd := m.Update(tea.KeyPressMsg{Code: tea.KeyEnter})
+	m = next.(inputWizardModel)
+	if cmd != nil {
+		t.Fatalf("submitting a non-final step must not quit")
+	}
+	if m.step != 1 {
+		t.Fatalf("step = %d, want 1", m.step)
+	}
+	if got := m.input.Placeholder; got != "us" {
+		t.Fatalf("step 1 placeholder = %q, want us", got)
+	}
+	next, cmd = m.Update(tea.KeyPressMsg{Code: tea.KeyEnter})
+	m = next.(inputWizardModel)
+	if cmd == nil {
+		t.Fatalf("submitting the final step must quit")
+	}
+	if m.values["branch"] != "derek/foo" || m.values["region"] != "us" {
+		t.Fatalf("got %v", m.values)
+	}
+}
+
+// The pick-list's initial cursor lands on the default's entry, so the
+// "@{current}" sentinel is reachable and its marker names the caller's group.
+func TestInputWizardViewShowsCurrent(t *testing.T) {
 	spec := config.InputSpec{Name: "b", Choices: "groups", Default: "@{current}", HasDefault: true}
-	r := bufio.NewReader(strings.NewReader("\n"))
-	var out bytes.Buffer
-	got, err := promptInput(spec, "feature-x", []string{"main", "derek/foo"}, r, &out)
-	if err != nil {
-		t.Fatalf("unexpected error: %v", err)
+	choices := []string{"main", "derek/foo", currentGroupSentinel}
+	m := newInputWizardModel([]inputStep{{spec: spec, choices: choices}}, "feature-x")
+	if m.cursor != 2 {
+		t.Fatalf("cursor = %d, want 2 (the @{current} entry)", m.cursor)
 	}
-	if got != "@{current}" {
-		t.Fatalf("got %q, want @{current}", got)
-	}
-	if !strings.Contains(out.String(), "3) @{current} — this checkout's default group (feature-x) (default)") {
-		t.Fatalf("pick-list missing @{current} entry, got:\n%s", out.String())
+	view := m.View().Content
+	if !strings.Contains(view, "@{current} — this checkout's default group (feature-x) (default)") {
+		t.Fatalf("view missing @{current} entry, got:\n%s", view)
 	}
 }
 
@@ -85,7 +221,7 @@ func TestResolveInputsDefaults(t *testing.T) {
 		{Name: "a", Default: "x", HasDefault: true},
 		{Name: "b", Default: "y", HasDefault: true},
 	}}
-	vals, err := resolveInputs(cfg, false, "feature-x", nil, strings.NewReader(""), io.Discard)
+	vals, err := resolveInputs(cfg, false, "feature-x", nil, nil)
 	if err != nil {
 		t.Fatalf("unexpected error: %v", err)
 	}
@@ -96,7 +232,7 @@ func TestResolveInputsDefaults(t *testing.T) {
 
 func TestResolveInputsMissingDefault(t *testing.T) {
 	cfg := &config.Config{Inputs: config.Inputs{{Name: "a"}}}
-	_, err := resolveInputs(cfg, false, "feature-x", nil, strings.NewReader(""), io.Discard)
+	_, err := resolveInputs(cfg, false, "feature-x", nil, nil)
 	if err == nil || !strings.Contains(err.Error(), "has no default") {
 		t.Fatalf("want missing-default error, got %v", err)
 	}
@@ -106,7 +242,7 @@ func TestResolveInputsMissingDefault(t *testing.T) {
 // default, so the non-interactive path resolves it to "" without erroring.
 func TestResolveInputsEmptyDefault(t *testing.T) {
 	cfg := &config.Config{Inputs: config.Inputs{{Name: "a", Default: "", HasDefault: true}}}
-	vals, err := resolveInputs(cfg, false, "feature-x", nil, strings.NewReader(""), io.Discard)
+	vals, err := resolveInputs(cfg, false, "feature-x", nil, nil)
 	if err != nil {
 		t.Fatalf("unexpected error: %v", err)
 	}
@@ -122,7 +258,7 @@ func TestResolveInputsPromptDisabled(t *testing.T) {
 	vals, err := resolveInputs(cfg, false, "feature-x", func(string) []string {
 		t.Fatal("groups fetcher must not be called when prompting is disabled")
 		return nil
-	}, strings.NewReader("ignored\n"), io.Discard)
+	}, nil)
 	if err != nil {
 		t.Fatalf("unexpected error: %v", err)
 	}
@@ -131,14 +267,42 @@ func TestResolveInputsPromptDisabled(t *testing.T) {
 	}
 }
 
-// When prompting, a `choices: groups` input fetches the active groups once and
-// accepts a numbered selection; a plain input reads free text; and an empty
-// answer falls back to the declared default.
-func TestResolveInputsPrompting(t *testing.T) {
+// `mdp run -i` requires an interactive terminal — the wizard can't run over a
+// pipe — but only when there's actually something left to prompt for.
+func TestResolveInputsRequiresTTY(t *testing.T) {
+	cfg := &config.Config{Inputs: config.Inputs{{Name: "a", Default: "main", HasDefault: true}}}
+	_, err := resolveInputs(cfg, true, "feature-x", nil, func() bool { return false })
+	if err == nil || !strings.Contains(err.Error(), "interactive terminal") {
+		t.Fatalf("want TTY-required error, got %v", err)
+	}
+}
+
+// If every input skips to its default, the wizard never runs, so isTTY must
+// not even be called.
+func TestResolveInputsSkipAllNoTTYNeeded(t *testing.T) {
+	cfg := &config.Config{Inputs: config.Inputs{
+		{Name: "branch", Default: "@{current}", HasDefault: true, Choices: "groups"},
+	}}
+	groupsFor := func(string) []string { return []string{} }
+	vals, err := resolveInputs(cfg, true, "feature-x", groupsFor, func() bool {
+		t.Fatal("isTTY must not be called when there's nothing to prompt")
+		return false
+	})
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if vals["branch"] != "@{current}" {
+		t.Fatalf("got %v", vals)
+	}
+}
+
+// When prompting, a `choices: groups` input becomes a step with a pick-list
+// (groups + the "@{current}" sentinel); a plain input always becomes a
+// free-text step (it has no skip condition).
+func TestBuildInputStepsPrompting(t *testing.T) {
 	cfg := &config.Config{Inputs: config.Inputs{
 		{Name: "branch", Default: "main", HasDefault: true, Choices: "groups"},
 		{Name: "region", Default: "us", HasDefault: true},
-		{Name: "tier", Default: "free", HasDefault: true},
 	}}
 	fetches := 0
 	groupsFor := func(repo string) []string {
@@ -148,13 +312,21 @@ func TestResolveInputsPrompting(t *testing.T) {
 		}
 		return []string{"main", "derek/foo"}
 	}
-	// branch: pick #2; region: typed; tier: empty => default.
-	vals, err := resolveInputs(cfg, true, "feature-x", groupsFor, strings.NewReader("2\neu\n\n"), io.Discard)
+	values, steps, err := buildInputSteps(cfg, true, groupsFor)
 	if err != nil {
 		t.Fatalf("unexpected error: %v", err)
 	}
-	if vals["branch"] != "derek/foo" || vals["region"] != "eu" || vals["tier"] != "free" {
-		t.Fatalf("got %v", vals)
+	if len(values) != 0 {
+		t.Fatalf("values = %v, want empty (nothing skipped)", values)
+	}
+	if len(steps) != 2 {
+		t.Fatalf("steps = %v, want 2", steps)
+	}
+	if steps[0].spec.Name != "branch" || !reflect.DeepEqual(steps[0].choices, []string{"main", "derek/foo", currentGroupSentinel}) {
+		t.Fatalf("branch step = %+v", steps[0])
+	}
+	if steps[1].spec.Name != "region" || steps[1].choices != nil {
+		t.Fatalf("region step = %+v", steps[1])
 	}
 	if fetches != 1 {
 		t.Fatalf("groups fetched %d times, want 1", fetches)
@@ -162,63 +334,61 @@ func TestResolveInputsPrompting(t *testing.T) {
 }
 
 // A `choices: groups` input with no active groups and a declared default is
-// skipped silently — no prompt output, no stdin consumed — so `mdp run -i`
-// only prompts when there is something to select. An input with no default
-// still prompts (free text), since a value is required.
-func TestResolveInputsSkipsGroupChoiceWithoutGroups(t *testing.T) {
+// skipped silently — resolved straight into values, never becoming a step —
+// so `mdp run -i` only prompts when there is something to select. An input
+// with no default still becomes a (free-text) step, since a value is required.
+func TestBuildInputStepsSkipsGroupChoiceWithoutGroups(t *testing.T) {
 	cfg := &config.Config{Inputs: config.Inputs{
 		{Name: "branch", Default: "@{current}", HasDefault: true, Choices: "groups"},
 		{Name: "region", Default: "us", HasDefault: true},
 	}}
 	groupsFor := func(string) []string { return []string{} }
-	var out bytes.Buffer
-	// "eu" must be read by region, not swallowed by the skipped branch input.
-	vals, err := resolveInputs(cfg, true, "feature-x", groupsFor, strings.NewReader("eu\n"), &out)
+	values, steps, err := buildInputSteps(cfg, true, groupsFor)
 	if err != nil {
 		t.Fatalf("unexpected error: %v", err)
 	}
-	if vals["branch"] != "@{current}" || vals["region"] != "eu" {
-		t.Fatalf("got %v", vals)
+	if values["branch"] != "@{current}" {
+		t.Fatalf("branch should be skipped straight to its default, got %v", values)
 	}
-	if strings.Contains(out.String(), "branch") {
-		t.Fatalf("skipped input must not prompt, got:\n%s", out.String())
+	if len(steps) != 1 || steps[0].spec.Name != "region" {
+		t.Fatalf("steps = %+v, want just region", steps)
 	}
 
-	// No default: still prompts free-text.
+	// No default: still becomes a free-text step, not skipped.
 	cfg = &config.Config{Inputs: config.Inputs{{Name: "branch", Choices: "groups"}}}
-	vals, err = resolveInputs(cfg, true, "feature-x", groupsFor, strings.NewReader("other/branch\n"), io.Discard)
+	values, steps, err = buildInputSteps(cfg, true, groupsFor)
 	if err != nil {
 		t.Fatalf("unexpected error: %v", err)
 	}
-	if vals["branch"] != "other/branch" {
-		t.Fatalf("got %v", vals)
+	if len(values) != 0 || len(steps) != 1 || steps[0].choices != nil {
+		t.Fatalf("values=%v steps=%+v, want one free-text step", values, steps)
 	}
 }
 
 // A failed groups fetch (nil, e.g. orchestrator unreachable) must not be
 // mistaken for "no groups exist": instead of silently taking the default, the
-// input degrades to a free-text prompt so -i still lets the user choose.
-func TestResolveInputsFetchErrorPromptsFreeText(t *testing.T) {
+// input becomes a free-text step (no pick-list) so -i still lets the user
+// choose.
+func TestBuildInputStepsFetchErrorDegradesToFreeText(t *testing.T) {
 	cfg := &config.Config{Inputs: config.Inputs{
 		{Name: "branch", Default: "main", HasDefault: true, Choices: "groups"},
 	}}
 	groupsFor := func(string) []string { return nil }
-	var out bytes.Buffer
-	vals, err := resolveInputs(cfg, true, "feature-x", groupsFor, strings.NewReader("derek/foo\n"), &out)
+	values, steps, err := buildInputSteps(cfg, true, groupsFor)
 	if err != nil {
 		t.Fatalf("unexpected error: %v", err)
 	}
-	if vals["branch"] != "derek/foo" {
-		t.Fatalf("got %v, want typed value (not skipped to default)", vals)
+	if len(values) != 0 {
+		t.Fatalf("branch must not be skipped to its default on a failed fetch, got %v", values)
 	}
-	if out.Len() == 0 {
-		t.Fatal("expected a prompt to be written")
+	if len(steps) != 1 || steps[0].choices != nil {
+		t.Fatalf("steps = %+v, want one free-text step (no pick-list)", steps)
 	}
 }
 
 // The groups fetch is cached per repo filter: same repo => one fetch,
 // different repos => separate fetches with the declared repo passed through.
-func TestResolveInputsGroupsPerRepo(t *testing.T) {
+func TestBuildInputStepsGroupsPerRepo(t *testing.T) {
 	cfg := &config.Config{Inputs: config.Inputs{
 		{Name: "a", Default: "main", HasDefault: true, Choices: "groups", Repo: "api"},
 		{Name: "b", Default: "main", HasDefault: true, Choices: "groups", Repo: "api"},
@@ -232,12 +402,15 @@ func TestResolveInputsGroupsPerRepo(t *testing.T) {
 		}
 		return []string{"main", "derek/foo"}
 	}
-	vals, err := resolveInputs(cfg, true, "feature-x", groupsFor, strings.NewReader("2\n\n"), io.Discard)
+	values, steps, err := buildInputSteps(cfg, true, groupsFor)
 	if err != nil {
 		t.Fatalf("unexpected error: %v", err)
 	}
-	if vals["a"] != "derek/foo" || vals["b"] != "main" || vals["c"] != "main" {
-		t.Fatalf("got %v", vals)
+	if values["c"] != "main" {
+		t.Fatalf("c should be skipped to its default, got %v", values)
+	}
+	if len(steps) != 2 || steps[0].spec.Name != "a" || steps[1].spec.Name != "b" {
+		t.Fatalf("steps = %+v, want a and b", steps)
 	}
 	if !reflect.DeepEqual(fetches, map[string]int{"api": 1, "auth": 1}) {
 		t.Fatalf("fetches = %v, want one per repo", fetches)
