@@ -21,6 +21,18 @@ import (
 	"github.com/derekgould/multi-dev-proxy/internal/envexpand"
 )
 
+// waitDoneOrFail waits for a supervise/launch goroutine to exit, reporting
+// (not fataling, so the rest of cleanup still runs and kills any leaked
+// process) if it's stuck past ctx cancel.
+func waitDoneOrFail(t *testing.T, done <-chan struct{}) {
+	t.Helper()
+	select {
+	case <-done:
+	case <-time.After(5 * time.Second):
+		t.Error("goroutine did not exit within 5s of cancellation")
+	}
+}
+
 func TestPrefixWriter(t *testing.T) {
 	r, w, err := os.Pipe()
 	if err != nil {
@@ -807,7 +819,7 @@ func TestLaunchBatchServicePostStartDoesNotBlockReady(t *testing.T) {
 	t.Cleanup(func() {
 		cancel()
 		bt.killAll()
-		<-done
+		waitDoneOrFail(t, done)
 	})
 
 	select {
@@ -934,8 +946,8 @@ func TestSuperviseProcessPostStartOnRestart(t *testing.T) {
 			}()
 			t.Cleanup(func() {
 				cancel()
-				<-done
 				bt.killAll()
+				waitDoneOrFail(t, done)
 				bt.wg.Wait()
 			})
 
@@ -1209,8 +1221,8 @@ func TestSuperviseProcessRestartsOnPeerChange(t *testing.T) {
 	}()
 	t.Cleanup(func() {
 		cancel()
-		<-done
 		bt.killAll()
+		waitDoneOrFail(t, done)
 		bt.wg.Wait()
 	})
 

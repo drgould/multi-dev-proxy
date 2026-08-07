@@ -20,6 +20,7 @@ import (
 	"net/url"
 	"os"
 	"path/filepath"
+	"sync"
 	"testing"
 	"time"
 
@@ -81,15 +82,33 @@ func TestRegisterTLSEndToEnd(t *testing.T) {
 	}
 }
 
+var (
+	freeTCPPortMu   sync.Mutex
+	freeTCPPortSeen = map[int]bool{}
+)
+
+// freeTCPPort returns a port that was free when checked. It tracks ports it
+// has already handed out so that back-to-back calls in the same test (or
+// package) never return the same port before either caller has rebound it —
+// the OS commonly reissues the most-recently-closed ephemeral port.
 func freeTCPPort(t *testing.T) int {
 	t.Helper()
-	ln, err := net.Listen("tcp", "127.0.0.1:0")
-	if err != nil {
-		t.Fatal(err)
+	freeTCPPortMu.Lock()
+	defer freeTCPPortMu.Unlock()
+	for i := 0; i < 20; i++ {
+		ln, err := net.Listen("tcp", "127.0.0.1:0")
+		if err != nil {
+			t.Fatal(err)
+		}
+		port := ln.Addr().(*net.TCPAddr).Port
+		_ = ln.Close()
+		if !freeTCPPortSeen[port] {
+			freeTCPPortSeen[port] = true
+			return port
+		}
 	}
-	port := ln.Addr().(*net.TCPAddr).Port
-	_ = ln.Close()
-	return port
+	t.Fatal("freeTCPPort: could not allocate a unique port")
+	return 0
 }
 
 // waitPortFree polls until a TCP bind to the given port succeeds, or fails

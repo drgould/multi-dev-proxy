@@ -327,7 +327,7 @@ func TestSmartListenerIdleConnDoesNotBlockOthers(t *testing.T) {
 	// Deadline must be cleared: bytes arriving after the peek-timeout window
 	// still read fine on the accepted connection.
 	go func() {
-		time.Sleep(300 * time.Millisecond) // > peekTimeout
+		time.Sleep(3 * sl.peekTimeout) // comfortably clears the peek deadline
 		live.Write([]byte("ET"))
 	}()
 	buf := make([]byte, 3)

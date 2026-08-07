@@ -409,7 +409,9 @@ describe('widget', () => {
     });
 
     await page.goto(`${FRONTEND_BASE}/`, { waitUntil: 'load' });
-    await sleep(2000);
+    await page.waitForFunction(() => document.getElementById('__mdp-widget-host') !== null, {
+      timeout: 5000,
+    });
     const widgetExists = await page.evaluate(
       () => document.getElementById('__mdp-widget-host') !== null,
     );
@@ -439,8 +441,9 @@ describe('server routing', () => {
       });
 
       let resp = await page.goto(`${FRONTEND_BASE}/`, { waitUntil: 'load' });
-      for (let attempt = 0; !resp?.ok() && attempt < 3; attempt++) {
-        await sleep(2000);
+      const deadline = Date.now() + 15_000;
+      while (!resp?.ok() && Date.now() < deadline) {
+        await sleep(500);
         resp = await page.goto(`${FRONTEND_BASE}/`, { waitUntil: 'load' });
       }
       expect(resp?.ok(), `server ${name} returned ${resp?.status()}`).toBe(true);
@@ -462,11 +465,11 @@ describe('server routing', () => {
       });
 
       await page.goto(`${FRONTEND_BASE}/`, { waitUntil: 'load' });
-      await sleep(2000);
-      const injected = await page.evaluate(() => {
-        return document.querySelector('script[src="/__mdp/widget.js"]') !== null
-          || document.getElementById('__mdp-widget-host') !== null;
-      });
+      const isInjected = () =>
+        document.querySelector('script[src="/__mdp/widget.js"]') !== null
+        || document.getElementById('__mdp-widget-host') !== null;
+      await page.waitForFunction(isInjected, { timeout: 5000 });
+      const injected = await page.evaluate(isInjected);
       expect(injected, `widget not injected on ${name}`).toBe(true);
     }
   });
