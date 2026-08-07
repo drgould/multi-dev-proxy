@@ -1,5 +1,20 @@
 # Changelog
 
+## [1.13.0](https://github.com/drgould/multi-dev-proxy/compare/v1.12.1...v1.13.0) (2026-08-07)
+
+
+### Features
+
+* add detachable mdp run via --detach/--stop ([#75](https://github.com/drgould/multi-dev-proxy/issues/75)) ([32765a6](https://github.com/drgould/multi-dev-proxy/commit/32765a69b6d856e368878c4b32881b1a33877904))
+* add opt-in TUI picker for selecting mdp run services ([#78](https://github.com/drgould/multi-dev-proxy/issues/78)) ([cf277b6](https://github.com/drgould/multi-dev-proxy/commit/cf277b6795a343fcb26b1ca84d3058464279c0b1))
+* migrate mdp run -i input prompts to Bubble Tea ([#79](https://github.com/drgould/multi-dev-proxy/issues/79)) ([89ed3a9](https://github.com/drgould/multi-dev-proxy/commit/89ed3a9024c30019f68367e4ef92121dc2e48b99))
+* revamp TUI on Bubble Tea v2 (logs, filtering, service stop) ([#77](https://github.com/drgould/multi-dev-proxy/issues/77)) ([2d1b4e3](https://github.com/drgould/multi-dev-proxy/commit/2d1b4e3e43e87e780a49742a9c791670f97352d8))
+
+
+### Bug Fixes
+
+* eliminate flaky-test sources across Go and e2e suites ([#80](https://github.com/drgould/multi-dev-proxy/issues/80)) ([8c994ec](https://github.com/drgould/multi-dev-proxy/commit/8c994ec98fb6d1763363d223c7fa5afec659609b))
+
 ## [1.12.1](https://github.com/drgould/multi-dev-proxy/compare/v1.12.0...v1.12.1) (2026-06-15)
 
 
