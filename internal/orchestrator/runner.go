@@ -22,13 +22,15 @@ import (
 )
 
 // readyTimeout and readyPoll are package-level vars (not consts) so tests can
-// shorten them.
+// shorten them. Tests swap these without locking, so no test in this package
+// may call t.Parallel() — doing so would race on these assignments.
 var (
 	readyTimeout = 60 * time.Second
 	readyPoll    = 200 * time.Millisecond
 )
 
-// tcpCheck and buildHealthProbe are overridable in tests.
+// tcpCheck and buildHealthProbe are overridable in tests. Same t.Parallel()
+// restriction as readyTimeout/readyPoll above applies here.
 var (
 	tcpCheck         = registry.TCPCheck
 	buildHealthProbe = health.Build

@@ -17,7 +17,8 @@ import (
 // home directory can't be determined (e.g. $HOME unset in some containers/CI).
 // Returning "" rather than a relative path keeps Save from leaking a `.mdp/`
 // directory into the current working directory. Declared as a var so tests can
-// redirect it without touching $HOME.
+// redirect it without touching $HOME. Tests swap it without locking, so no
+// test in this package may call t.Parallel() — doing so would race on it.
 var dir = func() string {
 	home, err := os.UserHomeDir()
 	if err != nil || home == "" {

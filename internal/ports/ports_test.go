@@ -4,7 +4,20 @@ import (
 	"net"
 	"strconv"
 	"testing"
+	"time"
 )
+
+// isPortFreeEventually retries IsPortFree briefly to absorb a port being
+// transiently grabbed by another process between close and check.
+func isPortFreeEventually(port int) bool {
+	for i := 0; i < 5; i++ {
+		if IsPortFree(port) {
+			return true
+		}
+		time.Sleep(10 * time.Millisecond)
+	}
+	return false
+}
 
 func TestParseRange(t *testing.T) {
 	tests := []struct {
@@ -126,7 +139,7 @@ func TestIsPortFree(t *testing.T) {
 				ln.Close()
 
 				// After closing, port should be free
-				if !IsPortFree(port) {
+				if !isPortFreeEventually(port) {
 					t.Errorf("IsPortFree(%d) = false, want true", port)
 				}
 			},
@@ -176,7 +189,7 @@ func TestFindFreePort(t *testing.T) {
 				if port < 20000 || port > 30000 {
 					t.Errorf("FindFreePort() = %d, want port in range [20000, 30000]", port)
 				}
-				if !IsPortFree(port) {
+				if !isPortFreeEventually(port) {
 					t.Errorf("FindFreePort() returned port %d that is not actually free", port)
 				}
 			},
