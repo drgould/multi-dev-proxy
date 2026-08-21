@@ -104,13 +104,15 @@ mdp logs -n 200
 mdp logs -f
 ```
 
-## `mdp --stop`
+## `mdp stop`
 
 Stop the background orchestrator.
 
 ```sh
-mdp --stop
+mdp stop
 ```
+
+`mdp --stop` still works but is deprecated in favor of `mdp stop`.
 
 ## Configuration
 
@@ -131,7 +133,7 @@ mdp --stop
 | `--control-port`   | `13100`   | Control API port                            |
 | `--dashboard-port` | `6370`    | Dashboard web UI port                       |
 | `-d, --daemon`     |           | Run as background daemon (no TUI)           |
-| `--stop`           |           | Stop the background daemon                  |
+| `--stop`           |           | Stop the background daemon (deprecated, use `mdp stop`) |
 | `--config`         |           | Path to mdp.yaml (auto-detected if not set) |
 | `--host`           | `0.0.0.0` | Host for proxy listeners                    |
 

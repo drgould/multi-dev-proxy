@@ -47,6 +47,7 @@ func init() {
 	rootCmd.Flags().String("config", "", "Path to mdp.yaml (auto-detected if not set)")
 	rootCmd.Flags().String("host", "0.0.0.0", "Host for proxy listeners")
 	rootCmd.Flags().Int("dashboard-port", 6370, "Dashboard web UI port")
+	rootCmd.Flags().MarkDeprecated("stop", "use `mdp stop` instead")
 }
 
 func runOrchestrator(cmd *cobra.Command, args []string) error {
