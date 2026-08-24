@@ -1,5 +1,13 @@
 # Changelog
 
+## [1.14.0](https://github.com/drgould/multi-dev-proxy/compare/v1.13.0...v1.14.0) (2026-08-24)
+
+
+### Features
+
+* add mdp stop subcommand, deprecate --stop flag ([#81](https://github.com/drgould/multi-dev-proxy/issues/81)) ([aefe42d](https://github.com/drgould/multi-dev-proxy/commit/aefe42d6d2a4499e025ef4f4389abe80239a8ed6))
+* isolate dashboard tabs with per-tab pin routing, drop Multiview ([#83](https://github.com/drgould/multi-dev-proxy/issues/83)) ([8e08b43](https://github.com/drgould/multi-dev-proxy/commit/8e08b43c502476e5dc9a40cf04ddef87d8d24ac8))
+
 ## [1.13.0](https://github.com/drgould/multi-dev-proxy/compare/v1.12.1...v1.13.0) (2026-08-07)
 
 
