@@ -48,10 +48,11 @@ See [`mdp switch`](./cli.md#mdp-switch) for CLI details.
 Each proxy has its own cookie (e.g., `__mdp_upstream_3000`) to avoid collisions when multiple proxies run on localhost. The resolution order for each request is:
 
 1. **Auto-route** — if only one server is registered, route to it (skips every other step)
-2. **Query parameter** — `?__mdp_upstream=<name>` wins over cookie. Useful for per-iframe or per-tab routing where a shared cookie would collide
-3. **Cookie** — if a valid cookie is present, route to that server
-4. **Default upstream** — a server-side default set via `mdp switch` or the TUI
-5. **Redirect** — redirect to the switch page at `/__mdp/switch`
+2. **Query parameter** — `?__mdp_upstream=<name>` wins over everything below. Used for a tab's initial pinned navigation and a brief self-correcting reload bounce; the injected widget script strips it from the visible URL once the pin is confirmed, so it's not a persistent part of the address bar
+3. **Pin header** (`X-Mdp-Pin`) — set by the injected routing Service Worker on same-origin sub-resource requests (fetch/XHR/module imports) within an already-pinned tab, so multiple tabs on one shared proxy port stay isolated without a persistent query param or a shared cookie collision
+4. **Cookie** — if a valid cookie is present, route to that server
+5. **Default upstream** — a server-side default set via `mdp switch` or the TUI
+6. **Redirect** — redirect to the switch page at `/__mdp/switch`
 
 The default upstream is especially useful for backend proxies where cookies aren't available (dev-server proxies, curl, API clients).
 

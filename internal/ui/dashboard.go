@@ -71,7 +71,6 @@ func renderDashboard(controlPort int) string {
     .tab:hover { color: var(--text); background: var(--tab-hover); }
     .tab.active { color: var(--heading); border-bottom-color: var(--active); }
     .content { padding: 1.5rem; max-width: 900px; margin: 0 auto; }
-    .content.multiview { max-width: 100%%; padding: 0.75rem; }
     .empty { text-align: center; padding: 3rem 1rem; color: var(--muted); font-size: 0.9rem; }
     .section { margin-bottom: 1.5rem; }
     .section-header {
@@ -105,67 +104,6 @@ func renderDashboard(controlPort int) string {
     .status-stopped { background: #52525222; color: var(--muted); }
     .status-failed { background: #ef444422; color: #ef4444; }
     .status-starting { background: #eab30822; color: #eab308; }
-    .mv-toolbar {
-      display: flex; flex-wrap: wrap; gap: 0.5rem; padding: 0.75rem 0;
-      border-bottom: 1px solid var(--border); margin-bottom: 0.75rem;
-      align-items: center;
-    }
-    .mv-label { font-size: 0.75rem; color: var(--muted); text-transform: uppercase; letter-spacing: 0.05em; margin-right: 0.25rem; }
-    .mv-chip {
-      display: flex; align-items: center; gap: 0.35rem;
-      padding: 0.3rem 0.65rem; border-radius: 5px; font-size: 0.8rem; cursor: pointer;
-      border: 1px solid var(--btn-border); background: var(--btn-bg); color: var(--btn-text);
-      font-family: inherit; transition: background 0.15s, border-color 0.15s;
-    }
-    .mv-chip:hover { background: var(--btn-hover); }
-    .mv-chip.selected { border-color: var(--active); background: #22c55e18; }
-    .mv-chip .mv-check { color: var(--active); font-size: 0.7rem; }
-    .mv-chip .mv-check.off { visibility: hidden; }
-    .mv-spacer { flex: 1; }
-    .mv-cols {
-      display: flex; align-items: center; gap: 0.35rem;
-    }
-    .mv-cols-label { font-size: 0.7rem; color: var(--muted); }
-    .mv-cols-btn {
-      width: 1.5rem; height: 1.5rem; border-radius: 4px; font-size: 0.75rem; cursor: pointer;
-      border: 1px solid var(--btn-border); background: var(--btn-bg); color: var(--btn-text);
-      font-family: inherit; display: flex; align-items: center; justify-content: center;
-    }
-    .mv-cols-btn:hover { background: var(--btn-hover); }
-    .mv-cols-btn.active { border-color: var(--active); background: #22c55e18; }
-    .iframe-grid {
-      display: grid; gap: 0.75rem; min-height: calc(100vh - 10rem);
-    }
-    .iframe-cell {
-      border: 1px solid var(--border); border-radius: 6px; overflow: hidden;
-      display: flex; flex-direction: column; min-height: 400px;
-    }
-    .iframe-header {
-      padding: 0.4rem 0.75rem; font-size: 0.8rem; font-weight: 500;
-      background: var(--tab-active-bg); border-bottom: 1px solid var(--border);
-      display: flex; align-items: center; justify-content: space-between; gap: 0.5rem;
-    }
-    .iframe-header-left { display: flex; align-items: center; gap: 0.5rem; }
-    .iframe-header a { color: #3b82f6; text-decoration: none; font-size: 0.75rem; }
-    .iframe-header a:hover { text-decoration: underline; }
-    .iframe-close {
-      background: none; border: none; color: var(--muted); cursor: pointer;
-      font-size: 1rem; padding: 0 0.2rem; line-height: 1; font-family: inherit;
-    }
-    .iframe-close:hover { color: var(--text); }
-    .iframe-cell iframe { flex: 1; border: none; width: 100%%; }
-    .mv-svc-picker {
-      display: flex; flex-direction: column; align-items: center; justify-content: center;
-      flex: 1; gap: 0.75rem; padding: 2rem;
-    }
-    .mv-svc-picker-label { font-size: 0.85rem; color: var(--muted); }
-    .mv-svc-picker-btns { display: flex; flex-wrap: wrap; gap: 0.4rem; justify-content: center; }
-    .mv-svc-btn {
-      padding: 0.4rem 0.8rem; border-radius: 5px; font-size: 0.8rem; cursor: pointer;
-      border: 1px solid var(--btn-border); background: var(--btn-bg); color: var(--btn-text);
-      font-family: inherit;
-    }
-    .mv-svc-btn:hover { background: var(--btn-hover); }
     .theme-toggle { display: flex; gap: 0; }
     .theme-btn {
       padding: 0.15rem 0.5rem; font-size: 0.7rem; cursor: pointer;
@@ -194,7 +132,6 @@ func renderDashboard(controlPort int) string {
     <button class="tab active" data-tab="groups">Groups</button>
     <button class="tab" data-tab="proxies">Proxies</button>
     <button class="tab" data-tab="services">Services</button>
-    <button class="tab" data-tab="multiview">Multiview</button>
   </div>
   <div id="content" class="content"></div>
 
@@ -286,12 +223,10 @@ func renderDashboard(controlPort int) string {
     }
 
     function render() {
-      content.className = activeTab === 'multiview' ? 'content multiview' : 'content';
       switch (activeTab) {
         case 'groups': renderGroups(); break;
         case 'proxies': renderProxies(); break;
         case 'services': renderServices(); break;
-        case 'multiview': renderMultiview(); break;
       }
     }
 
@@ -397,210 +332,10 @@ func renderDashboard(controlPort int) string {
       content.innerHTML = html;
     }
 
-    // Multiview state persisted in localStorage
-    function getMvGroups() {
-      try { var v = JSON.parse(localStorage.getItem('__mdp_mv_groups')); if (Array.isArray(v)) return v; } catch(e) {}
-      return [];
-    }
-    function setMvGroups(g) { localStorage.setItem('__mdp_mv_groups', JSON.stringify(g)); }
-    function getMvCols() {
-      try { var v = parseInt(localStorage.getItem('__mdp_mv_cols')); if (v >= 1 && v <= 4) return v; } catch(e) {}
-      return 2;
-    }
-    function setMvCols(n) { localStorage.setItem('__mdp_mv_cols', String(n)); }
-
-    // Cards: array of { group, name, port, proxyPort } — one per open iframe
-    var mvCards = [];
-
-    function toggleMvGroup(name) {
-      var groups = getMvGroups();
-      var idx = groups.indexOf(name);
-      if (idx >= 0) {
-        groups.splice(idx, 1);
-        mvCards = mvCards.filter(function(c) { return c.group !== name; });
-      } else {
-        groups.push(name);
-        // Switch the group so proxies route to this group's services
-        api('/__mdp/groups/' + encodeURIComponent(name) + '/switch', { method: 'POST' });
-      }
-      setMvGroups(groups);
-      renderMultiview();
-    }
-
-    function loadMvService(group, serverName) {
-      var byGroup = serversByGroup();
-      var servers = byGroup[group] || [];
-      var match = servers.find(function(s) { return s.name === serverName; });
-      if (!match) return;
-      mvCards = mvCards.filter(function(c) { return c.group !== group; });
-      mvCards.push(match);
-      // Find existing cell and replace its contents with the iframe
-      var grid = content.querySelector('.iframe-grid');
-      if (grid) {
-        var cell = grid.querySelector('[data-group="' + group + '"]');
-        if (cell) {
-          renderCardIframe(cell, match, servers);
-          return;
-        }
-      }
-      renderMultiview();
-    }
-
-    function closeMvCard(group) {
-      mvCards = mvCards.filter(function(c) { return c.group !== group; });
-      var groups = getMvGroups();
-      var idx = groups.indexOf(group);
-      if (idx >= 0) groups.splice(idx, 1);
-      setMvGroups(groups);
-      renderMultiview();
-    }
-
-    function setMvColCount(n) {
-      setMvCols(n);
-      renderMultiview();
-    }
-
-    function serversByGroup() {
-      var byGroup = {};
-      state.proxies.forEach(function(p) {
-        (p.servers || []).forEach(function(s) {
-          var g = s.group || '(ungrouped)';
-          if (!byGroup[g]) byGroup[g] = [];
-          byGroup[g].push({ name: s.name, group: g, port: s.port, proxyPort: p.port });
-        });
-      });
-      Object.keys(byGroup).forEach(function(g) {
-        byGroup[g].sort(function(a, b) { return a.name < b.name ? -1 : 1; });
-      });
-      return byGroup;
-    }
-
-    function renderMultiview() {
-      var byGroup = serversByGroup();
-      var groupNames = Object.keys(byGroup).sort();
-      if (groupNames.length === 0) {
-        content.innerHTML = '<div class="empty">No servers registered.</div>';
-        return;
-      }
-
-      var selectedGroups = getMvGroups();
-      var cols = getMvCols();
-
-      // Toolbar: group chips + column selector
-      var toolbar = '<div class="mv-toolbar"><span class="mv-label">Groups</span>';
-      groupNames.forEach(function(g) {
-        var isSel = selectedGroups.indexOf(g) >= 0;
-        toolbar += '<button class="mv-chip' + (isSel ? ' selected' : '') + '" onclick="window.__toggleMvGroup(\'' + esc(g).replace(/'/g, "\\'") + '\')">' +
-          '<span class="mv-check' + (isSel ? '' : ' off') + '">&#10003;</span>' + esc(g) +
-        '</button>';
-      });
-      toolbar += '<span class="mv-spacer"></span>';
-      toolbar += '<div class="mv-cols"><span class="mv-cols-label">Cols</span>';
-      [1,2,3,4].forEach(function(n) {
-        toolbar += '<button class="mv-cols-btn' + (cols === n ? ' active' : '') + '" onclick="window.__setMvColCount(' + n + ')">' + n + '</button>';
-      });
-      toolbar += '</div></div>';
-
-      if (selectedGroups.length === 0) {
-        content.innerHTML = toolbar + '<div class="empty">Select groups above to view their services side by side.</div>';
-        return;
-      }
-
-      // Build grid — DOM-based to preserve iframes
-      // First, update toolbar in place if grid exists, otherwise full rebuild
-      var grid = content.querySelector('.iframe-grid');
-      var toolbarEl = content.querySelector('.mv-toolbar');
-
-      if (!grid) {
-        content.innerHTML = toolbar + '<div class="iframe-grid"></div>';
-        grid = content.querySelector('.iframe-grid');
-      } else if (toolbarEl) {
-        var tmp = document.createElement('div');
-        tmp.innerHTML = toolbar;
-        toolbarEl.replaceWith(tmp.firstElementChild);
-      }
-
-      grid.style.gridTemplateColumns = 'repeat(' + cols + ', 1fr)';
-
-      // Determine which groups need cards
-      var existingGroups = {};
-      Array.from(grid.children).forEach(function(cell) {
-        existingGroups[cell.getAttribute('data-group')] = cell;
-      });
-
-      // Remove cards for deselected groups
-      Object.keys(existingGroups).forEach(function(g) {
-        if (selectedGroups.indexOf(g) < 0) {
-          existingGroups[g].remove();
-          mvCards = mvCards.filter(function(c) { return c.group !== g; });
-        }
-      });
-
-      // Add cards for newly selected groups
-      selectedGroups.forEach(function(g) {
-        if (existingGroups[g]) return; // already has a card
-        var servers = byGroup[g] || [];
-        var cell = document.createElement('div');
-        cell.className = 'iframe-cell';
-        cell.setAttribute('data-group', g);
-
-        var loaded = mvCards.find(function(c) { return c.group === g; });
-        if (loaded) {
-          renderCardIframe(cell, loaded, servers);
-        } else if (servers.length === 1) {
-          // Auto-load single service
-          mvCards.push(servers[0]);
-          renderCardIframe(cell, servers[0], servers);
-        } else {
-          // Show service picker
-          renderCardPicker(cell, g, servers);
-        }
-        grid.appendChild(cell);
-      });
-    }
-
-    function buildPortMap(groupServers) {
-      return groupServers.map(function(s) { return s.proxyPort + ':' + s.name; }).join(',');
-    }
-
-    function renderCardIframe(cell, s, groupServers) {
-      var portMap = groupServers ? buildPortMap(groupServers) : s.proxyPort + ':' + s.name;
-      var url = 'http://localhost:' + s.proxyPort + '/?__mdp_upstream=' + encodeURIComponent(s.name) +
-        '&__mdp_ports=' + encodeURIComponent(portMap);
-      cell.innerHTML =
-        '<div class="iframe-header">' +
-          '<div class="iframe-header-left"><span>' + esc(s.group) + ' — ' + esc(s.name) + '</span>' +
-          '<a href="' + url + '" target="_blank">Open</a></div>' +
-          '<button class="iframe-close" onclick="window.__closeMvCard(\'' + esc(s.group).replace(/'/g, "\\'") + '\')">&times;</button>' +
-        '</div>' +
-        '<iframe src="' + url + '"></iframe>';
-    }
-
-    function renderCardPicker(cell, group, servers) {
-      var html =
-        '<div class="iframe-header">' +
-          '<div class="iframe-header-left"><span>' + esc(group) + '</span></div>' +
-          '<button class="iframe-close" onclick="window.__closeMvCard(\'' + esc(group).replace(/'/g, "\\'") + '\')">&times;</button>' +
-        '</div>' +
-        '<div class="mv-svc-picker">' +
-          '<div class="mv-svc-picker-label">Select a service</div>' +
-          '<div class="mv-svc-picker-btns">';
-      servers.forEach(function(s) {
-        html += '<button class="mv-svc-btn" onclick="window.__loadMvService(\'' + esc(group).replace(/'/g, "\\'") + '\',\'' + esc(s.name).replace(/'/g, "\\'") + '\')">' +
-          esc(s.name) + '</button>';
-      });
-      html += '</div></div>';
-      cell.innerHTML = html;
-    }
-
     // Expose actions to inline handlers
     window.__switchGroup = switchGroup;
     window.__setDefault = setDefault;
     window.__clearDefault = clearDefault;
-    window.__toggleMvGroup = toggleMvGroup;
-    window.__loadMvService = loadMvService;
-    window.__closeMvCard = closeMvCard;
-    window.__setMvColCount = setMvColCount;
 
     // Initial fetch + SSE for real-time updates; if the browser closes the
     // stream permanently (non-200/wrong-MIME response), recreate it after a

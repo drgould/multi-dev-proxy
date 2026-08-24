@@ -9,7 +9,7 @@ import (
 
 func TestRenderDashboardContainsTabs(t *testing.T) {
 	page := renderDashboard(13100)
-	for _, tab := range []string{"Groups", "Proxies", "Services", "Multiview"} {
+	for _, tab := range []string{"Groups", "Proxies", "Services"} {
 		if !strings.Contains(page, tab) {
 			t.Errorf("dashboard missing tab %q", tab)
 		}

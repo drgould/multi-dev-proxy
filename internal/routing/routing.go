@@ -49,18 +49,32 @@ type ResolveResult struct {
 	Redirect bool                  // true if should redirect to /__mdp/switch
 }
 
-// QueryParamName is the query parameter that overrides cookie-based routing.
-// This enables per-iframe and per-tab routing without shared cookie conflicts.
+// QueryParamName is the query parameter used for the brief, self-correcting
+// navigation carrying a tab's pin (a fresh switch, or the client-side bounce
+// that fixes a stale reload) and for the routing Service Worker's rewrite of
+// cross-origin sibling-proxy requests. widget.js strips it from the visible
+// URL immediately after reading it, so it's never a persistent part of a
+// tab's address bar.
 const QueryParamName = "__mdp_upstream"
 
-// ResolveUpstream picks the upstream server based on registry state, query param, cookie, and default.
+// PinHeaderName is the request header the routing Service Worker sets to
+// pin same-origin sub-resource requests (fetch/XHR/module imports) to a
+// specific upstream, without touching the URL. A custom header is safe here
+// only because these requests are same-origin — a custom header on a
+// cross-origin request would trigger a CORS preflight the real upstream app
+// has no reason to allow, which is why cross-origin sibling-proxy requests
+// still use the query param instead (see sw.js).
+const PinHeaderName = "X-Mdp-Pin"
+
+// ResolveUpstream picks the upstream server based on registry state, query param, header, cookie, and default.
 //   - 0 servers → {nil, false} (show empty switch page inline)
 //   - 1 server  → {that server, false} (auto-route, no cookie needed)
 //   - query param match → {matched server, false} (highest priority)
+//   - pin header match → {matched server, false} (same-origin sub-resource routing, set by the SW)
 //   - N servers + valid cookie → {matched server, false}
 //   - N servers + valid default → {default server, false}
 //   - N servers + no cookie/default → {nil, true} (redirect to switch page)
-func ResolveUpstream(reg *registry.Registry, cookieHeader, cookieName, defaultServer, queryUpstream string) ResolveResult {
+func ResolveUpstream(reg *registry.Registry, cookieHeader, cookieName, defaultServer, queryUpstream, headerUpstream string) ResolveResult {
 	count := reg.Count()
 	if count == 0 {
 		return ResolveResult{}
@@ -70,9 +84,17 @@ func ResolveUpstream(reg *registry.Registry, cookieHeader, cookieName, defaultSe
 		return ResolveResult{Entry: &entries[0]}
 	}
 
-	// Query param takes highest priority — enables per-iframe routing.
+	// Query param takes highest priority — enables per-tab pinning.
 	if queryUpstream != "" {
 		if entry := reg.Get(queryUpstream); entry != nil {
+			return ResolveResult{Entry: entry}
+		}
+	}
+
+	// Pin header, set by the routing Service Worker on same-origin
+	// sub-resource requests within an already-pinned tab.
+	if headerUpstream != "" {
+		if entry := reg.Get(headerUpstream); entry != nil {
 			return ResolveResult{Entry: entry}
 		}
 	}

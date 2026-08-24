@@ -51,15 +51,15 @@ func TestParseCookies(t *testing.T) {
 			},
 		},
 		{
-			name:     "malformed (no equals)",
-			header:   "session; user=john",
+			name:   "malformed (no equals)",
+			header: "session; user=john",
 			expected: map[string]string{
 				"user": "john",
 			},
 		},
 		{
-			name:     "empty cookie name (skip)",
-			header:   "=value; user=john",
+			name:   "empty cookie name (skip)",
+			header: "=value; user=john",
 			expected: map[string]string{
 				"user": "john",
 			},
@@ -108,6 +108,8 @@ func TestResolveUpstream(t *testing.T) {
 		registrySetup    func() *registry.Registry
 		cookieHeader     string
 		defaultServer    string
+		queryUpstream    string
+		headerUpstream   string
 		expectedName     string
 		expectedRedirect bool
 	}{
@@ -247,6 +249,57 @@ func TestResolveUpstream(t *testing.T) {
 			expectedName:     "app/feature",
 			expectedRedirect: false,
 		},
+		{
+			name: "pin header used when query and cookie empty",
+			registrySetup: func() *registry.Registry {
+				reg := registry.New()
+				reg.Register(&registry.ServerEntry{Name: "app/main", Repo: "app", Port: 3000, PID: 1234})
+				reg.Register(&registry.ServerEntry{Name: "app/feature", Repo: "app", Port: 3001, PID: 1235})
+				return reg
+			},
+			headerUpstream:   "app/feature",
+			expectedName:     "app/feature",
+			expectedRedirect: false,
+		},
+		{
+			name: "direct query param wins over pin header",
+			registrySetup: func() *registry.Registry {
+				reg := registry.New()
+				reg.Register(&registry.ServerEntry{Name: "app/main", Repo: "app", Port: 3000, PID: 1234})
+				reg.Register(&registry.ServerEntry{Name: "app/feature", Repo: "app", Port: 3001, PID: 1235})
+				return reg
+			},
+			queryUpstream:    "app/main",
+			headerUpstream:   "app/feature",
+			expectedName:     "app/main",
+			expectedRedirect: false,
+		},
+		{
+			name: "pin header takes priority over cookie",
+			registrySetup: func() *registry.Registry {
+				reg := registry.New()
+				reg.Register(&registry.ServerEntry{Name: "app/main", Repo: "app", Port: 3000, PID: 1234})
+				reg.Register(&registry.ServerEntry{Name: "app/feature", Repo: "app", Port: 3001, PID: 1235})
+				return reg
+			},
+			cookieHeader:     DefaultCookieName + "=" + url.QueryEscape("app/main"),
+			headerUpstream:   "app/feature",
+			expectedName:     "app/feature",
+			expectedRedirect: false,
+		},
+		{
+			name: "invalid pin header falls through to cookie",
+			registrySetup: func() *registry.Registry {
+				reg := registry.New()
+				reg.Register(&registry.ServerEntry{Name: "app/main", Repo: "app", Port: 3000, PID: 1234})
+				reg.Register(&registry.ServerEntry{Name: "app/feature", Repo: "app", Port: 3001, PID: 1235})
+				return reg
+			},
+			cookieHeader:     DefaultCookieName + "=" + url.QueryEscape("app/main"),
+			headerUpstream:   "app/deleted",
+			expectedName:     "app/main",
+			expectedRedirect: false,
+		},
 	}
 
 	for _, tt := range tests {
@@ -256,7 +309,7 @@ func TestResolveUpstream(t *testing.T) {
 			if tt.name == "custom cookie name" {
 				cookieName = "__mdp_upstream_4000"
 			}
-			result := ResolveUpstream(reg, tt.cookieHeader, cookieName, tt.defaultServer, "")
+			result := ResolveUpstream(reg, tt.cookieHeader, cookieName, tt.defaultServer, tt.queryUpstream, tt.headerUpstream)
 
 			if result.Redirect != tt.expectedRedirect {
 				t.Errorf("redirect: got %v, expected %v", result.Redirect, tt.expectedRedirect)
