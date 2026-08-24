@@ -92,11 +92,22 @@ func (p *Proxy) SetModifyResponse(fn func(*http.Response) error) {
 	}
 }
 
-func (p *Proxy) resolve(cookieHeader, queryUpstream string) routing.ResolveResult {
-	return routing.ResolveUpstream(p.reg, cookieHeader, p.cookieName, p.reg.GetDefault(), queryUpstream)
+func (p *Proxy) resolve(cookieHeader, queryUpstream, headerUpstream string) routing.ResolveResult {
+	return routing.ResolveUpstream(p.reg, cookieHeader, p.cookieName, p.reg.GetDefault(), queryUpstream, headerUpstream)
 }
 
 type contextKey struct{}
+
+// ResolvedUpstream returns the upstream server name resolved for the given
+// request by Proxy.ServeHTTP, once it has been proxied. Used by
+// response-modifying hooks (e.g. HTML injection) that need to know which
+// service actually produced this response. Returns "" if none was resolved.
+func ResolvedUpstream(r *http.Request) string {
+	if result, ok := r.Context().Value(contextKey{}).(routing.ResolveResult); ok && result.Entry != nil {
+		return result.Entry.Name
+	}
+	return ""
+}
 
 // rewrite is the Rewrite function for httputil.ReverseProxy.
 // MUST use Rewrite — Director is deprecated since Go 1.20.
@@ -124,6 +135,10 @@ func (p *Proxy) rewrite(r *httputil.ProxyRequest) {
 	r.Out.Header.Set("X-Forwarded-Proto", proto)
 	r.Out.Header.Set("X-Forwarded-Port", fmt.Sprintf("%d", p.listenPort))
 
+	// Purely internal routing signal — the real upstream has no reason to
+	// see it.
+	r.Out.Header.Del(routing.PinHeaderName)
+
 	if IsWebSocketUpgrade(r.In) {
 		FixWebSocketHeaders(r.Out.Header)
 	}
@@ -133,7 +148,8 @@ func (p *Proxy) rewrite(r *httputil.ProxyRequest) {
 func (p *Proxy) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 	cookieHeader := r.Header.Get("Cookie")
 	queryUpstream := r.URL.Query().Get(routing.QueryParamName)
-	result := p.resolve(cookieHeader, queryUpstream)
+	headerUpstream := r.Header.Get(routing.PinHeaderName)
+	result := p.resolve(cookieHeader, queryUpstream, headerUpstream)
 
 	if result.Redirect || result.Entry == nil {
 		http.Redirect(w, r, switchPagePath, http.StatusFound)

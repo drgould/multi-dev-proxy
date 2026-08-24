@@ -126,21 +126,43 @@ func renderSwitchPage() string {
       return d.innerHTML;
     }
 
+    // Switching embeds __mdp_upstream in the URL this tab navigates to,
+    // which widget.js's bootstrap reads on that fresh load, stores into
+    // sessionStorage, and immediately strips from the visible URL —
+    // pinning this tab going forward without ever leaving a query param in
+    // the address bar. Deliberately does NOT call the server-side
+    // /__mdp/switch or /__mdp/groups/{name}/switch endpoints — those set
+    // the shared default on every proxy hosting the target, affecting every
+    // OTHER tab's fallback resolution too. This tab's own pin is entirely
+    // sufficient for its own routing; mutating shared state for it is pure
+    // risk (and was the source of a real cross-tab bug: switching in one
+    // tab could change what OTHER tabs displayed/routed to).
+    function pinnedURL(target, upstream) {
+      var url = new URL(target, location.href);
+      url.searchParams.set('__mdp_upstream', upstream);
+      return url.toString();
+    }
+
     function switchServer(name) {
-      fetch('/__mdp/switch/' + encodeURIComponent(name), { method: 'POST', redirect: 'follow' })
-        .then(function() { window.location.href = '/'; });
+      // Cookie fallback matters on a fresh origin: the top-level document
+      // routes via __mdp_upstream directly, but until the Service Worker
+      // is controlling this page, sub-resource requests have no pin
+      // header/query param to fall back on either — only the cookie.
+      var cookieName = (cfg && cfg.cookieName) || '__mdp_upstream';
+      document.cookie = cookieName + '=' + encodeURIComponent(name) + '; path=/; SameSite=Lax';
+      window.location.href = pinnedURL('/', name);
     }
 
     function switchGroup(name) {
       var members = (cfg && cfg.groups && cfg.groups[name]) || [];
-      fetch('/__mdp/groups/' + encodeURIComponent(name) + '/switch', { method: 'POST' }).then(function() {
-        var cookieName = (cfg && cfg.cookieName) || '__mdp_upstream';
-        var local = members.find(function(m) { return localServerNames.indexOf(m) >= 0; });
-        if (local) {
-          document.cookie = cookieName + '=' + encodeURIComponent(local) + '; path=/; SameSite=Lax';
-        }
-        window.location.href = '/';
-      });
+      var cookieName = (cfg && cfg.cookieName) || '__mdp_upstream';
+      var local = members.find(function(m) { return localServerNames.indexOf(m) >= 0; });
+      if (local) {
+        document.cookie = cookieName + '=' + encodeURIComponent(local) + '; path=/; SameSite=Lax';
+        window.location.href = pinnedURL('/', local);
+        return;
+      }
+      window.location.href = '/';
     }
 
     function serviceFromName(fullName, repo, group) {

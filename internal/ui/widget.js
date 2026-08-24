@@ -4,7 +4,14 @@
 	const API_SERVERS = "/__mdp/servers";
 	const API_CONFIG = "/__mdp/config";
 
-	let COOKIE = "__mdp_upstream";
+	// Every proxy is constructed with routing.CookieNameForPort(port) —
+	// "__mdp_upstream_<port>", never the bare name — so this matches it
+	// synchronously from the start, rather than waiting on the async
+	// /__mdp/config fetch (poll() below still applies config.cookieName if
+	// it ever legitimately differs). Needed because some cookie writes (the
+	// reload bounce-correction) happen before that fetch could ever run.
+	const CURRENT_PORT = location.port || (location.protocol === "https:" ? "443" : "80");
+	let COOKIE = `__mdp_upstream_${CURRENT_PORT}`;
 	let config = null;
 
 	function getCookie() {
@@ -17,31 +24,159 @@
 		document.cookie = `${COOKIE}=${encodeURIComponent(name)}; path=/; SameSite=Lax`;
 	}
 
-	// --- Service worker routing ---
-	// Provides per-tab/per-iframe routing isolation using clientId.
+	// --- Per-tab pin bootstrap ---
+	// A tab's pin lives in sessionStorage (isolated per tab, unlike cookies)
+	// once it's ever switched explicitly; tabs that never switch keep
+	// following the shared cookie exactly as before. The one thing
+	// sessionStorage can't influence is the very request that loads a fresh
+	// or reloaded document — a Service Worker has no way to recognize "this
+	// navigation belongs to the same tab as an earlier one" (clientId is
+	// always empty for navigations, a platform constraint, not a gap here),
+	// so that request resolves via the normal cookie/default path
+	// server-side. window.__mdpServedBy (injected inline — see
+	// internal/inject) names which upstream actually produced THIS
+	// response; if it disagrees with the tab's stored pin, self-correct via
+	// a one-time query-param bounce rather than silently showing the wrong
+	// service. If the bounce itself still doesn't land on the pinned
+	// service (it's gone/unavailable), give up and accept reality instead
+	// of looping forever.
+	const PIN_KEY = "__mdp_pin_upstream";
 
-	const urlParams = new URLSearchParams(location.search);
-	const pinnedUpstream = urlParams.get("__mdp_upstream");
-	const pinnedPortsParam = urlParams.get("__mdp_ports");
-
-	// Parse port map from query param: "3000:web-main,3001:api-main"
-	function parsePortMap(s) {
-		if (!s) return null;
-		const map = {};
-		for (const pair of s.split(",")) {
-			const sep = pair.indexOf(":");
-			if (sep > 0) map[pair.slice(0, sep)] = pair.slice(sep + 1);
+	function getStoredPin() {
+		try {
+			return sessionStorage.getItem(PIN_KEY);
+		} catch {
+			return null;
 		}
-		return Object.keys(map).length > 0 ? map : null;
+	}
+	function setStoredPin(name) {
+		try {
+			sessionStorage.setItem(PIN_KEY, name);
+		} catch { /* ignore */ }
 	}
 
-	function registerSW(ports) {
+	const urlParams = new URLSearchParams(location.search);
+	const urlPin = urlParams.get("__mdp_upstream");
+	const servedBy = window.__mdpServedBy || null;
+	const storedPin = getStoredPin();
+
+	// Set once the SW has confirmed this tab's pin (or a timeout gives up
+	// waiting) — see the registerSW call below. Stripping the URL earlier
+	// than that would remove the one thing sw.js's client-URL fallback can
+	// read during the unavoidable gap before a postMessage pin arrives.
+	let stripPinFromURL = () => {};
+
+	if (urlPin) {
+		// Arrived via an explicit switch action or a stale-reload
+		// self-correction bounce (below) — trust what the server actually
+		// resolved (servedBy) over whatever this tab had stored before.
+		// If it matches, adopt the switch/bounce; if the requested service
+		// turned out to be unavailable, accept reality instead of bouncing
+		// again, which would loop forever.
+		setStoredPin(servedBy || urlPin);
+		stripPinFromURL = () => {
+			const cleaned = new URL(location.href);
+			cleaned.searchParams.delete("__mdp_upstream");
+			cleaned.searchParams.delete("__mdp_ports");
+			history.replaceState(null, "", cleaned.toString());
+		};
+	} else if (storedPin && servedBy && storedPin !== servedBy) {
+		// A plain reload (no explicit pin on this request) landed on a
+		// different service than this tab is pinned to — the shared
+		// cookie must have changed from another tab. Self-correct with a
+		// one-time bounce; the next load carries urlPin and is handled by
+		// the branch above, so this never loops. Also reset the cookie to
+		// this tab's own pin so the fallback path (before the SW takes
+		// over, or if it's unsupported) is consistent with what we're
+		// bouncing to, not whatever other tab last changed it to.
+		setCookie(storedPin);
+		const bounce = new URL(location.href);
+		bounce.searchParams.set("__mdp_upstream", storedPin);
+		window.location.replace(bounce.toString());
+		return;
+	} else if (!storedPin && servedBy) {
+		// First time this tab establishes a pin: lock onto whatever the
+		// server already resolved for THIS exact request — decided before
+		// the HTML was even sent, so this is synchronous and immediate.
+		// Locking here (rather than waiting on poll()'s fetchConfig() +
+		// fetch(servers) round-trip below) closes a real race: if this
+		// tab's first poll were delayed (slow dev server, network jitter)
+		// past another tab's switch changing the shared cookie, THIS tab
+		// would lock onto THAT other tab's choice instead of its own.
+		setStoredPin(servedBy);
+	}
+
+	// Read fresh rather than reusing urlPin directly: the block above may
+	// have adopted servedBy instead of urlPin (the requested pin turned out
+	// to be unavailable), and sessionStorage reflects whichever it was.
+	//
+	// Not const: a tab that never explicitly switches still locks onto
+	// whatever it first resolves to (see the auto-lock in poll() below), so
+	// this can go from unset to set mid-session. Later reads (the click
+	// interceptor, the WebSocket wrapper) close over this binding and pick
+	// up that update automatically.
+	let activePin = getStoredPin();
+
+	// Vite's HMR client (and similar dev-server live-reload clients) opens
+	// its own WebSocket directly — that connection is invisible to the
+	// Service Worker (fetch interception never fires for WebSocket
+	// handshakes, a platform constraint), so without this it always
+	// resolves via the shared cookie/default instead of this tab's own
+	// pin. A pinned tab could then have its HMR socket connected to a
+	// DIFFERENT app's dev server, applying a Fast Refresh update against a
+	// module tree that doesn't exist in this page — corrupting React
+	// (symptom: "Cannot read properties of null (reading 'useContext')").
+	// The WS handshake is still a normal HTTP request server-side, so
+	// tagging it with the same query param used elsewhere is sufficient;
+	// this must install before any app code (e.g. /@vite/client) has a
+	// chance to construct its socket, which the injection order guarantees.
+	if (typeof window.WebSocket === "function") {
+		const NativeWebSocket = window.WebSocket;
+		function PinnedWebSocket(url, protocols) {
+			if (activePin) {
+				try {
+					const u = new URL(url, location.href);
+					// Compare host, not origin: a ws(s): URL's origin string
+					// keeps the ws(s) scheme (e.g. "ws://localhost:3000"),
+					// which never equals the page's http(s) origin even for
+					// the same host — origin equality would always be
+					// false here.
+					if (u.host === location.host && !u.searchParams.has("__mdp_upstream")) {
+						u.searchParams.set("__mdp_upstream", activePin);
+						url = u.toString();
+					}
+				} catch { /* ignore, fall through with original url */ }
+			}
+			return protocols === undefined
+				? new NativeWebSocket(url)
+				: new NativeWebSocket(url, protocols);
+		}
+		PinnedWebSocket.prototype = NativeWebSocket.prototype;
+		for (const k of ["CONNECTING", "OPEN", "CLOSING", "CLOSED"]) {
+			PinnedWebSocket[k] = NativeWebSocket[k];
+		}
+		window.WebSocket = PinnedWebSocket;
+	}
+
+	function registerSW(ports, onPinned) {
 		if (!("serviceWorker" in navigator) || !ports) return;
 		navigator.serviceWorker
 			.register("/__mdp/sw.js", { scope: "/" })
 			.then((reg) => {
 				function sendPin(sw) {
-					sw.postMessage({ type: "pin", ports });
+					// postMessage is fire-and-forget — the SW processes it
+					// whenever its event loop gets to it, not synchronously.
+					// Calling onPinned right after posting would strip the
+					// URL before clientMap is guaranteed populated, reopening
+					// the exact race this is meant to close. A MessageChannel
+					// reply lets the SW tell us once it's actually stored.
+					if (onPinned) {
+						const channel = new MessageChannel();
+						channel.port1.onmessage = () => onPinned();
+						sw.postMessage({ type: "pin", ports }, [channel.port2]);
+					} else {
+						sw.postMessage({ type: "pin", ports });
+					}
 				}
 				const sw = reg.active || reg.installing || reg.waiting;
 				if (sw && sw.state === "activated") {
@@ -57,6 +192,25 @@
 					if (reg.installing) reg.installing.addEventListener("statechange", onStateChange);
 				});
 			});
+	}
+
+	// Register this tab's pin for its OWN proxy port immediately, rather
+	// than waiting on poll()'s fetchConfig()+fetch(servers) round-trip
+	// (needed only for the cross-port sibling map). Module scripts and
+	// other early sub-resource requests fire right after this script
+	// returns control to the parser — if pinning waited on those two
+	// network round-trips, those early requests would have no SW pin yet
+	// and could fall through to the shared cookie, potentially loading a
+	// different upstream's JS than the HTML that was just correctly
+	// resolved via __mdp_upstream. poll() re-registers with the fuller
+	// sibling-port map once config loads; this only covers this one port
+	// in the meantime.
+	if (activePin) {
+		registerSW({ [CURRENT_PORT]: activePin }, stripPinFromURL);
+		// Safety net: if the SW never confirms (unsupported browser,
+		// registration failure), still clean up the URL eventually rather
+		// than leaving __mdp_upstream visible forever.
+		setTimeout(stripPinFromURL, 3000);
 	}
 
 	// Build port map from config: locate the group containing activeName,
@@ -87,31 +241,6 @@
 			}
 		}
 		return Object.keys(ports).length > 0 ? ports : null;
-	}
-
-	// If we have an explicit port map from query params, register immediately.
-	if (pinnedPortsParam) {
-		registerSW(parsePortMap(pinnedPortsParam));
-	}
-
-	// Click interceptor fallback for pre-SW-activation navigations
-	if (pinnedUpstream) {
-		document.addEventListener(
-			"click",
-			(e) => {
-				const a = e.target.closest ? e.target.closest("a") : null;
-				if (!a || !a.href) return;
-				try {
-					const url = new URL(a.href);
-					if (url.origin === location.origin && !url.searchParams.has("__mdp_upstream")) {
-						url.searchParams.set("__mdp_upstream", pinnedUpstream);
-						if (pinnedPortsParam) url.searchParams.set("__mdp_ports", pinnedPortsParam);
-						a.href = url.toString();
-					}
-				} catch { /* ignore */ }
-			},
-			true,
-		);
 	}
 
 	function getTheme() {
@@ -338,37 +467,48 @@
 		dropdownEl.appendChild(link);
 	}
 
-	async function switchGroup(name) {
-		try {
-			await fetch(`/__mdp/groups/${encodeURIComponent(name)}/switch`, { method: "POST" });
-			const localGroups = buildLocalGroups(servers);
-			const members = localGroups[name] || [];
-			if (members.length > 0) {
-				setCookie(members[0].name);
-				const ports = buildPortMap(members[0].name);
-				if (ports) registerSW(ports);
-			}
-			window.location.reload();
-		} catch { /* ignore */ }
+	// Switching embeds __mdp_upstream in the URL this tab navigates to,
+	// which the bootstrap block at the top of this file reads on that
+	// fresh load, stores into sessionStorage, and immediately strips from
+	// the visible URL — pinning this tab going forward without ever
+	// leaving a query param in the address bar. Without this, switching in
+	// one tab (which also sets the shared, origin-wide cookie) would change
+	// what every OTHER unpinned tab on this proxy displays/routes to, since
+	// cookies aren't scoped per tab.
+	function switchGroup(name) {
+		// Deliberately does NOT call POST /__mdp/groups/{name}/switch — that
+		// endpoint sets the shared default on every proxy hosting a member
+		// of this group, affecting every OTHER tab's fallback resolution
+		// too. This tab's own pin (below) is entirely sufficient for its
+		// own routing; mutating shared state for it is pure risk.
+		const localGroups = buildLocalGroups(servers);
+		const members = localGroups[name] || [];
+		if (members.length > 0) {
+			const target = members[0].name;
+			setCookie(target);
+			const url = new URL(location.href);
+			url.searchParams.set("__mdp_upstream", target);
+			window.location.href = url.toString();
+			return;
+		}
+		window.location.reload();
 	}
 
 	async function switchServer(fullName, scheme) {
 		setCookie(fullName);
-		const ports = buildPortMap(fullName);
-		if (ports) registerSW(ports);
 		const targetScheme = (scheme === "https") ? "https" : "http";
 		const targetBase = `${targetScheme}://${location.hostname}:${location.port}`;
+		let targetPath = "/";
 		try {
 			const resp = await fetch(`/__mdp/last-path/${encodeURIComponent(fullName)}`);
 			if (resp.ok) {
 				const lpData = await resp.json();
-				if (lpData.path) {
-					window.location.href = `${targetBase}${lpData.path}`;
-					return;
-				}
+				if (lpData.path) targetPath = lpData.path;
 			}
 		} catch { /* ignore */ }
-		window.location.href = `${targetBase}/`;
+		const url = new URL(targetBase + targetPath);
+		url.searchParams.set("__mdp_upstream", fullName);
+		window.location.href = url.toString();
 	}
 
 	async function fetchConfig() {
@@ -381,7 +521,7 @@
 		} catch { /* ignore */ }
 	}
 
-	let swRegistered = !!pinnedPortsParam; // already registered if multiview
+	let swRegistered = false;
 
 	async function poll() {
 		try {
@@ -389,16 +529,29 @@
 			const resp = await fetch(API_SERVERS, { signal: AbortSignal.timeout(1000) });
 			if (!resp.ok) return;
 			servers = await resp.json();
-			const active = pinnedUpstream || getCookie();
+			const active = activePin || getCookie();
 			const allNames = Object.keys(servers).flatMap((r) =>
 				Object.keys(servers[r]),
 			);
 			const activeName =
 				active && allNames.includes(active) ? active : allNames[0] || null;
+
+			// Lock this tab onto whatever it resolves to on its first
+			// successful poll, so a later switch made in a DIFFERENT tab
+			// (which changes the shared cookie) doesn't silently change
+			// what this tab displays or routes to. Only this tab's own
+			// switch action (or its reload bounce-correction) can change
+			// it after this point.
+			if (activeName && !activePin) {
+				activePin = activeName;
+				setStoredPin(activeName);
+			}
+
 			host.setAttribute("data-theme", getTheme());
 			render(servers, activeName);
 
-			// Register SW with port map for normal tabs (non-multiview)
+			// Register the routing Service Worker once we know the active
+			// service and its port map.
 			if (!swRegistered && activeName && config) {
 				const ports = buildPortMap(activeName);
 				if (ports) {

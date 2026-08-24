@@ -5,11 +5,15 @@ import (
 	"compress/gzip"
 	"fmt"
 	"io"
+	"net"
 	"net/http"
+	"net/http/httptest"
 	"strings"
 	"testing"
 
 	"github.com/andybalholm/brotli"
+	"github.com/derekgould/multi-dev-proxy/internal/proxy"
+	"github.com/derekgould/multi-dev-proxy/internal/registry"
 )
 
 func makeResp(body string, contentType string, extraHeaders map[string]string) *http.Response {
@@ -116,6 +120,80 @@ func TestInjectNoBodyTag(t *testing.T) {
 	body := readBody(t, resp)
 	if !strings.Contains(body, widgetScriptTag) {
 		t.Error("widget not appended when no </body> or </html>")
+	}
+}
+
+func TestInjectServedByMarker(t *testing.T) {
+	upstream := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "text/html")
+		w.Write([]byte(`<html><head></head><body></body></html>`))
+	}))
+	defer upstream.Close()
+
+	reg := registry.New()
+	if err := reg.Register(&registry.ServerEntry{
+		Name: "app/main",
+		Repo: "app",
+		Port: upstream.Listener.Addr().(*net.TCPAddr).Port,
+		PID:  1,
+	}); err != nil {
+		t.Fatal(err)
+	}
+	p := proxy.NewProxy(reg, 3000, "")
+	p.SetModifyResponse(New().ModifyResponse)
+
+	req := httptest.NewRequest("GET", "/", nil)
+	rr := httptest.NewRecorder()
+	p.ServeHTTP(rr, req)
+
+	body := rr.Body.String()
+	if !strings.Contains(body, `window.__mdpServedBy="app/main";`) {
+		t.Errorf("response missing servedBy marker, got: %q", body)
+	}
+	if strings.Index(body, "__mdpServedBy") > strings.Index(body, widgetScriptTag) {
+		t.Error("servedBy marker must come before the widget script tag")
+	}
+}
+
+func TestInjectRightAfterHeadTag(t *testing.T) {
+	inj := New()
+	resp := makeResp(`<html><head><script type="module" src="/src/main.tsx"></script></head><body></body></html>`, "text/html", nil)
+	if err := inj.ModifyResponse(resp); err != nil {
+		t.Fatal(err)
+	}
+	body := readBody(t, resp)
+	if !strings.Contains(body, "<head>\n"+widgetScriptTag) {
+		t.Errorf("script not injected right after <head>, got: %q", body)
+	}
+	if strings.Index(body, widgetScriptTag) > strings.Index(body, `src="/src/main.tsx"`) {
+		t.Error("widget script must come before the app's own script tag so it registers first")
+	}
+}
+
+func TestInjectDoesNotMatchHeaderElement(t *testing.T) {
+	inj := New()
+	resp := makeResp(`<html><head lang="en"><title>App</title></head><body><header>site header</header></body></html>`, "text/html", nil)
+	if err := inj.ModifyResponse(resp); err != nil {
+		t.Fatal(err)
+	}
+	body := readBody(t, resp)
+	if !strings.Contains(body, `<head lang="en">`+"\n"+widgetScriptTag) {
+		t.Errorf("script not injected right after <head lang=\"en\">, got: %q", body)
+	}
+	if strings.Contains(body, "<header>"+widgetScriptTag) || strings.Contains(body, widgetScriptTag+"site header") {
+		t.Error("widget script must not be injected into the <header> element")
+	}
+}
+
+func TestInjectAfterHeadTagWithAttrs(t *testing.T) {
+	inj := New()
+	resp := makeResp(`<html><head lang="en"><title>App</title></head><body></body></html>`, "text/html", nil)
+	if err := inj.ModifyResponse(resp); err != nil {
+		t.Fatal(err)
+	}
+	body := readBody(t, resp)
+	if !strings.Contains(body, `<head lang="en">`+"\n"+widgetScriptTag) {
+		t.Errorf("script not injected right after <head lang=\"en\">, got: %q", body)
 	}
 }
 

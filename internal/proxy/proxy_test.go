@@ -111,6 +111,132 @@ func TestProxyRoutesByValidCookie(t *testing.T) {
 	}
 }
 
+func TestProxyRoutesByPinHeader(t *testing.T) {
+	s1 := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Write([]byte("server1"))
+	}))
+	defer s1.Close()
+	s2 := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Write([]byte("server2"))
+	}))
+	defer s2.Close()
+
+	p, reg := newTestProxy(t)
+	registerUpstream(t, reg, s1, "app/main", "app")
+	registerUpstream(t, reg, s2, "app/feature", "app")
+
+	// No query param or cookie on this request, but the routing Service
+	// Worker's pin header carries the tab's pin for a same-origin
+	// sub-resource request (fetch/XHR/module import).
+	req := httptest.NewRequest("GET", "/api/data", nil)
+	req.Header.Set("X-Mdp-Pin", "app/feature")
+	rr := httptest.NewRecorder()
+	p.ServeHTTP(rr, req)
+
+	if rr.Code != 200 {
+		t.Fatalf("expected 200, got %d", rr.Code)
+	}
+	body, _ := io.ReadAll(rr.Body)
+	if string(body) != "server2" {
+		t.Errorf("expected server2 response, got %q", body)
+	}
+}
+
+func TestProxyStripsPinHeaderFromUpstreamRequest(t *testing.T) {
+	var gotHeader string
+	upstream := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		gotHeader = r.Header.Get("X-Mdp-Pin")
+		w.WriteHeader(200)
+	}))
+	defer upstream.Close()
+
+	p, reg := newTestProxy(t)
+	registerUpstream(t, reg, upstream, "app/main", "app")
+
+	req := httptest.NewRequest("GET", "/", nil)
+	req.Header.Set("X-Mdp-Pin", "app/main")
+	rr := httptest.NewRecorder()
+	p.ServeHTTP(rr, req)
+
+	if rr.Code != 200 {
+		t.Fatalf("expected 200, got %d", rr.Code)
+	}
+	if gotHeader != "" {
+		t.Errorf("X-Mdp-Pin leaked to upstream, got %q", gotHeader)
+	}
+}
+
+func TestProxyDirectQueryParamWinsOverPinHeader(t *testing.T) {
+	s1 := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Write([]byte("server1"))
+	}))
+	defer s1.Close()
+	s2 := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Write([]byte("server2"))
+	}))
+	defer s2.Close()
+
+	p, reg := newTestProxy(t)
+	registerUpstream(t, reg, s1, "app/main", "app")
+	registerUpstream(t, reg, s2, "app/feature", "app")
+
+	req := httptest.NewRequest("GET", "/?__mdp_upstream=app%2Fmain", nil)
+	req.Header.Set("X-Mdp-Pin", "app/feature")
+	rr := httptest.NewRecorder()
+	p.ServeHTTP(rr, req)
+
+	if rr.Code != 200 {
+		t.Fatalf("expected 200, got %d", rr.Code)
+	}
+	body, _ := io.ReadAll(rr.Body)
+	if string(body) != "server1" {
+		t.Errorf("expected server1 response, got %q", body)
+	}
+}
+
+func TestResolvedUpstream(t *testing.T) {
+	upstream := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.WriteHeader(200)
+	}))
+	defer upstream.Close()
+
+	p, reg := newTestProxy(t)
+	registerUpstream(t, reg, upstream, "app/main", "app")
+
+	var got string
+	p.SetModifyResponse(func(resp *http.Response) error {
+		got = ResolvedUpstream(resp.Request)
+		return nil
+	})
+
+	req := httptest.NewRequest("GET", "/", nil)
+	rr := httptest.NewRecorder()
+	p.ServeHTTP(rr, req)
+
+	if got != "app/main" {
+		t.Errorf("ResolvedUpstream = %q, want %q", got, "app/main")
+	}
+}
+
+func TestResolvedUpstreamEmptyOnRedirect(t *testing.T) {
+	s1 := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) { w.WriteHeader(200) }))
+	defer s1.Close()
+	s2 := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) { w.WriteHeader(200) }))
+	defer s2.Close()
+
+	p, reg := newTestProxy(t)
+	registerUpstream(t, reg, s1, "app/main", "app")
+	registerUpstream(t, reg, s2, "app/feature", "app")
+
+	req := httptest.NewRequest("GET", "/", nil)
+	rr := httptest.NewRecorder()
+	p.ServeHTTP(rr, req)
+
+	if got := ResolvedUpstream(req); got != "" {
+		t.Errorf("ResolvedUpstream = %q, want empty (no upstream resolved, redirected to switch page)", got)
+	}
+}
+
 func TestProxyUpstreamDown(t *testing.T) {
 	p, reg := newTestProxy(t)
 	// Register a server on a port with nothing listening
