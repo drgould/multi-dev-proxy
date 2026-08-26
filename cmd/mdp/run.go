@@ -642,8 +642,12 @@ func runBatchMode(cmd *cobra.Command, controlPort int, groupFlag string, linkMap
 		log.SetOutput(stderrGate)
 		defer log.SetOutput(os.Stderr)
 	}
+	hasSupervisedProcess := false
 	for i := range allocations {
 		bt.wg.Add(1)
+		if allocations[i].svc.Command != "" {
+			hasSupervisedProcess = true
+		}
 		go launchBatchService(batchCtx, bt, client, controlURL, clientID, repo, &allocations[i], states, rt, portMap, allocResolvers[i], linkMap)
 	}
 
@@ -659,10 +663,36 @@ func runBatchMode(cmd *cobra.Command, controlPort int, groupFlag string, linkMap
 
 	gone := watchShutdown(controlURL)
 
+	// allDone fires once every launched goroutine has returned for good
+	// (crashed, exited cleanly, or failed to start — but never a
+	// peer-triggered restart, which loops inside superviseProcess without
+	// returning). Commandless external services return as soon as they
+	// register, so bt.wg only reaches zero once every *supervised* process
+	// has also stopped; gating on hasSupervisedProcess additionally skips an
+	// all-external batch, where "done" would otherwise fire almost
+	// immediately even though every service is still up and healthy.
+	allDone := make(chan struct{})
+	if hasSupervisedProcess {
+		go func() { bt.wg.Wait(); close(allDone) }()
+	}
+
+	var runErr error
 	select {
 	case <-sigCh:
 	case <-gone:
 		slog.Warn("orchestrator is shutting down")
+	case <-allDone:
+		for _, st := range states {
+			if st.Err != nil {
+				runErr = fmt.Errorf("all services in group %q stopped; at least one exited with an error", group)
+				break
+			}
+		}
+		if runErr != nil {
+			slog.Warn("all services stopped; at least one exited with an error", "group", group)
+		} else {
+			slog.Info("all services stopped cleanly; shutting down", "group", group)
+		}
 	}
 
 	hbCancel()
@@ -685,7 +715,7 @@ func runBatchMode(cmd *cobra.Command, controlPort int, groupFlag string, linkMap
 	if detachedChild {
 		os.Remove(runPIDFilePath(repo, group))
 	}
-	return nil
+	return runErr
 }
 
 // decodeDetachedInputs reads the inputs the detaching parent resolved (and
@@ -1171,7 +1201,9 @@ func launchBatchService(
 		runPostStart(env, false)
 	}
 
-	superviseProcess(ctx, cmd, bt, client, controlURL, a, registered, registerAll, runPostStart, portMap, resolver, linkMap, pw, pwErr)
+	if err := superviseProcess(ctx, cmd, bt, client, controlURL, a, registered, registerAll, runPostStart, portMap, resolver, linkMap, pw, pwErr); err != nil {
+		state.Err = err
+	}
 
 	// In-flight post_start hooks are ctx-bound, so after shutdown this wait is
 	// short; it keeps hook output ahead of shutdown hooks and the final flush.
@@ -1265,7 +1297,7 @@ func superviseProcess(
 	resolver envexpand.Resolver,
 	linkMap map[string]string,
 	pw, pwErr *prefixWriter,
-) {
+) error {
 	peerRefs := extractPeerRefs(a.svc)
 	// Seed peerRefs with the values we resolved at startup so the watcher
 	// only fires on a *change*, not on first sight.
@@ -1284,6 +1316,7 @@ func superviseProcess(
 		go func(c *exec.Cmd) { cmdExit <- c.Wait() }(cmd)
 
 		var restart bool
+		var exitErr error
 		select {
 		case <-ctx.Done():
 			watchCancel()
@@ -1293,6 +1326,7 @@ func superviseProcess(
 			watchCancel()
 			if waitErr != nil {
 				slog.Error("service process exited", "name", a.name, "command", a.svc.Command, "err", waitErr)
+				exitErr = waitErr
 			}
 		case updated := <-peerCh:
 			watchCancel()
@@ -1309,13 +1343,13 @@ func superviseProcess(
 		}
 
 		if !restart {
-			return
+			return exitErr
 		}
 
 		newEnv, err := buildBatchEnv(*a, portMap, resolver)
 		if err != nil {
 			slog.Error("rebuild env failed; not restarting", "name", a.name, "err", err)
-			return
+			return nil
 		}
 		a.env = newEnv
 		if a.svc.EnvFile != "" {
@@ -1325,12 +1359,12 @@ func superviseProcess(
 		}
 		if _, err := registerAll(); err != nil {
 			slog.Error("re-register failed; not restarting", "name", a.name, "err", err)
-			return
+			return err
 		}
 		newCmd, err := startBatchCommand(bt, a.svc.Command, a.svc.Dir, newEnv, pw, pwErr)
 		if err != nil {
 			slog.Error("restart failed", "name", a.name, "err", err)
-			return
+			return err
 		}
 		for _, sn := range registered {
 			updatePIDWithOrchestrator(controlURL, sn, newCmd.Process.Pid)
