@@ -64,3 +64,39 @@ func TestWidgetJSPillShowsRepoAndBranch(t *testing.T) {
 		t.Error("WidgetJS missing pillLabel for repo · branch pill")
 	}
 }
+
+func TestWidgetJSTakesOverForeignServiceWorker(t *testing.T) {
+	if !strings.Contains(WidgetJS, "getRegistrations") {
+		t.Error("WidgetJS missing navigator.serviceWorker.getRegistrations() call")
+	}
+	if !strings.Contains(WidgetJS, ".unregister()") {
+		t.Error("WidgetJS missing foreign Service Worker unregister() call")
+	}
+	if !strings.Contains(WidgetJS, "caches.keys()") || !strings.Contains(WidgetJS, "caches.delete(") {
+		t.Error("WidgetJS missing Cache Storage cleanup alongside SW unregister")
+	}
+	// Bounce guard must be keyed by the fingerprint value itself, not a
+	// bare one-shot flag — otherwise a later app change in the same tab
+	// would silently skip its own reload.
+	if !strings.Contains(WidgetJS, "__mdp_sw_bounced_for") {
+		t.Error("WidgetJS bounce guard not keyed by servedBy fingerprint")
+	}
+	// getRegistrations() returns every registration for the origin, not
+	// just root-scoped ones — takeover must filter to the "/" scope before
+	// unregistering, or it deletes unrelated workers scoped to e.g. /docs/.
+	if !strings.Contains(WidgetJS, "new URL(r.scope).pathname") {
+		t.Error("WidgetJS foreign-SW filter not scoped to \"/\" before unregistering")
+	}
+
+	// The takeover block must run after the stale-pin bounce's
+	// window.location.replace(...); return — never before it — so it can't
+	// race that reload or fingerprint the wrong servedBy.
+	bounceIdx := strings.Index(WidgetJS, "window.location.replace(bounce.toString())")
+	takeoverIdx := strings.Index(WidgetJS, "Foreign Service Worker takeover")
+	if bounceIdx == -1 || takeoverIdx == -1 {
+		t.Fatal("could not locate stale-pin bounce or SW-takeover block in WidgetJS")
+	}
+	if takeoverIdx < bounceIdx {
+		t.Error("SW-takeover block appears before the stale-pin bounce — it must run after, so it never races that reload")
+	}
+}
