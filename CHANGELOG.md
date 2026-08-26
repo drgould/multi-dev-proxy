@@ -1,5 +1,18 @@
 # Changelog
 
+## [1.15.0](https://github.com/drgould/multi-dev-proxy/compare/v1.14.0...v1.15.0) (2026-08-26)
+
+
+### Features
+
+* add --restart / restart: to auto-restart crashed services ([#86](https://github.com/drgould/multi-dev-proxy/issues/86)) ([b04fce4](https://github.com/drgould/multi-dev-proxy/commit/b04fce4d15f965377a5de54983ce659f4af54227))
+* exit mdp run when all batch services crash or close ([#84](https://github.com/drgould/multi-dev-proxy/issues/84)) ([734f6d8](https://github.com/drgould/multi-dev-proxy/commit/734f6d870211c3ce076aa46fd1eb8835bf106601))
+
+
+### Bug Fixes
+
+* take over foreign Service Worker scope when the served app changes ([#87](https://github.com/drgould/multi-dev-proxy/issues/87)) ([781dbc0](https://github.com/drgould/multi-dev-proxy/commit/781dbc01992dca97dd0a23edeb54fdc1a37191ef))
+
 ## [1.14.0](https://github.com/drgould/multi-dev-proxy/compare/v1.13.0...v1.14.0) (2026-08-24)
 
 
