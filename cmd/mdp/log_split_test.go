@@ -114,6 +114,7 @@ func TestRunSoloFlushesOnNonZeroExit(t *testing.T) {
 		_ = runSolo(
 			[]string{"sh", "-c", `printf 'api-1   | trailing, no newline'; exit 3`},
 			config.LogSplitConfig{Mode: "compose"},
+			false,
 		)
 		return
 	}

@@ -217,6 +217,11 @@ type ServiceConfig struct {
 	// service is still up after its command has exited. Nil falls back to
 	// a TCP probe on the service's registered port.
 	HealthCheck *HealthCheck `yaml:"health_check"`
+
+	// Restart, when true, auto-restarts the service's process after it
+	// exits — crash or clean exit alike. Intentional shutdown never
+	// triggers this.
+	Restart bool `yaml:"restart"`
 }
 
 // PostStartConfig configures the post-readiness hooks of a service. It accepts

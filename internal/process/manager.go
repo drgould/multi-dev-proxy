@@ -26,6 +26,9 @@ type RunOpts struct {
 	TLSCertPath  string // forwarded to proxy for dynamic TLS upgrade
 	TLSKeyPath   string // forwarded to proxy for dynamic TLS upgrade
 	ProxyTimeout time.Duration
+	// Restart, when true, respawns the command after it exits (crash or
+	// clean exit alike) instead of returning.
+	Restart bool
 	// Stdout/Stderr override where the child's output is forwarded.
 	// When nil, falls back to os.Stdout / os.Stderr.
 	Stdout io.Writer
@@ -35,6 +38,10 @@ type RunOpts struct {
 type Manager struct{}
 
 func New() *Manager { return &Manager{} }
+
+// restartDelay is the pause before respawning a command with Restart
+// enabled. Package-level so tests can shorten it.
+var restartDelay = 1 * time.Second
 
 func (m *Manager) Run(ctx context.Context, args []string, opts RunOpts) (int, error) {
 	if len(args) == 0 {
@@ -57,94 +64,134 @@ func (m *Manager) Run(ctx context.Context, args []string, opts RunOpts) (int, er
 	defer flushSink(opts.Stdout)
 	defer flushSink(opts.Stderr)
 
-	cmd := exec.CommandContext(ctx, args[0], args[1:]...)
-	cmd.Stdin = os.Stdin
-	cmd.Stderr = stderrSink
-	cmd.Env = append(os.Environ(), fmt.Sprintf("PORT=%d", opts.AssignedPort), "MDP=1")
-	SetProcessGroup(cmd)
-
-	stdout, err := cmd.StdoutPipe()
-	if err != nil {
-		return -1, fmt.Errorf("stdout pipe: %w", err)
-	}
-
-	if err := cmd.Start(); err != nil {
-		return -1, fmt.Errorf("start %q: %w", args[0], err)
-	}
-	pid := cmd.Process.Pid
-	slog.Info("started process", "pid", pid, "port", opts.AssignedPort, "name", opts.ServerName)
-
-	// registerDone closes once the stdout-reading goroutine has finished:
-	// port detection + (attempted) registration are done. Deregistration and
-	// Run's return must both wait on this so registration/deregistration are
-	// strictly ordered and callers see the final state.
-	registerDone := make(chan struct{})
-
-	if opts.ProxyURL != "" && opts.ServerName != "" {
-		go func() {
-			defer close(registerDone)
-			detected, err := detect.TeeAndDetect(stdout, stdoutSink, 30*time.Second)
-			regPort := opts.AssignedPort
-			if err == nil && detected.Port > 0 {
-				if detected.Port != opts.AssignedPort {
-					slog.Info("detected server port from stdout", "detected", detected.Port, "assigned", opts.AssignedPort)
-				}
-				regPort = detected.Port
-				if detected.Scheme != "" {
-					opts.Scheme = detected.Scheme
-				}
-			} else {
-				slog.Debug("port detection from stdout timed out, using assigned port", "port", opts.AssignedPort)
-			}
-			opts.AssignedPort = regPort
-			if err := registerWithProxy(opts.ProxyURL, opts, pid, opts.ProxyTimeout); err != nil {
-				slog.Warn("failed to register with proxy", "err", err)
-			} else {
-				slog.Info("registered with proxy", "name", opts.ServerName, "port", regPort)
-			}
-		}()
-	} else {
-		go func() {
-			defer close(registerDone)
-			io.Copy(stdoutSink, stdout)
-		}()
-	}
-
 	sigCh := make(chan os.Signal, 1)
 	signal.Notify(sigCh, syscall.SIGINT, syscall.SIGTERM)
 	defer signal.Stop(sigCh)
 
-	done := make(chan error, 1)
-	go func() { done <- cmd.Wait() }()
+	// assignedPort is the fixed port mdp allocated to this command; it must
+	// stay stable across restarts. The per-run registration below may
+	// register a *different* port (detected from the child's stdout) with
+	// the proxy without feeding that value back into this.
+	assignedPort := opts.AssignedPort
 
-	var exitErr error
-	select {
-	case sig := <-sigCh:
-		slog.Info("received signal, stopping child", "signal", sig)
-		// Kill first so stdout closes, then registerDone fires quickly even if
-		// the child was a long-running server that never emitted a port line.
-		KillProcessGroup(pid, 5*time.Second)
-		<-registerDone
-		deregisterFromProxy(opts.ProxyURL, opts.ServerName, opts.ProxyTimeout)
-		exitErr = <-done
-	case exitErr = <-done:
-		slog.Info("child exited", "pid", pid)
-		<-registerDone
-		deregisterFromProxy(opts.ProxyURL, opts.ServerName, opts.ProxyTimeout)
-	case <-ctx.Done():
-		KillProcessGroup(pid, 5*time.Second)
-		<-registerDone
-		deregisterFromProxy(opts.ProxyURL, opts.ServerName, opts.ProxyTimeout)
-		exitErr = <-done
-	}
+	for {
+		cmd := exec.CommandContext(ctx, args[0], args[1:]...)
+		cmd.Stdin = os.Stdin
+		cmd.Stderr = stderrSink
+		cmd.Env = append(os.Environ(), fmt.Sprintf("PORT=%d", assignedPort), "MDP=1")
+		SetProcessGroup(cmd)
 
-	if exitErr == nil {
-		return 0, nil
+		stdout, err := cmd.StdoutPipe()
+		if err != nil {
+			return -1, fmt.Errorf("stdout pipe: %w", err)
+		}
+
+		if err := cmd.Start(); err != nil {
+			// On a restart iteration the proxy already has this server
+			// registered from the previous run — deregister so a failed
+			// relaunch doesn't leave a stale registration behind.
+			deregisterFromProxy(opts.ProxyURL, opts.ServerName, opts.ProxyTimeout)
+			if ctx.Err() != nil {
+				// ctx was cancelled in the window between the restart delay
+				// elapsing and this relaunch attempt — a shutdown race, not
+				// a real start failure.
+				return 0, nil
+			}
+			return -1, fmt.Errorf("start %q: %w", args[0], err)
+		}
+		pid := cmd.Process.Pid
+		slog.Info("started process", "pid", pid, "port", assignedPort, "name", opts.ServerName)
+
+		// registerDone closes once the stdout-reading goroutine has finished:
+		// port detection + (attempted) registration are done. Deregistration and
+		// Run's return must both wait on this so registration/deregistration are
+		// strictly ordered and callers see the final state.
+		registerDone := make(chan struct{})
+
+		if opts.ProxyURL != "" && opts.ServerName != "" {
+			go func() {
+				defer close(registerDone)
+				detected, err := detect.TeeAndDetect(stdout, stdoutSink, 30*time.Second)
+				regOpts := opts
+				regOpts.AssignedPort = assignedPort
+				if err == nil && detected.Port > 0 {
+					if detected.Port != assignedPort {
+						slog.Info("detected server port from stdout", "detected", detected.Port, "assigned", assignedPort)
+					}
+					regOpts.AssignedPort = detected.Port
+					if detected.Scheme != "" {
+						regOpts.Scheme = detected.Scheme
+					}
+				} else {
+					slog.Debug("port detection from stdout timed out, using assigned port", "port", assignedPort)
+				}
+				if err := registerWithProxy(opts.ProxyURL, regOpts, pid, opts.ProxyTimeout); err != nil {
+					slog.Warn("failed to register with proxy", "err", err)
+				} else {
+					slog.Info("registered with proxy", "name", opts.ServerName, "port", regOpts.AssignedPort)
+				}
+			}()
+		} else {
+			go func() {
+				defer close(registerDone)
+				io.Copy(stdoutSink, stdout)
+			}()
+		}
+
+		done := make(chan error, 1)
+		go func() { done <- cmd.Wait() }()
+
+		var exitErr error
+		var restarting bool
+		select {
+		case sig := <-sigCh:
+			slog.Info("received signal, stopping child", "signal", sig)
+			// Kill first so stdout closes, then registerDone fires quickly even if
+			// the child was a long-running server that never emitted a port line.
+			KillProcessGroup(pid, 5*time.Second)
+			<-registerDone
+			deregisterFromProxy(opts.ProxyURL, opts.ServerName, opts.ProxyTimeout)
+			exitErr = <-done
+		case exitErr = <-done:
+			slog.Info("child exited", "pid", pid)
+			<-registerDone
+			if opts.Restart {
+				slog.Info("child exited; restarting", "name", opts.ServerName)
+				select {
+				case <-ctx.Done():
+				case <-sigCh:
+					slog.Info("received signal, not restarting")
+				case <-time.After(restartDelay):
+					restarting = true
+				}
+			}
+			if !restarting {
+				deregisterFromProxy(opts.ProxyURL, opts.ServerName, opts.ProxyTimeout)
+			}
+		case <-ctx.Done():
+			KillProcessGroup(pid, 5*time.Second)
+			<-registerDone
+			deregisterFromProxy(opts.ProxyURL, opts.ServerName, opts.ProxyTimeout)
+			exitErr = <-done
+		}
+
+		if restarting {
+			// Flush now, not just on final return — otherwise a trailing
+			// unterminated line from this child glues onto the next one's
+			// output in a buffering sink (e.g. splitWriter).
+			flushSink(opts.Stdout)
+			flushSink(opts.Stderr)
+			continue
+		}
+
+		if exitErr == nil {
+			return 0, nil
+		}
+		if ee, ok := exitErr.(*exec.ExitError); ok {
+			return ee.ExitCode(), nil
+		}
+		return -1, exitErr
 	}
-	if ee, ok := exitErr.(*exec.ExitError); ok {
-		return ee.ExitCode(), nil
-	}
-	return -1, exitErr
 }
 
 func flushSink(w io.Writer) {

@@ -175,6 +175,7 @@ Keys under `services.<name>`.
 | `log_split` | string \| mapping | `""` | Demultiplex combined-stream logs into per-sub-service colored lanes. Accepts the scalar `"compose"` (built-in docker-compose parser) or a mapping `{ regex: '<pattern>' }` for arbitrary prefixes. See [`log_split`](#log_split--demultiplex-combined-stream-logs). |
 | `depends_on` | list of service names | `[]` | Wait for each dependency to be TCP-reachable on its assigned port(s) before starting. 60s per-dependency timeout. Unknown names and cycles are rejected at config load. |
 | `health_check` | [health check](#health_check) \| `"docker"` | nil (TCP on `port`) | Liveness probe used by the registry pruner. When unset, the default is a TCP dial of the service's registered port. The `docker: [svc, ...]` variant also gates startup readiness. See [Detached services and health checks](#detached-services-and-health-checks). |
+| `restart` | bool | `false` | Automatically restart the service's process after it exits — crash or clean exit alike. `mdp run --restart` enables this for every service in addition to whatever's set here. See [`restart`](#restart--auto-restart-on-crash). |
 
 ### `command` — the basic case
 
@@ -432,6 +433,22 @@ For ad-hoc commands, pass the same value as a flag:
 mdp run --log-split=compose -- docker compose up
 mdp run --log-split='regex:^\[(?P<name>[^\]]+)\]\s*(?P<msg>.*)$' -- some-prefixed-tool
 ```
+
+### `restart` — auto-restart on crash
+
+```yaml
+services:
+  api:
+    command: ./api
+    proxy: 4000
+    restart: true
+```
+
+When `restart: true`, `mdp` relaunches the service's process whenever it exits — a crash (non-zero exit) or a clean exit (`0`) are treated the same, since both mean the dev server is no longer running. There's a fixed 1s pause between the exit and the relaunch; restart continues indefinitely (no retry cap or backoff curve). It never fires on an `mdp`-initiated shutdown (`Ctrl-C`, `mdp stop`, orchestrator going away).
+
+`mdp run --restart` turns this on for every service in a batch run, in addition to (not instead of) any per-service `restart: true` already in `mdp.yaml`. For an ad hoc command (`mdp run -- some-command`), `--restart` is the only way to enable it — there's no per-command YAML.
+
+Auto-restart is incompatible with holding a session open for a detached command (e.g. `docker compose up -d`): with `--restart`, a clean exit relaunches immediately instead of watching the port and waiting for the detached process to stop.
 
 ### `depends_on` — wait for readiness
 
