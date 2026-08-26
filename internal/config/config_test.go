@@ -934,6 +934,32 @@ services:
 	}
 }
 
+func TestLoadRestart(t *testing.T) {
+	dir := t.TempDir()
+	path := filepath.Join(dir, "mdp.yaml")
+	os.WriteFile(path, []byte(`
+services:
+  svc:
+    command: run
+    proxy: 3000
+    restart: true
+  other:
+    command: run
+    proxy: 3001
+`), 0644)
+
+	cfg, err := Load(path)
+	if err != nil {
+		t.Fatalf("Load() error = %v", err)
+	}
+	if !cfg.Services["svc"].Restart {
+		t.Errorf("svc.Restart = false, want true")
+	}
+	if cfg.Services["other"].Restart {
+		t.Errorf("other.Restart = true, want false (default)")
+	}
+}
+
 func TestLoadLogSplitInvalid(t *testing.T) {
 	dir := t.TempDir()
 	path := filepath.Join(dir, "mdp.yaml")

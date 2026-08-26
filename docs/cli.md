@@ -157,6 +157,7 @@ mdp stop
 | `--link`           |               | Override peer-lookup group: `repo=group` (repeatable). See [cross-repo refs](./mdp-yaml-reference.md#cross-group-lookups-via---link). |
 | `-i, --interactive`| `false`       | Prompt for the [`inputs:`](./mdp-yaml-reference.md#inputs) declared in `mdp.yaml`; without it, inputs use their defaults. |
 | `--service`        |               | Batch mode only: start only the listed services (repeatable or comma-separated). Transitive `depends_on` are auto-included. Falls back to `MDP_SERVICES`. |
+| `--restart`        | `false`       | Auto-restart a service's process after it exits (crash or clean exit). In batch mode this applies to every service, in addition to any per-service `restart: true` in mdp.yaml — see [`restart`](./mdp-yaml-reference.md#restart--auto-restart-on-crash). |
 
 
 `**mdp register` flags:**

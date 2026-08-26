@@ -8,11 +8,13 @@ import (
 	"net/http"
 	"net/http/httptest"
 	"os"
+	"os/exec"
 	"path/filepath"
 	"slices"
 	"strings"
 	"sync"
 	"sync/atomic"
+	"syscall"
 	"testing"
 	"time"
 
@@ -941,7 +943,7 @@ func TestSuperviseProcessPostStartOnRestart(t *testing.T) {
 			ctx, cancel := context.WithCancel(context.Background())
 			done := make(chan struct{})
 			go func() {
-				superviseProcess(ctx, cmd, bt, http.DefaultClient, srv.URL, a, nil, registerAll, runPostStart, envexpand.PortMap{}, resolver, nil, pw, pwErr)
+				superviseProcess(ctx, cmd, nil, bt, http.DefaultClient, srv.URL, a, nil, registerAll, runPostStart, envexpand.PortMap{}, resolver, nil, pw, pwErr)
 				close(done)
 			}()
 			t.Cleanup(func() {
@@ -994,7 +996,7 @@ func TestSuperviseProcessReturnsErrorOnCrash(t *testing.T) {
 
 	registerAll := func() ([]string, error) { return nil, nil }
 	runPostStart := func([]string, bool) {}
-	err = superviseProcess(context.Background(), cmd, bt, http.DefaultClient, "", a, nil, registerAll, runPostStart, envexpand.PortMap{}, nil, nil, pw, pwErr)
+	err = superviseProcess(context.Background(), cmd, nil, bt, http.DefaultClient, "", a, nil, registerAll, runPostStart, envexpand.PortMap{}, nil, nil, pw, pwErr)
 	if err == nil {
 		t.Fatal("expected non-nil error from a crashed process, got nil")
 	}
@@ -1012,7 +1014,7 @@ func TestSuperviseProcessReturnsNilOnCleanExit(t *testing.T) {
 
 	registerAll := func() ([]string, error) { return nil, nil }
 	runPostStart := func([]string, bool) {}
-	err = superviseProcess(context.Background(), cmd, bt, http.DefaultClient, "", a, nil, registerAll, runPostStart, envexpand.PortMap{}, nil, nil, pw, pwErr)
+	err = superviseProcess(context.Background(), cmd, nil, bt, http.DefaultClient, "", a, nil, registerAll, runPostStart, envexpand.PortMap{}, nil, nil, pw, pwErr)
 	if err != nil {
 		t.Fatalf("expected nil error from a clean exit, got %v", err)
 	}
@@ -1036,7 +1038,7 @@ func TestSuperviseProcessReturnsNilOnCtxCancel(t *testing.T) {
 	ctx, cancel := context.WithCancel(context.Background())
 	done := make(chan error, 1)
 	go func() {
-		done <- superviseProcess(ctx, cmd, bt, http.DefaultClient, "", a, nil, registerAll, runPostStart, envexpand.PortMap{}, nil, nil, pw, pwErr)
+		done <- superviseProcess(ctx, cmd, nil, bt, http.DefaultClient, "", a, nil, registerAll, runPostStart, envexpand.PortMap{}, nil, nil, pw, pwErr)
 	}()
 
 	time.Sleep(50 * time.Millisecond)
@@ -1084,9 +1086,111 @@ func TestLaunchBatchServiceSetsStateErrOnProcessCrash(t *testing.T) {
 }
 
 func TestRunSoloNoEnvOverride(t *testing.T) {
-	err := runSolo([]string{"sh", "-c", `test -z "$MDP" && test -z "$PORT"`}, config.LogSplitConfig{})
+	err := runSolo([]string{"sh", "-c", `test -z "$MDP" && test -z "$PORT"`}, config.LogSplitConfig{}, false)
 	if err != nil {
 		t.Fatalf("runSolo should not set MDP or PORT: %v", err)
+	}
+}
+
+func TestRunSoloRestartsOnExit(t *testing.T) {
+	if os.Getenv("MDP_TEST_RUNSOLO_RESTART") == "1" {
+		crashRestartDelay = 20 * time.Millisecond
+		_ = runSolo(
+			[]string{"sh", "-c", "echo x >> " + os.Getenv("MDP_TEST_RUNSOLO_RESTART_LOG")},
+			config.LogSplitConfig{},
+			true,
+		)
+		return
+	}
+
+	dir := t.TempDir()
+	logPath := filepath.Join(dir, "runs.log")
+	sub := exec.Command(os.Args[0], "-test.run=^TestRunSoloRestartsOnExit$")
+	sub.Env = append(os.Environ(),
+		"MDP_TEST_RUNSOLO_RESTART=1",
+		"MDP_TEST_RUNSOLO_RESTART_LOG="+logPath,
+	)
+	if err := sub.Start(); err != nil {
+		t.Fatalf("start subprocess: %v", err)
+	}
+	defer sub.Process.Kill()
+
+	deadline := time.Now().Add(3 * time.Second)
+	for time.Now().Before(deadline) {
+		data, _ := os.ReadFile(logPath)
+		if strings.Count(string(data), "x\n") >= 2 {
+			break
+		}
+		time.Sleep(20 * time.Millisecond)
+	}
+	data, _ := os.ReadFile(logPath)
+	if got := strings.Count(string(data), "x\n"); got < 2 {
+		t.Fatalf("expected at least 2 restarts, got %d; log=%q", got, string(data))
+	}
+
+	sub.Process.Signal(syscall.SIGTERM)
+	waitCh := make(chan error, 1)
+	go func() { waitCh <- sub.Wait() }()
+	select {
+	case err := <-waitCh:
+		if err != nil {
+			t.Errorf("subprocess exit: %v", err)
+		}
+	case <-time.After(5 * time.Second):
+		t.Fatal("subprocess did not exit after SIGTERM")
+	}
+}
+
+func TestRunProxiedRestartsOnCrash(t *testing.T) {
+	prevDelay := crashRestartDelay
+	crashRestartDelay = 20 * time.Millisecond
+	t.Cleanup(func() { crashRestartDelay = prevDelay })
+
+	dir := t.TempDir()
+	logPath := filepath.Join(dir, "log")
+
+	stop := make(chan struct{})
+	var stopOnce sync.Once
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.URL.Path == "/__mdp/shutdown/watch" {
+			<-stop
+			w.WriteHeader(http.StatusOK)
+			return
+		}
+		w.WriteHeader(http.StatusOK)
+	}))
+	defer srv.Close()
+	defer stopOnce.Do(func() { close(stop) })
+
+	done := make(chan error, 1)
+	go func() {
+		done <- runProxied(
+			[]string{"sh", "-c", "echo x >> " + logPath + "; exit 1"},
+			"PORT", 12345, srv.URL, "test/svc", "test-client-id", config.LogSplitConfig{}, true,
+		)
+	}()
+
+	deadline := time.Now().Add(3 * time.Second)
+	for time.Now().Before(deadline) {
+		data, _ := os.ReadFile(logPath)
+		if strings.Count(string(data), "x\n") >= 2 {
+			break
+		}
+		time.Sleep(20 * time.Millisecond)
+	}
+	data, _ := os.ReadFile(logPath)
+	if got := strings.Count(string(data), "x\n"); got < 2 {
+		t.Fatalf("expected at least 2 restarts, got %d; log=%q", got, string(data))
+	}
+
+	stopOnce.Do(func() { close(stop) })
+	select {
+	case err := <-done:
+		if err != nil {
+			t.Errorf("runProxied returned err: %v", err)
+		}
+	case <-time.After(5 * time.Second):
+		t.Fatal("runProxied did not return after shutdown signal")
 	}
 }
 
@@ -1135,7 +1239,7 @@ func TestRunProxiedDisconnectsOnChildExit(t *testing.T) {
 
 	err := runProxied(
 		[]string{"sh", "-c", "exit 0"},
-		"PORT", 12345, srv.URL, "test/svc", "test-client-id", config.LogSplitConfig{},
+		"PORT", 12345, srv.URL, "test/svc", "test-client-id", config.LogSplitConfig{}, false,
 	)
 	if err != nil {
 		t.Fatalf("runProxied: %v", err)
@@ -1166,7 +1270,7 @@ func TestRunProxiedDisconnectsOnNonZeroExit(t *testing.T) {
 
 	err := runProxied(
 		[]string{"sh", "-c", "exit 0"},
-		"PORT", 12345, srv.URL, "test/svc", "test-client-id", config.LogSplitConfig{},
+		"PORT", 12345, srv.URL, "test/svc", "test-client-id", config.LogSplitConfig{}, false,
 	)
 	if err != nil {
 		t.Fatalf("runProxied: %v", err)
@@ -1197,7 +1301,7 @@ func TestRunProxiedSetsMDPEnv(t *testing.T) {
 
 	err := runProxied(
 		[]string{"sh", "-c", `test "$MDP" = "1" && test -n "$PORT"`},
-		"PORT", 12345, srv.URL, "", "", config.LogSplitConfig{},
+		"PORT", 12345, srv.URL, "", "", config.LogSplitConfig{}, false,
 	)
 	if err != nil {
 		t.Fatalf("runProxied should set MDP=1 and PORT: %v", err)
@@ -1317,7 +1421,7 @@ func TestSuperviseProcessRestartsOnPeerChange(t *testing.T) {
 	ctx, cancel := context.WithCancel(context.Background())
 	done := make(chan struct{})
 	go func() {
-		superviseProcess(ctx, cmd, bt, http.DefaultClient, srv.URL, a, nil, registerAll, func([]string, bool) {}, envexpand.PortMap{}, resolver, nil, pw, pwErr)
+		superviseProcess(ctx, cmd, nil, bt, http.DefaultClient, srv.URL, a, nil, registerAll, func([]string, bool) {}, envexpand.PortMap{}, resolver, nil, pw, pwErr)
 		close(done)
 	}()
 	t.Cleanup(func() {
@@ -1362,6 +1466,114 @@ func TestSuperviseProcessRestartsOnPeerChange(t *testing.T) {
 
 	if !waitFor("9999", 3*time.Second) {
 		t.Fatalf("restart cmd never wrote 9999; log=%q", readFile(t, logPath))
+	}
+}
+
+func TestSuperviseProcessRestartsOnCrash(t *testing.T) {
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.WriteHeader(http.StatusOK)
+	}))
+	defer srv.Close()
+
+	prevDelay := crashRestartDelay
+	crashRestartDelay = 20 * time.Millisecond
+	t.Cleanup(func() { crashRestartDelay = prevDelay })
+
+	dir := t.TempDir()
+	logPath := filepath.Join(dir, "log")
+	command := "sh -c 'echo run >> " + logPath + "; exit 1'"
+
+	a := &batchAlloc{
+		name:     "frontend",
+		svcGroup: "dev",
+		svc: config.ServiceConfig{
+			Command: command,
+			Restart: true,
+		},
+	}
+
+	bt := &batchTracker{}
+	pw := newPrefixWriter("test", "0;0", os.Stdout)
+	pwErr := newPrefixWriter("test", "0;0", os.Stderr)
+	cmd, err := startBatchCommand(bt, command, "", nil, pw, pwErr)
+	if err != nil {
+		t.Fatalf("startBatchCommand: %v", err)
+	}
+
+	registerAll := func() ([]string, error) { return nil, nil }
+	resolver := newPeerResolver(http.DefaultClient, srv.URL, "dev", nil)
+
+	ctx, cancel := context.WithCancel(context.Background())
+	done := make(chan struct{})
+	go func() {
+		superviseProcess(ctx, cmd, nil, bt, http.DefaultClient, srv.URL, a, nil, registerAll, func([]string, bool) {}, envexpand.PortMap{}, resolver, nil, pw, pwErr)
+		close(done)
+	}()
+	t.Cleanup(func() {
+		cancel()
+		bt.killAll()
+		waitDoneOrFail(t, done)
+		bt.wg.Wait()
+	})
+
+	waitForLines := func(min int, dur time.Duration) bool {
+		deadline := time.Now().Add(dur)
+		for time.Now().Before(deadline) {
+			data, _ := os.ReadFile(logPath)
+			if strings.Count(string(data), "run\n") >= min {
+				return true
+			}
+			time.Sleep(10 * time.Millisecond)
+		}
+		return false
+	}
+	if !waitForLines(2, 3*time.Second) {
+		t.Fatalf("crashed service never restarted; log=%q", readFile(t, logPath))
+	}
+}
+
+func TestSuperviseProcessNoRestartWithoutFlag(t *testing.T) {
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.WriteHeader(http.StatusOK)
+	}))
+	defer srv.Close()
+
+	dir := t.TempDir()
+	logPath := filepath.Join(dir, "log")
+	command := "sh -c 'echo run >> " + logPath + "; exit 1'"
+
+	a := &batchAlloc{
+		name:     "frontend",
+		svcGroup: "dev",
+		svc: config.ServiceConfig{
+			Command: command,
+		},
+	}
+
+	bt := &batchTracker{}
+	pw := newPrefixWriter("test", "0;0", os.Stdout)
+	pwErr := newPrefixWriter("test", "0;0", os.Stderr)
+	cmd, err := startBatchCommand(bt, command, "", nil, pw, pwErr)
+	if err != nil {
+		t.Fatalf("startBatchCommand: %v", err)
+	}
+
+	registerAll := func() ([]string, error) { return nil, nil }
+	resolver := newPeerResolver(http.DefaultClient, srv.URL, "dev", nil)
+
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	done := make(chan struct{})
+	go func() {
+		superviseProcess(ctx, cmd, nil, bt, http.DefaultClient, srv.URL, a, nil, registerAll, func([]string, bool) {}, envexpand.PortMap{}, resolver, nil, pw, pwErr)
+		close(done)
+	}()
+
+	waitDoneOrFail(t, done)
+
+	data, _ := os.ReadFile(logPath)
+	if got := strings.Count(string(data), "run\n"); got != 1 {
+		t.Errorf("expected exactly 1 run without restart, got %d; log=%q", got, string(data))
 	}
 }
 

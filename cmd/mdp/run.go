@@ -94,6 +94,7 @@ func init() {
 	runCmd.Flags().Bool("select-services", false, "Show an interactive checkbox picker for which mdp.yaml services to start (depends_on auto-included). Cannot combine with --service/MDP_SERVICES.")
 	runCmd.Flags().BoolP("detach", "d", false, "Run mdp.yaml batch services in the background and return the terminal. Stop with `mdp run --stop`.")
 	runCmd.Flags().Bool("stop", false, "Stop the detached batch run for the current repo/group.")
+	runCmd.Flags().Bool("restart", false, "Automatically restart a service after its process exits (crash or clean exit). In batch mode this applies to every service in addition to any per-service `restart: true` in mdp.yaml. For a single-command run that detaches (e.g. `docker compose up -d`), this skips the normal detached-session hold and relaunches the command immediately on its clean exit.")
 }
 
 // parseLinks converts repeated `--link repo=group` values into a map. Empty
@@ -371,6 +372,7 @@ func runBatchMode(cmd *cobra.Command, controlPort int, groupFlag string, linkMap
 
 	detach, _ := cmd.Flags().GetBool("detach")
 	detachedChild := os.Getenv("_MDP_RUN_DETACHED") != ""
+	restartFlag, _ := cmd.Flags().GetBool("restart")
 
 	// Resolve declared inputs (prompting when -i, else defaults), then
 	// substitute ${inputs.X} refs throughout the config so the env/link
@@ -536,6 +538,9 @@ func runBatchMode(cmd *cobra.Command, controlPort int, groupFlag string, linkMap
 		svcGroup := svc.Group
 		if svcGroup == "" {
 			svcGroup = group
+		}
+		if restartFlag {
+			svc.Restart = true
 		}
 
 		if len(svc.Ports) > 0 {
@@ -1183,15 +1188,32 @@ func launchBatchService(
 		updatePIDWithOrchestrator(controlURL, sn, cmd.Process.Pid)
 	}
 
+	// Start waiting on the process now (Wait may only be called once), so a
+	// crash during the readiness poll below is noticed immediately instead
+	// of only after the poll's full timeout — otherwise a service whose
+	// process dies right after starting wouldn't reach superviseProcess (and
+	// so wouldn't get crash-restarted) for up to rt.readyTimeout.
+	cmdExit := waitCmd(cmd)
+
 	// Poll TCP readiness so dependents only unblock once this service is
-	// actually accepting connections.
+	// actually accepting connections. Bail out early if the process exits
+	// first — no point polling a dead process's port for the full timeout.
 	if len(probePorts) > 0 {
-		if err := depwait.TCPReady(ctx, probePorts, rt.readyTimeout, rt.readyPoll, rt.tcpCheck); err != nil {
+		readyCtx, readyCancel := context.WithCancel(ctx)
+		go func() {
+			select {
+			case <-cmdExit.done:
+				readyCancel()
+			case <-readyCtx.Done():
+			}
+		}()
+		if err := depwait.TCPReady(readyCtx, probePorts, rt.readyTimeout, rt.readyPoll, rt.tcpCheck); err != nil {
 			slog.Error("service not ready", "name", a.name, "err", err)
 			state.Err = err
 			// Fall through to wait for the cmd — leave it running so logs
 			// still stream and shutdown can clean it up normally.
 		}
+		readyCancel()
 	}
 
 	// Signal dependents now; the rest of this goroutine just drains the cmd
@@ -1201,7 +1223,7 @@ func launchBatchService(
 		runPostStart(env, false)
 	}
 
-	if err := superviseProcess(ctx, cmd, bt, client, controlURL, a, registered, registerAll, runPostStart, portMap, resolver, linkMap, pw, pwErr); err != nil {
+	if err := superviseProcess(ctx, cmd, cmdExit, bt, client, controlURL, a, registered, registerAll, runPostStart, portMap, resolver, linkMap, pw, pwErr); err != nil {
 		state.Err = err
 	}
 
@@ -1280,12 +1302,41 @@ func runServiceHook(ctx context.Context, mgr *hookpty.Manager, raw, name, phase 
 // for cross-repo peer state changes. Package-level so tests can shorten it.
 var peerWatchInterval = 2 * time.Second
 
+// crashRestartDelay is the pause before respawning a service whose process
+// exited (crash or clean exit) with restart enabled. Package-level so tests
+// can shorten it.
+var crashRestartDelay = 1 * time.Second
+
+// cmdWaiter broadcasts a cmd.Wait() result to multiple observers (exec.Cmd's
+// Wait may only be called once). done closes once err is set.
+type cmdWaiter struct {
+	done chan struct{}
+	err  error
+}
+
+func waitCmd(cmd *exec.Cmd) *cmdWaiter {
+	w := &cmdWaiter{done: make(chan struct{})}
+	go func() {
+		w.err = cmd.Wait()
+		close(w.done)
+	}()
+	return w
+}
+
 // superviseProcess waits for cmd to exit, restarting it whenever a watched
-// cross-repo peer's port or env value changes. Returns when the cmd exits
-// without a peer-triggered restart, or when ctx is cancelled.
+// cross-repo peer's port or env value changes, or (when a.svc.Restart is
+// true) whenever the process itself exits. Returns when the cmd exits
+// without a restart, or when ctx is cancelled.
+//
+// initialExit, when non-nil, is a cmdWaiter already watching cmd (started by
+// the caller so a crash during the caller's own pre-supervision readiness
+// poll is observed promptly) — its result is reused for the first loop
+// iteration instead of calling cmd.Wait() a second time. Every later
+// iteration (relaunch) waits on its own fresh cmd as usual.
 func superviseProcess(
 	ctx context.Context,
 	cmd *exec.Cmd,
+	initialExit *cmdWaiter,
 	bt *batchTracker,
 	client *http.Client,
 	controlURL string,
@@ -1313,7 +1364,13 @@ func superviseProcess(
 		}
 
 		cmdExit := make(chan error, 1)
-		go func(c *exec.Cmd) { cmdExit <- c.Wait() }(cmd)
+		if initialExit != nil {
+			w := initialExit
+			initialExit = nil
+			go func() { <-w.done; cmdExit <- w.err }()
+		} else {
+			go func(c *exec.Cmd) { cmdExit <- c.Wait() }(cmd)
+		}
 
 		var restart bool
 		var exitErr error
@@ -1327,6 +1384,15 @@ func superviseProcess(
 			if waitErr != nil {
 				slog.Error("service process exited", "name", a.name, "command", a.svc.Command, "err", waitErr)
 				exitErr = waitErr
+			}
+			if a.svc.Restart {
+				slog.Info("service exited; restarting", "name", a.name)
+				select {
+				case <-ctx.Done():
+					return nil // shutting down — don't relaunch
+				case <-time.After(crashRestartDelay):
+				}
+				restart = true
 			}
 		case updated := <-peerCh:
 			watchCancel()
@@ -1346,6 +1412,12 @@ func superviseProcess(
 			return exitErr
 		}
 
+		// Flush any partial line still buffered from the exited process —
+		// otherwise its trailing fragment glues onto the relaunched
+		// process's first output.
+		pw.Flush()
+		pwErr.Flush()
+
 		newEnv, err := buildBatchEnv(*a, portMap, resolver)
 		if err != nil {
 			slog.Error("rebuild env failed; not restarting", "name", a.name, "err", err)
@@ -1361,9 +1433,15 @@ func superviseProcess(
 			slog.Error("re-register failed; not restarting", "name", a.name, "err", err)
 			return err
 		}
+		// The exited cmd stays in bt's tracked list otherwise — with restart
+		// enabled that list would grow without bound across a crash loop.
+		bt.remove(cmd)
 		newCmd, err := startBatchCommand(bt, a.svc.Command, a.svc.Dir, newEnv, pw, pwErr)
 		if err != nil {
 			slog.Error("restart failed", "name", a.name, "err", err)
+			for _, sn := range registered {
+				deregisterFromOrchestrator(controlURL, sn)
+			}
 			return err
 		}
 		for _, sn := range registered {
@@ -1831,6 +1909,20 @@ func (bt *batchTracker) add(cmd *exec.Cmd) {
 	bt.cmds = append(bt.cmds, cmd)
 }
 
+// remove drops an already-exited cmd from the tracked list, e.g. right
+// before a restart replaces it — otherwise a crash-restart loop grows this
+// list without bound.
+func (bt *batchTracker) remove(cmd *exec.Cmd) {
+	bt.mu.Lock()
+	defer bt.mu.Unlock()
+	for i, c := range bt.cmds {
+		if c == cmd {
+			bt.cmds = append(bt.cmds[:i], bt.cmds[i+1:]...)
+			return
+		}
+	}
+}
+
 func (bt *batchTracker) signalAll() {
 	bt.mu.Lock()
 	defer bt.mu.Unlock()
@@ -1857,6 +1949,7 @@ func runSingleMode(cmd *cobra.Command, args []string, controlPort int, groupFlag
 	nameOverride, _ := cmd.Flags().GetString("name")
 	portRangeStr, _ := cmd.Flags().GetString("port-range")
 	envVar, _ := cmd.Flags().GetString("env")
+	restartFlag, _ := cmd.Flags().GetBool("restart")
 
 	if envPort := os.Getenv("MDP_PROXY_PORT"); envPort != "" && !cmd.Flags().Changed("proxy-port") {
 		fmt.Sscanf(envPort, "%d", &proxyPort)
@@ -1957,12 +2050,12 @@ func runSingleMode(cmd *cobra.Command, args []string, controlPort int, groupFlag
 		}
 		slog.Info("registered with orchestrator", "name", serverName, "proxy", proxyPort)
 		controlURL := fmt.Sprintf("http://127.0.0.1:%d", controlPort)
-		return runProxied(args, envVar, assignedPort, controlURL, serverName, clientID, logSplit)
+		return runProxied(args, envVar, assignedPort, controlURL, serverName, clientID, logSplit, restartFlag)
 	} else {
 		proxyURL, proxyRunning := detectProxy(proxyPort)
 		if !proxyRunning {
 			slog.Info("no proxy detected, starting in solo mode", "proxy-port", proxyPort)
-			return runSolo(args, logSplit)
+			return runSolo(args, logSplit, restartFlag)
 		}
 		slog.Info("proxy detected, starting in proxy mode", "url", proxyURL)
 
@@ -1976,6 +2069,7 @@ func runSingleMode(cmd *cobra.Command, args []string, controlPort int, groupFlag
 			TLSCertPath:  tlsCert,
 			TLSKeyPath:   tlsKey,
 			ProxyTimeout: 3 * time.Second,
+			Restart:      restartFlag,
 		}
 		splitter, err := newLogSplitterFromConfig(logSplit, "")
 		if err != nil {
@@ -2073,38 +2167,11 @@ func watchHealth(healthURL string) <-chan struct{} {
 	return gone
 }
 
-func runProxied(args []string, envVar string, port int, controlURL string, serverName string, clientID string, logSplit config.LogSplitConfig) error {
-	cmd := exec.Command(args[0], args[1:]...)
-	cmd.Stdin = os.Stdin
+func runProxied(args []string, envVar string, port int, controlURL string, serverName string, clientID string, logSplit config.LogSplitConfig, restart bool) error {
 	splitter, err := newLogSplitterFromConfig(logSplit, "")
 	if err != nil {
 		return err
 	}
-	var stdoutSplit, stderrSplit *splitWriter
-	if splitter != nil {
-		stdoutSplit = newSplitWriter(os.Stdout, os.Stdout, splitter)
-		stderrSplit = newSplitWriter(os.Stderr, os.Stderr, splitter)
-		cmd.Stdout = stdoutSplit
-		cmd.Stderr = stderrSplit
-	} else {
-		cmd.Stdout = os.Stdout
-		cmd.Stderr = os.Stderr
-	}
-	cmd.Env = append(os.Environ(), fmt.Sprintf("%s=%d", envVar, port), "MDP=1")
-	flushSplits := func() {
-		if stdoutSplit != nil {
-			stdoutSplit.Flush()
-		}
-		if stderrSplit != nil {
-			stderrSplit.Flush()
-		}
-	}
-	defer flushSplits()
-
-	if err := cmd.Start(); err != nil {
-		return fmt.Errorf("start %q: %w", args[0], err)
-	}
-	updatePIDWithOrchestrator(controlURL, serverName, cmd.Process.Pid)
 
 	hbCtx, hbCancel := context.WithCancel(context.Background())
 	defer hbCancel()
@@ -2114,53 +2181,119 @@ func runProxied(args []string, envVar string, port int, controlURL string, serve
 	signal.Notify(sigCh, syscall.SIGINT, syscall.SIGTERM)
 	defer signal.Stop(sigCh)
 
-	done := make(chan error, 1)
-	go func() { done <- cmd.Wait() }()
-
 	gone := watchShutdown(controlURL)
 
-	select {
-	case <-sigCh:
-		hbCancel()
-		disconnectFromOrchestrator(controlURL, clientID)
-		cmd.Process.Signal(syscall.SIGTERM)
+	// waitBeforeRestart pauses crashRestartDelay before a relaunch, but
+	// bails out (disconnecting) if a shutdown signal arrives first. Only
+	// called once the crashed/exited process has already been reaped.
+	waitBeforeRestart := func() (stop bool) {
 		select {
-		case <-done:
-		case <-time.After(5 * time.Second):
-			cmd.Process.Kill()
-			<-done
-		}
-	case <-gone:
-		slog.Warn("orchestrator is shutting down")
-		hbCancel()
-		disconnectFromOrchestrator(controlURL, clientID)
-		cmd.Process.Signal(syscall.SIGTERM)
-		select {
-		case <-done:
-		case <-time.After(5 * time.Second):
-			cmd.Process.Kill()
-			<-done
-		}
-	case err := <-done:
-		if err != nil {
+		case <-sigCh:
 			hbCancel()
 			disconnectFromOrchestrator(controlURL, clientID)
-			if ee, ok := err.(*exec.ExitError); ok {
-				flushSplits()
-				os.Exit(ee.ExitCode())
-			}
-			return err
+			return true
+		case <-gone:
+			hbCancel()
+			disconnectFromOrchestrator(controlURL, clientID)
+			return true
+		case <-time.After(crashRestartDelay):
+			return false
 		}
-		// Clean exit. The command may have detached (e.g. `docker compose
-		// up -d`) — keep the registration alive while the port still
-		// answers, and only disconnect once it stops or the user
-		// interrupts.
-		if err := holdDetached(sigCh, gone, controlURL, clientID, port); err != nil {
-			return err
-		}
-		hbCancel()
 	}
-	return nil
+
+	for {
+		cmd := exec.Command(args[0], args[1:]...)
+		cmd.Stdin = os.Stdin
+		var stdoutSplit, stderrSplit *splitWriter
+		if splitter != nil {
+			stdoutSplit = newSplitWriter(os.Stdout, os.Stdout, splitter)
+			stderrSplit = newSplitWriter(os.Stderr, os.Stderr, splitter)
+			cmd.Stdout = stdoutSplit
+			cmd.Stderr = stderrSplit
+		} else {
+			cmd.Stdout = os.Stdout
+			cmd.Stderr = os.Stderr
+		}
+		cmd.Env = append(os.Environ(), fmt.Sprintf("%s=%d", envVar, port), "MDP=1")
+		flushSplits := func() {
+			if stdoutSplit != nil {
+				stdoutSplit.Flush()
+			}
+			if stderrSplit != nil {
+				stderrSplit.Flush()
+			}
+		}
+
+		if err := cmd.Start(); err != nil {
+			flushSplits()
+			// On a restart iteration the orchestrator already has this
+			// client registered from the previous run — disconnect it so a
+			// failed relaunch doesn't leave a stale registration behind.
+			disconnectFromOrchestrator(controlURL, clientID)
+			return fmt.Errorf("start %q: %w", args[0], err)
+		}
+		updatePIDWithOrchestrator(controlURL, serverName, cmd.Process.Pid)
+
+		done := make(chan error, 1)
+		go func() { done <- cmd.Wait() }()
+
+		select {
+		case <-sigCh:
+			hbCancel()
+			disconnectFromOrchestrator(controlURL, clientID)
+			cmd.Process.Signal(syscall.SIGTERM)
+			select {
+			case <-done:
+			case <-time.After(5 * time.Second):
+				cmd.Process.Kill()
+				<-done
+			}
+			flushSplits()
+			return nil
+		case <-gone:
+			slog.Warn("orchestrator is shutting down")
+			hbCancel()
+			disconnectFromOrchestrator(controlURL, clientID)
+			cmd.Process.Signal(syscall.SIGTERM)
+			select {
+			case <-done:
+			case <-time.After(5 * time.Second):
+				cmd.Process.Kill()
+				<-done
+			}
+			flushSplits()
+			return nil
+		case err := <-done:
+			flushSplits()
+			if restart {
+				// Auto-restart is incompatible with holding a session open
+				// for a detached command — relaunch instead, on crash or
+				// clean exit alike.
+				slog.Info("service exited; restarting", "name", serverName)
+				if waitBeforeRestart() {
+					return nil
+				}
+				continue
+			}
+			if err != nil {
+				hbCancel()
+				disconnectFromOrchestrator(controlURL, clientID)
+				if ee, ok := err.(*exec.ExitError); ok {
+					os.Exit(ee.ExitCode())
+				}
+				return err
+			}
+			// Clean exit. The command may have detached (e.g. `docker compose
+			// up -d`) — keep the registration alive while the port still
+			// answers, and only disconnect once it stops or the user
+			// interrupts.
+			if err := holdDetached(sigCh, gone, controlURL, clientID, port); err != nil {
+				return err
+			}
+			hbCancel()
+			return nil
+		}
+	}
 }
 
 // holdDetached keeps the client session alive after a clean command exit
@@ -2351,61 +2484,77 @@ func deregisterFromOrchestrator(controlURL, serverName string) {
 	slog.Info("deregistered from orchestrator", "name", serverName)
 }
 
-func runSolo(args []string, logSplit config.LogSplitConfig) error {
-	cmd := exec.Command(args[0], args[1:]...)
-	cmd.Stdin = os.Stdin
+func runSolo(args []string, logSplit config.LogSplitConfig, restart bool) error {
 	splitter, err := newLogSplitterFromConfig(logSplit, "")
 	if err != nil {
 		return err
-	}
-	var stdoutSplit, stderrSplit *splitWriter
-	if splitter != nil {
-		stdoutSplit = newSplitWriter(os.Stdout, os.Stdout, splitter)
-		stderrSplit = newSplitWriter(os.Stderr, os.Stderr, splitter)
-		cmd.Stdout = stdoutSplit
-		cmd.Stderr = stderrSplit
-	} else {
-		cmd.Stdout = os.Stdout
-		cmd.Stderr = os.Stderr
-	}
-	flushSplits := func() {
-		if stdoutSplit != nil {
-			stdoutSplit.Flush()
-		}
-		if stderrSplit != nil {
-			stderrSplit.Flush()
-		}
-	}
-	defer flushSplits()
-
-	if err := cmd.Start(); err != nil {
-		return fmt.Errorf("start %q: %w", args[0], err)
 	}
 
 	sigCh := make(chan os.Signal, 1)
 	signal.Notify(sigCh, syscall.SIGINT, syscall.SIGTERM)
 	defer signal.Stop(sigCh)
 
-	done := make(chan error, 1)
-	go func() { done <- cmd.Wait() }()
-
-	select {
-	case <-sigCh:
-		cmd.Process.Signal(syscall.SIGTERM)
-		select {
-		case <-done:
-		case <-time.After(5 * time.Second):
-			cmd.Process.Kill()
-			<-done
+	for {
+		cmd := exec.Command(args[0], args[1:]...)
+		cmd.Stdin = os.Stdin
+		var stdoutSplit, stderrSplit *splitWriter
+		if splitter != nil {
+			stdoutSplit = newSplitWriter(os.Stdout, os.Stdout, splitter)
+			stderrSplit = newSplitWriter(os.Stderr, os.Stderr, splitter)
+			cmd.Stdout = stdoutSplit
+			cmd.Stderr = stderrSplit
+		} else {
+			cmd.Stdout = os.Stdout
+			cmd.Stderr = os.Stderr
 		}
-	case err := <-done:
-		if err != nil {
-			if ee, ok := err.(*exec.ExitError); ok {
-				flushSplits()
-				os.Exit(ee.ExitCode())
+		flushSplits := func() {
+			if stdoutSplit != nil {
+				stdoutSplit.Flush()
 			}
-			return err
+			if stderrSplit != nil {
+				stderrSplit.Flush()
+			}
+		}
+
+		if err := cmd.Start(); err != nil {
+			flushSplits()
+			return fmt.Errorf("start %q: %w", args[0], err)
+		}
+
+		done := make(chan error, 1)
+		go func() { done <- cmd.Wait() }()
+
+		select {
+		case <-sigCh:
+			cmd.Process.Signal(syscall.SIGTERM)
+			select {
+			case <-done:
+			case <-time.After(5 * time.Second):
+				cmd.Process.Kill()
+				<-done
+			}
+			flushSplits()
+			return nil
+		case err := <-done:
+			flushSplits()
+			if restart {
+				// Relaunch regardless of exit code — restart is "crash or
+				// clean exit alike" (err is deliberately not inspected here).
+				slog.Info("command exited; restarting")
+				select {
+				case <-sigCh:
+					return nil
+				case <-time.After(crashRestartDelay):
+				}
+				continue
+			}
+			if err != nil {
+				if ee, ok := err.(*exec.ExitError); ok {
+					os.Exit(ee.ExitCode())
+				}
+				return err
+			}
+			return nil
 		}
 	}
-	return nil
 }

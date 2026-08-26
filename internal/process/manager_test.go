@@ -105,6 +105,109 @@ func TestManagerNoProxy(t *testing.T) {
 	}
 }
 
+func TestManagerRestartsOnExit(t *testing.T) {
+	prevDelay := restartDelay
+	restartDelay = 10 * time.Millisecond
+	t.Cleanup(func() { restartDelay = prevDelay })
+
+	tmpFile := t.TempDir() + "/runs.txt"
+	m := New()
+	ctx, cancel := context.WithCancel(context.Background())
+	t.Cleanup(cancel)
+	opts := RunOpts{
+		AssignedPort: 19878,
+		ProxyTimeout: 2 * time.Second,
+		Restart:      true,
+	}
+
+	type result struct {
+		code int
+		err  error
+	}
+	done := make(chan result, 1)
+	go func() {
+		code, err := m.Run(ctx, []string{"sh", "-c", "echo x >> " + tmpFile}, opts)
+		done <- result{code, err}
+	}()
+
+	deadline := time.Now().Add(3 * time.Second)
+	for time.Now().Before(deadline) {
+		data, _ := os.ReadFile(tmpFile)
+		if strings.Count(string(data), "x\n") >= 2 {
+			break
+		}
+		time.Sleep(10 * time.Millisecond)
+	}
+	data, _ := os.ReadFile(tmpFile)
+	if got := strings.Count(string(data), "x\n"); got < 2 {
+		t.Fatalf("expected at least 2 restarts, got %d runs; data=%q", got, string(data))
+	}
+
+	cancel()
+	select {
+	case res := <-done:
+		if res.err != nil {
+			t.Errorf("Run returned err: %v", res.err)
+		}
+		if res.code != 0 {
+			t.Errorf("Run returned code %d, want 0", res.code)
+		}
+	case <-time.After(5 * time.Second):
+		t.Fatal("Run did not return within 5s of cancellation")
+	}
+}
+
+// TestManagerRestartsAndReregisters verifies each restart re-registers with
+// the proxy (not just the initial launch), and that the fixed assigned port
+// — not a previously detected one — is what gets passed to the child on
+// every restart.
+func TestManagerRestartsAndReregisters(t *testing.T) {
+	prevDelay := restartDelay
+	restartDelay = 10 * time.Millisecond
+	t.Cleanup(func() { restartDelay = prevDelay })
+
+	mp := newMockProxy(t)
+	tmpFile := t.TempDir() + "/ports.txt"
+	m := New()
+	ctx, cancel := context.WithCancel(context.Background())
+	t.Cleanup(cancel)
+	opts := RunOpts{
+		ProxyURL:     mp.server.URL,
+		ServerName:   "app/main",
+		AssignedPort: 29876,
+		ProxyTimeout: 2 * time.Second,
+		Restart:      true,
+	}
+
+	done := make(chan struct{})
+	go func() {
+		m.Run(ctx, []string{"sh", "-c", "echo $PORT >> " + tmpFile}, opts)
+		close(done)
+	}()
+
+	deadline := time.Now().Add(3 * time.Second)
+	for time.Now().Before(deadline) && mp.registered.Load() < 2 {
+		time.Sleep(10 * time.Millisecond)
+	}
+	if got := mp.registered.Load(); got < 2 {
+		t.Fatalf("expected at least 2 registrations across restarts, got %d", got)
+	}
+
+	cancel()
+	select {
+	case <-done:
+	case <-time.After(5 * time.Second):
+		t.Fatal("Run did not return within 5s of cancellation")
+	}
+
+	data, _ := os.ReadFile(tmpFile)
+	for _, line := range strings.Fields(string(data)) {
+		if line != "29876" {
+			t.Errorf("PORT env across restarts: got %q, want stable %q", line, "29876")
+		}
+	}
+}
+
 // flushingWriter captures bytes and records whether Flush() was called so we
 // can verify Manager.Run drains custom sinks before returning.
 type flushingWriter struct {
