@@ -1025,7 +1025,7 @@ func TestSuperviseProcessReturnsNilOnCtxCancel(t *testing.T) {
 	bt := &batchTracker{}
 	pw := newPrefixWriter("test", "0;0", os.Stdout)
 	pwErr := newPrefixWriter("test", "0;0", os.Stderr)
-	a := &batchAlloc{name: "svc", svcGroup: "test", svc: config.ServiceConfig{Command: "sh -c 'sleep 30'"}}
+	a := &batchAlloc{name: "svc", svcGroup: "test", svc: config.ServiceConfig{Command: "sh -c 'exec sleep 30'"}}
 	cmd, err := startBatchCommand(bt, a.svc.Command, "", nil, pw, pwErr)
 	if err != nil {
 		t.Fatalf("startBatchCommand: %v", err)
