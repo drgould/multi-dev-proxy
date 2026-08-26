@@ -982,6 +982,107 @@ func TestSuperviseProcessPostStartOnRestart(t *testing.T) {
 	}
 }
 
+func TestSuperviseProcessReturnsErrorOnCrash(t *testing.T) {
+	bt := &batchTracker{}
+	pw := newPrefixWriter("test", "0;0", os.Stdout)
+	pwErr := newPrefixWriter("test", "0;0", os.Stderr)
+	a := &batchAlloc{name: "svc", svcGroup: "test", svc: config.ServiceConfig{Command: "sh -c 'exit 1'"}}
+	cmd, err := startBatchCommand(bt, a.svc.Command, "", nil, pw, pwErr)
+	if err != nil {
+		t.Fatalf("startBatchCommand: %v", err)
+	}
+
+	registerAll := func() ([]string, error) { return nil, nil }
+	runPostStart := func([]string, bool) {}
+	err = superviseProcess(context.Background(), cmd, bt, http.DefaultClient, "", a, nil, registerAll, runPostStart, envexpand.PortMap{}, nil, nil, pw, pwErr)
+	if err == nil {
+		t.Fatal("expected non-nil error from a crashed process, got nil")
+	}
+}
+
+func TestSuperviseProcessReturnsNilOnCleanExit(t *testing.T) {
+	bt := &batchTracker{}
+	pw := newPrefixWriter("test", "0;0", os.Stdout)
+	pwErr := newPrefixWriter("test", "0;0", os.Stderr)
+	a := &batchAlloc{name: "svc", svcGroup: "test", svc: config.ServiceConfig{Command: "sh -c 'exit 0'"}}
+	cmd, err := startBatchCommand(bt, a.svc.Command, "", nil, pw, pwErr)
+	if err != nil {
+		t.Fatalf("startBatchCommand: %v", err)
+	}
+
+	registerAll := func() ([]string, error) { return nil, nil }
+	runPostStart := func([]string, bool) {}
+	err = superviseProcess(context.Background(), cmd, bt, http.DefaultClient, "", a, nil, registerAll, runPostStart, envexpand.PortMap{}, nil, nil, pw, pwErr)
+	if err != nil {
+		t.Fatalf("expected nil error from a clean exit, got %v", err)
+	}
+}
+
+func TestSuperviseProcessReturnsNilOnCtxCancel(t *testing.T) {
+	// A signal-driven shutdown (ctx canceled, process SIGTERM'd) is not a
+	// crash — it must not be attributed to the service as an error, or every
+	// ordinary Ctrl-C would look like every service failed.
+	bt := &batchTracker{}
+	pw := newPrefixWriter("test", "0;0", os.Stdout)
+	pwErr := newPrefixWriter("test", "0;0", os.Stderr)
+	a := &batchAlloc{name: "svc", svcGroup: "test", svc: config.ServiceConfig{Command: "sh -c 'sleep 30'"}}
+	cmd, err := startBatchCommand(bt, a.svc.Command, "", nil, pw, pwErr)
+	if err != nil {
+		t.Fatalf("startBatchCommand: %v", err)
+	}
+
+	registerAll := func() ([]string, error) { return nil, nil }
+	runPostStart := func([]string, bool) {}
+	ctx, cancel := context.WithCancel(context.Background())
+	done := make(chan error, 1)
+	go func() {
+		done <- superviseProcess(ctx, cmd, bt, http.DefaultClient, "", a, nil, registerAll, runPostStart, envexpand.PortMap{}, nil, nil, pw, pwErr)
+	}()
+
+	time.Sleep(50 * time.Millisecond)
+	cancel()
+
+	select {
+	case err := <-done:
+		if err != nil {
+			t.Fatalf("expected nil error on ctx-cancelled shutdown, got %v", err)
+		}
+	case <-time.After(2 * time.Second):
+		t.Fatal("superviseProcess did not return after ctx cancel")
+	}
+}
+
+func TestLaunchBatchServiceSetsStateErrOnProcessCrash(t *testing.T) {
+	rt := batchRuntime{
+		stdout:       os.Stdout,
+		stderr:       os.Stderr,
+		readyTimeout: time.Second,
+		readyPoll:    10 * time.Millisecond,
+		tcpCheck:     func(int) bool { return true },
+	}
+
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.WriteHeader(http.StatusOK)
+	}))
+	defer srv.Close()
+
+	a := batchAlloc{
+		name:         "web",
+		svcGroup:     "main",
+		assignedPort: 40201,
+		svc:          config.ServiceConfig{Command: "sh -c 'exit 1'", Proxy: 3000},
+	}
+
+	bt := &batchTracker{}
+	bt.wg.Add(1)
+	states := depwait.NewStates([]string{"web"})
+	launchBatchService(context.Background(), bt, http.DefaultClient, srv.URL, "c1", "test-repo", &a, states, rt, envexpand.PortMap{}, nil, nil)
+
+	if states["web"].Err == nil {
+		t.Fatal("expected state.Err to be set after the service's process crashed")
+	}
+}
+
 func TestRunSoloNoEnvOverride(t *testing.T) {
 	err := runSolo([]string{"sh", "-c", `test -z "$MDP" && test -z "$PORT"`}, config.LogSplitConfig{})
 	if err != nil {
