@@ -106,6 +106,101 @@
 		setStoredPin(servedBy);
 	}
 
+	// --- Foreign Service Worker takeover ---
+	// mdp registers its own routing SW at scope "/" (registerSW below). A
+	// DIFFERENT app that previously occupied this exact port may have
+	// registered its own SW at that same scope — SW registration is
+	// per-origin and outlives the dev server process that created it, so it
+	// keeps intercepting fetches (and serving from its own Cache Storage)
+	// for whatever app is served here now. Only act when the served app has
+	// actually changed since our last visit (localStorage, unlike the
+	// per-tab sessionStorage pin) — a legitimate SW belonging to the CURRENT
+	// app is left alone rather than nuked on every load. Placed after the
+	// pin-bootstrap block above (not before it) so it never runs on the
+	// stale-pin bounce path, which already `return`s above — that reload is
+	// about to happen anyway, and racing this block's own async reload
+	// against it would be redundant at best.
+	if (servedBy && "serviceWorker" in navigator) {
+		const APP_FINGERPRINT_KEY = `__mdp_last_app_${CURRENT_PORT}`;
+		let lastApp = null;
+		try {
+			lastApp = localStorage.getItem(APP_FINGERPRINT_KEY);
+		} catch { /* ignore */ }
+		if (lastApp !== servedBy) {
+			const markDone = () => {
+				try {
+					localStorage.setItem(APP_FINGERPRINT_KEY, servedBy);
+				} catch { /* ignore */ }
+			};
+			// mdp's own sw.js never touches Cache Storage (it only rewrites
+			// requests by clientId), so it's always safe to wipe every cache
+			// here — nothing that's genuinely ours could be lost.
+			const clearCaches = () =>
+				"caches" in window
+					? caches.keys()
+							.then((keys) => Promise.all(keys.map((k) => caches.delete(k))))
+							.catch(() => { /* ignore */ })
+					: Promise.resolve();
+			navigator.serviceWorker
+				.getRegistrations()
+				.then((regs) => {
+					const foreign = regs.filter((r) => {
+						// getRegistrations() returns every registration for
+						// this origin, not just root-scoped ones — a worker
+						// scoped to e.g. /docs/ can't shadow mdp's own "/"
+						// scope and isn't part of this bug, so only a
+						// registration at the exact root scope is even a
+						// candidate for takeover.
+						let scopePath;
+						try {
+							scopePath = new URL(r.scope).pathname;
+						} catch {
+							scopePath = r.scope;
+						}
+						if (scopePath !== "/") return false;
+						const url =
+							r.active?.scriptURL ||
+							r.waiting?.scriptURL ||
+							r.installing?.scriptURL ||
+							"";
+						return url !== "" && !url.endsWith("/__mdp/sw.js");
+					});
+					if (foreign.length === 0) {
+						clearCaches().then(markDone);
+						return;
+					}
+					Promise.all(foreign.map((r) => r.unregister()))
+						.then(() => clearCaches())
+						.then(() => {
+							// Only mark done once every foreign registration
+							// is actually gone — if a reject slipped through
+							// (shouldn't, but not guaranteed by spec), leave
+							// the fingerprint unset so the next load retries
+							// rather than accepting a still-broken page as
+							// "handled" forever.
+							markDone();
+							// unregister() doesn't evict a SW already
+							// controlling this page — one reload is needed to
+							// actually stop being intercepted. Keyed by the
+							// fingerprint value itself (not a bare one-shot
+							// flag) so a LATER app change in the same tab
+							// still gets its own reload instead of being
+							// silently skipped by an earlier bounce.
+							let bounced = null;
+							try {
+								bounced = sessionStorage.getItem("__mdp_sw_bounced_for");
+								if (bounced !== servedBy) {
+									sessionStorage.setItem("__mdp_sw_bounced_for", servedBy);
+								}
+							} catch { /* ignore */ }
+							if (bounced !== servedBy) window.location.reload();
+						})
+						.catch(() => { /* leave fingerprint unset, retry next load */ });
+				})
+				.catch(() => { /* ignore */ });
+		}
+	}
+
 	// Read fresh rather than reusing urlPin directly: the block above may
 	// have adopted servedBy instead of urlPin (the requested pin turned out
 	// to be unavailable), and sessionStorage reflects whichever it was.
