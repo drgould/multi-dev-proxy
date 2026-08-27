@@ -1,5 +1,12 @@
 # Changelog
 
+## [1.15.1](https://github.com/drgould/multi-dev-proxy/compare/v1.15.0...v1.15.1) (2026-08-27)
+
+
+### Bug Fixes
+
+* close SIGTERM gaps around the run wizard/picker ([#88](https://github.com/drgould/multi-dev-proxy/issues/88)) ([d8297b5](https://github.com/drgould/multi-dev-proxy/commit/d8297b5eed7823d53c45e5c75874276ca6ef7c5b))
+
 ## [1.15.0](https://github.com/drgould/multi-dev-proxy/compare/v1.14.0...v1.15.0) (2026-08-26)
 
 
