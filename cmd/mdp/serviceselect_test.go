@@ -1,6 +1,7 @@
 package main
 
 import (
+	"context"
 	"sort"
 	"testing"
 
@@ -283,7 +284,7 @@ func TestSelectServicesTUINoTTY(t *testing.T) {
 	// go test's stdin/stdout are never a TTY, so this exercises the guard
 	// that prevents the picker from hanging in CI/non-interactive contexts.
 	cfg := serviceSelectTestConfig()
-	if _, err := selectServicesTUI(cfg, nil); err == nil {
+	if _, err := selectServicesTUI(context.Background(), cfg, nil); err == nil {
 		t.Fatal("expected an error when stdin/stdout is not a TTY")
 	}
 }

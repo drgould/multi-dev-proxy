@@ -1,6 +1,7 @@
 package main
 
 import (
+	"context"
 	"fmt"
 	"os"
 	"sort"
@@ -252,10 +253,16 @@ func directDeps(cfg *config.Config, name string) []string {
 // cfg and returns the user's explicit picks (sorted) — not the dependency
 // closure; the caller feeds the result through resolveServiceSelection for
 // the authoritative expansion. preselected seeds the initial checked set.
-// Returns an error if stdin/stdout isn't a TTY or the user cancels.
-func selectServicesTUI(cfg *config.Config, preselected []string) ([]string, error) {
+// Returns an error if stdin/stdout isn't a TTY or the user cancels. ctx is
+// wired into the program the same way as the input wizard (see
+// runInputWizard) so a SIGTERM from the caller's signal.NotifyContext kills
+// the picker instead of leaving it blocked on stdin.
+func selectServicesTUI(ctx context.Context, cfg *config.Config, preselected []string) ([]string, error) {
 	if !term.IsTerminal(int(os.Stdin.Fd())) || !term.IsTerminal(int(os.Stdout.Fd())) {
 		return nil, fmt.Errorf("--select-services requires an interactive terminal (no TTY detected)")
+	}
+	if err := ctx.Err(); err != nil {
+		return nil, err
 	}
 
 	names := make([]string, 0, len(cfg.Services))
@@ -275,7 +282,7 @@ func selectServicesTUI(cfg *config.Config, preselected []string) ([]string, erro
 		}
 	}
 
-	p := tea.NewProgram(newServiceSelectModel(cfg, names, explicit))
+	p := tea.NewProgram(newServiceSelectModel(cfg, names, explicit), tea.WithContext(ctx), tea.WithoutSignalHandler())
 	final, err := p.Run()
 	if err != nil {
 		return nil, fmt.Errorf("service selector: %w", err)

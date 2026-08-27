@@ -1,6 +1,7 @@
 package main
 
 import (
+	"context"
 	"encoding/json"
 	"fmt"
 	"net/http"
@@ -99,7 +100,7 @@ func buildInputSteps(cfg *config.Config, interactive bool, groupsFor func(repo s
 // prompt, since the wizard reads keys from stdin but renders to stderr, and
 // either being redirected breaks it (injectable so tests don't depend on the
 // process's actual streams).
-func resolveInputs(cfg *config.Config, interactive bool, currentGroup string, groupsFor func(repo string) []string, isTTY func() bool) (map[string]string, error) {
+func resolveInputs(ctx context.Context, cfg *config.Config, interactive bool, currentGroup string, groupsFor func(repo string) []string, isTTY func() bool) (map[string]string, error) {
 	if len(cfg.Inputs) == 0 {
 		return nil, nil
 	}
@@ -114,7 +115,14 @@ func resolveInputs(cfg *config.Config, interactive bool, currentGroup string, gr
 	if !isTTY() {
 		return nil, fmt.Errorf("mdp run -i requires an interactive terminal (stdin or stderr is not a TTY)")
 	}
-	answers, err := runInputWizard(steps, currentGroup)
+	// A SIGTERM that lands during buildInputSteps/fetchActiveGroups (both
+	// ctx-blind) must not still start the wizard — tea.Program.Run puts the
+	// terminal in raw mode before it would ever observe an already-cancelled
+	// ctx.
+	if err := ctx.Err(); err != nil {
+		return nil, err
+	}
+	answers, err := runInputWizard(ctx, steps, currentGroup)
 	if err != nil {
 		return nil, err
 	}

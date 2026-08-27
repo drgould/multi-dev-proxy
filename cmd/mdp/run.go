@@ -374,6 +374,15 @@ func runBatchMode(cmd *cobra.Command, controlPort int, groupFlag string, linkMap
 	detachedChild := os.Getenv("_MDP_RUN_DETACHED") != ""
 	restartFlag, _ := cmd.Flags().GetBool("restart")
 
+	// Installed here — before resolveInputs — rather than down by the batch
+	// service launch, so a SIGTERM that arrives while blocked on the
+	// interactive input wizard is caught and handled gracefully instead of
+	// falling through to Go's default (uncaught) signal disposition (exit
+	// 143). ctx is handed to the wizard below and to the shutdown-wait select
+	// further down.
+	ctx, stop := signal.NotifyContext(context.Background(), syscall.SIGINT, syscall.SIGTERM)
+	defer stop()
+
 	// Resolve declared inputs (prompting when -i, else defaults), then
 	// substitute ${inputs.X} refs throughout the config so the env/link
 	// pipeline below never sees an input reference. The detached child can't
@@ -396,9 +405,17 @@ func runBatchMode(cmd *cobra.Command, controlPort int, groupFlag string, linkMap
 			term := hookpty.RealTerm{}
 			return term.IsTerminal(int(os.Stdin.Fd())) && term.IsTerminal(int(os.Stderr.Fd()))
 		}
-		inputs, err = resolveInputs(cfg, interactive, group, func(repo string) []string { return fetchActiveGroups(client, controlURL, repo) }, isTTY)
+		inputs, err = resolveInputs(ctx, cfg, interactive, group, func(repo string) []string { return fetchActiveGroups(client, controlURL, repo) }, isTTY)
 	}
 	if err != nil {
+		// A SIGTERM/SIGINT during the wizard surfaces as a wrapped
+		// tea.ErrProgramKilled here — that's the shutdown path this ctx
+		// exists for, so it must return cleanly (exit 0) like the later
+		// shutdown select does, not as a command failure. A real prompt
+		// error (missing default, no TTY, user esc) still propagates.
+		if ctx.Err() != nil {
+			return nil
+		}
 		return err
 	}
 	if err := applyInputs(cfg, inputs); err != nil {
@@ -414,11 +431,22 @@ func runBatchMode(cmd *cobra.Command, controlPort int, groupFlag string, linkMap
 	// (no TTY) — it receives the already-resolved --service list forwarded by
 	// spawnDetachedRun below instead.
 	if selectServices && !detachedChild {
-		picked, err := selectServicesTUI(cfg, serviceSelection)
+		picked, err := selectServicesTUI(ctx, cfg, serviceSelection)
 		if err != nil {
+			if ctx.Err() != nil {
+				return nil
+			}
 			return err
 		}
 		serviceSelection = picked
+	}
+
+	// Nothing between here and the launch below observes ctx, so a SIGTERM
+	// that lands after the prompts (or a run with no prompts at all) must be
+	// checked explicitly — otherwise it starts services, or a detached
+	// child, that the caller just asked to abort.
+	if ctx.Err() != nil {
+		return nil
 	}
 
 	// Resolve the service selection after inputs are substituted, so its
@@ -499,7 +527,7 @@ func runBatchMode(cmd *cobra.Command, controlPort int, groupFlag string, linkMap
 				return fmt.Errorf("forward resolved service selection to detached run: %w", err)
 			}
 		}
-		return spawnDetachedRun(cmd, repo, group, inputs, expected)
+		return spawnDetachedRun(ctx, cmd, repo, group, inputs, expected)
 	}
 
 	// Stable ports: reuse this branch's previously-assigned ports (when still
@@ -662,10 +690,6 @@ func runBatchMode(cmd *cobra.Command, controlPort int, groupFlag string, linkMap
 	defer hbCancel()
 	startHeartbeat(hbCtx, controlURL, clientID)
 
-	sigCh := make(chan os.Signal, 1)
-	signal.Notify(sigCh, syscall.SIGINT, syscall.SIGTERM)
-	defer signal.Stop(sigCh)
-
 	gone := watchShutdown(controlURL)
 
 	// allDone fires once every launched goroutine has returned for good
@@ -683,7 +707,7 @@ func runBatchMode(cmd *cobra.Command, controlPort int, groupFlag string, linkMap
 
 	var runErr error
 	select {
-	case <-sigCh:
+	case <-ctx.Done():
 	case <-gone:
 		slog.Warn("orchestrator is shutting down")
 	case <-allDone:
@@ -742,7 +766,7 @@ func decodeDetachedInputs() (map[string]string, error) {
 // loop, but detached from the terminal with output redirected to a per-run log
 // file. Resolved inputs are handed to the child via env so it never prompts.
 // Modeled on startDaemon (the orchestrator's own re-exec).
-func spawnDetachedRun(cmd *cobra.Command, repo, group string, inputs map[string]string, expected []string) error {
+func spawnDetachedRun(ctx context.Context, cmd *cobra.Command, repo, group string, inputs map[string]string, expected []string) error {
 	if err := os.MkdirAll(stateDir(), 0755); err != nil {
 		return fmt.Errorf("create state dir: %w", err)
 	}
@@ -818,7 +842,11 @@ func spawnDetachedRun(cmd *cobra.Command, repo, group string, inputs map[string]
 
 	controlPort, _ := cmd.Flags().GetInt("control-port")
 	controlURL := fmt.Sprintf("http://127.0.0.1:%d", controlPort)
-	started := waitForDetachedServices(controlURL, expected, 15*time.Second)
+	// The child is already detached and running independently of this
+	// process by this point, so a SIGTERM here only needs to stop the parent
+	// from blocking up to 15s on readiness polling — it must not, and can't,
+	// unwind the spawn.
+	started := waitForDetachedServices(ctx, controlURL, expected, 15*time.Second)
 
 	fmt.Printf("mdp run started in background (PID %d, group %s)\n", pid, group)
 	switch {
@@ -838,7 +866,7 @@ func spawnDetachedRun(cmd *cobra.Command, repo, group string, inputs map[string]
 // the names that came up. Batch services register through /__mdp/register and
 // surface under /__mdp/proxies — not /__mdp/services, which only the
 // orchestrator's own runner populates.
-func waitForDetachedServices(controlURL string, expected []string, timeout time.Duration) []string {
+func waitForDetachedServices(ctx context.Context, controlURL string, expected []string, timeout time.Duration) []string {
 	if len(expected) == 0 {
 		return nil
 	}
@@ -849,7 +877,7 @@ func waitForDetachedServices(controlURL string, expected []string, timeout time.
 	seen := map[string]bool{}
 	client := &http.Client{Timeout: time.Second}
 	deadline := time.Now().Add(timeout)
-	for time.Now().Before(deadline) && len(seen) < len(want) {
+	for ctx.Err() == nil && time.Now().Before(deadline) && len(seen) < len(want) {
 		resp, err := client.Get(controlURL + "/__mdp/proxies")
 		if err == nil {
 			var proxies []struct {
@@ -868,7 +896,10 @@ func waitForDetachedServices(controlURL string, expected []string, timeout time.
 			}
 		}
 		if len(seen) < len(want) {
-			time.Sleep(300 * time.Millisecond)
+			select {
+			case <-ctx.Done():
+			case <-time.After(300 * time.Millisecond):
+			}
 		}
 	}
 	out := make([]string, 0, len(seen))

@@ -1,6 +1,8 @@
 package main
 
 import (
+	"context"
+	"errors"
 	"net/http"
 	"net/http/httptest"
 	"os"
@@ -221,7 +223,7 @@ func TestResolveInputsDefaults(t *testing.T) {
 		{Name: "a", Default: "x", HasDefault: true},
 		{Name: "b", Default: "y", HasDefault: true},
 	}}
-	vals, err := resolveInputs(cfg, false, "feature-x", nil, nil)
+	vals, err := resolveInputs(context.Background(), cfg, false, "feature-x", nil, nil)
 	if err != nil {
 		t.Fatalf("unexpected error: %v", err)
 	}
@@ -232,7 +234,7 @@ func TestResolveInputsDefaults(t *testing.T) {
 
 func TestResolveInputsMissingDefault(t *testing.T) {
 	cfg := &config.Config{Inputs: config.Inputs{{Name: "a"}}}
-	_, err := resolveInputs(cfg, false, "feature-x", nil, nil)
+	_, err := resolveInputs(context.Background(), cfg, false, "feature-x", nil, nil)
 	if err == nil || !strings.Contains(err.Error(), "has no default") {
 		t.Fatalf("want missing-default error, got %v", err)
 	}
@@ -242,7 +244,7 @@ func TestResolveInputsMissingDefault(t *testing.T) {
 // default, so the non-interactive path resolves it to "" without erroring.
 func TestResolveInputsEmptyDefault(t *testing.T) {
 	cfg := &config.Config{Inputs: config.Inputs{{Name: "a", Default: "", HasDefault: true}}}
-	vals, err := resolveInputs(cfg, false, "feature-x", nil, nil)
+	vals, err := resolveInputs(context.Background(), cfg, false, "feature-x", nil, nil)
 	if err != nil {
 		t.Fatalf("unexpected error: %v", err)
 	}
@@ -255,7 +257,7 @@ func TestResolveInputsEmptyDefault(t *testing.T) {
 // never invoked.
 func TestResolveInputsPromptDisabled(t *testing.T) {
 	cfg := &config.Config{Inputs: config.Inputs{{Name: "a", Default: "x", HasDefault: true, Choices: "groups"}}}
-	vals, err := resolveInputs(cfg, false, "feature-x", func(string) []string {
+	vals, err := resolveInputs(context.Background(), cfg, false, "feature-x", func(string) []string {
 		t.Fatal("groups fetcher must not be called when prompting is disabled")
 		return nil
 	}, nil)
@@ -271,7 +273,7 @@ func TestResolveInputsPromptDisabled(t *testing.T) {
 // pipe — but only when there's actually something left to prompt for.
 func TestResolveInputsRequiresTTY(t *testing.T) {
 	cfg := &config.Config{Inputs: config.Inputs{{Name: "a", Default: "main", HasDefault: true}}}
-	_, err := resolveInputs(cfg, true, "feature-x", nil, func() bool { return false })
+	_, err := resolveInputs(context.Background(), cfg, true, "feature-x", nil, func() bool { return false })
 	if err == nil || !strings.Contains(err.Error(), "interactive terminal") {
 		t.Fatalf("want TTY-required error, got %v", err)
 	}
@@ -284,7 +286,7 @@ func TestResolveInputsSkipAllNoTTYNeeded(t *testing.T) {
 		{Name: "branch", Default: "@{current}", HasDefault: true, Choices: "groups"},
 	}}
 	groupsFor := func(string) []string { return []string{} }
-	vals, err := resolveInputs(cfg, true, "feature-x", groupsFor, func() bool {
+	vals, err := resolveInputs(context.Background(), cfg, true, "feature-x", groupsFor, func() bool {
 		t.Fatal("isTTY must not be called when there's nothing to prompt")
 		return false
 	})
@@ -293,6 +295,20 @@ func TestResolveInputsSkipAllNoTTYNeeded(t *testing.T) {
 	}
 	if vals["branch"] != "@{current}" {
 		t.Fatalf("got %v", vals)
+	}
+}
+
+// An already-cancelled ctx (SIGTERM landing during buildInputSteps/
+// fetchActiveGroups, both ctx-blind) must stop resolveInputs before it ever
+// calls runInputWizard — otherwise tea.Program.Run would put the real
+// process stdin into raw mode and block reading from it, hanging this test.
+func TestResolveInputsCancelledContext(t *testing.T) {
+	cfg := &config.Config{Inputs: config.Inputs{{Name: "a", Default: "x", HasDefault: true}}}
+	ctx, cancel := context.WithCancel(context.Background())
+	cancel()
+	_, err := resolveInputs(ctx, cfg, true, "feature-x", nil, func() bool { return true })
+	if !errors.Is(err, context.Canceled) {
+		t.Fatalf("want context.Canceled, got %v", err)
 	}
 }
 
