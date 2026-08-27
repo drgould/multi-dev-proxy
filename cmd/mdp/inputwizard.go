@@ -1,6 +1,7 @@
 package main
 
 import (
+	"context"
 	"fmt"
 	"os"
 	"strings"
@@ -186,9 +187,23 @@ func (m inputWizardModel) View() tea.View {
 
 // runInputWizard prompts for every step in order in a single Bubble Tea
 // program and returns the collected {name -> value} map. It requires stdin
-// to be a real terminal — the caller must check that first.
-func runInputWizard(steps []inputStep, currentGroup string) (map[string]string, error) {
-	p := tea.NewProgram(newInputWizardModel(steps, currentGroup), tea.WithOutput(os.Stderr))
+// to be a real terminal — the caller must check that first. ctx is wired
+// into the program via tea.WithContext so a cancellation (e.g. the caller's
+// SIGTERM handler) kills the program in place of leaving it blocked on
+// stdin — Run then returns tea.ErrProgramKilled, surfaced below like any
+// other wizard error. Untested at this layer: p.Run() needs a real
+// controlling TTY (it opens /dev/tty when stdin isn't one), so a mid-Run
+// cancellation can't be exercised headlessly — resolveInputs' pre-Run
+// ctx.Err() check and the wiring here are covered instead by
+// TestResolveInputsCancelledContext and manual verification.
+func runInputWizard(ctx context.Context, steps []inputStep, currentGroup string) (map[string]string, error) {
+	// WithoutSignalHandler: tea installs its own SIGINT/SIGTERM handler by
+	// default, which would race the ctx cancellation from the caller's
+	// signal.NotifyContext (see runBatchMode) — tea's handler can quit the
+	// program gracefully (cancelled=false) before p.externalCtx.Err() is
+	// observed, making a SIGTERM look like a normal completed prompt. ctx is
+	// the single source of truth for signal-triggered cancellation here.
+	p := tea.NewProgram(newInputWizardModel(steps, currentGroup), tea.WithOutput(os.Stderr), tea.WithContext(ctx), tea.WithoutSignalHandler())
 	final, err := p.Run()
 	if err != nil {
 		return nil, fmt.Errorf("run input prompt: %w", err)

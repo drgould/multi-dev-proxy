@@ -2084,3 +2084,25 @@ func TestExportBatchEnvFilesOmitsRefsToSkippedServices(t *testing.T) {
 		}
 	}
 }
+
+// A cancelled ctx (the detached child is already running independently by
+// this point — see spawnDetachedRun) must stop the readiness poll promptly
+// instead of blocking out the full timeout.
+func TestWaitForDetachedServicesCtxCancelled(t *testing.T) {
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Write([]byte(`[]`))
+	}))
+	defer srv.Close()
+
+	ctx, cancel := context.WithCancel(context.Background())
+	cancel()
+
+	start := time.Now()
+	got := waitForDetachedServices(ctx, srv.URL, []string{"g/svc"}, 15*time.Second)
+	if elapsed := time.Since(start); elapsed > 2*time.Second {
+		t.Fatalf("waitForDetachedServices took %v, want prompt return on cancelled ctx", elapsed)
+	}
+	if len(got) != 0 {
+		t.Fatalf("got %v, want no services seen", got)
+	}
+}
